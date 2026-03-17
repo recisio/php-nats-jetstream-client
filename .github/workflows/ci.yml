@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      integration-repeat-count:
+        description: Number of repeated integration passes for the soak job
+        required: false
+        default: "2"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      NATS_WAIT_TIMEOUT_SECONDS: "120"
+      SKIP_JWT_FIXTURE_CHECK: true
+      NATS_PROJECT_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          extensions: sockets
+      - uses: ramsey/composer-install@v3
+      - name: JWT Fixtures
+        run: composer fixture:jwt
+      - name: Static Analysis
+        run: composer stan
+      - name: Unit Tests
+        run: composer test:unit
+      - name: End-to-End Tests
+        run: composer test:e2e
