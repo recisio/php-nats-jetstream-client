@@ -1,0 +1,46 @@
+{
+  "name": "idct/php-nats-jetstream-client",
+  "description": "Async-first NATS + JetStream client for PHP 8.2+",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": "^8.2",
+    "amphp/amp": "^3.1",
+    "amphp/socket": "^2.3",
+    "psr/log": "^3.0"
+  },
+  "require-dev": {
+    "behat/behat": "^3.14",
+    "phpunit/phpunit": "^11.0",
+    "phpstan/phpstan": "^2.1",
+    "friendsofphp/php-cs-fixer": "^3.64"
+  },
+  "autoload": {
+    "psr-4": {
+      "IDCT\\NATS\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "IDCT\\NATS\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "test:unit": "phpunit --testsuite unit",
+    "test:integration": "phpunit --testsuite integration",
+    "test:bdd": "bash scripts/run-tests-bdd.sh",
+    "test:bdd:core": "vendor/bin/behat --suite core",
+    "test:e2e": "bash scripts/run-tests-e2e.sh",
+    "test:integration:repeat": "bash scripts/repeat-integration.sh 3",
+    "fixture:jwt": "bash scripts/regenerate-jwt-fixture.sh",
+    "fixture:jwt:check": "bash scripts/check-jwt-fixture.sh",
+    "coverage": "XDEBUG_MODE=coverage phpunit --coverage-text --only-summary-for-coverage-text --colors=never",
+    "coverage:html": "XDEBUG_MODE=coverage phpunit --coverage-html coverage-report --coverage-text --only-summary-for-coverage-text --colors=never",
+    "coverage:check": "bash scripts/check-coverage.sh 90",
+    "stan": "phpstan analyse",
+    "fix": "php-cs-fixer fix"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
