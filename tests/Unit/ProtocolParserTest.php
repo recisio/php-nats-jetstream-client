@@ -105,27 +105,26 @@ final class ProtocolParserTest extends TestCase
     }
 
     /**
+     * @return iterable<string, array{string}>
+     */
+    public static function malformedMessageLineProvider(): iterable
+    {
+        yield 'MSG with only two fields' => ["MSG only-two-fields\r\n"];
+        yield 'MSG with too many fields' => ["MSG s 1 5 6 7\r\n"];
+        yield 'HMSG with too few fields' => ["HMSG too short\r\n"];
+        yield 'HMSG with too many fields' => ["HMSG s 1 2 3 4 5 6\r\n"];
+    }
+
+    /**
      * Verifies malformed MSG/HMSG lines are rejected.
      */
-    public function testRejectsMalformedMessageLines(): void
+    #[\PHPUnit\Framework\Attributes\DataProvider('malformedMessageLineProvider')]
+    public function testRejectsMalformedMessageLines(string $frameLine): void
     {
-        $cases = [
-            "MSG only-two-fields\r\n",
-            "MSG s 1 5 6 7\r\n",
-            "HMSG too short\r\n",
-            "HMSG s 1 2 3 4 5 6\r\n",
-        ];
+        $parser = new ProtocolParser();
 
-        foreach ($cases as $frameLine) {
-            $parser = new ProtocolParser();
-
-            try {
-                $parser->push($frameLine);
-                self::fail('Expected malformed frame to throw: ' . $frameLine);
-            } catch (ProtocolException) {
-                self::addToAssertionCount(1);
-            }
-        }
+        $this->expectException(ProtocolException::class);
+        $parser->push($frameLine);
     }
 
     /**
