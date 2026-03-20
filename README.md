@@ -103,6 +103,20 @@ Current scheduling note: scheduled messages are implemented with NATS scheduler 
 
 Use `IDCT\\NATS\\JetStream\\Schedule::at(...)` or `Schedule::atTimestamp(...)` to generate valid `@at` expressions.
 
+## 🚀 This project looks for funding. Love my work? Support it! 💖
+
+* ☕ **Buy me a coffee**: https://buymeacoffee.com/idct
+
+* 💝 **Sponsor**: https://github.com/sponsors/ideaconnect
+
+* 🪙 **BTC**: bc1qntms755swm3nplsjpllvx92u8wdzrvs474a0hr
+
+* 💎 **ETH**: 0x08E27250c91540911eD27F161572aFA53Ca24C0a
+
+* ⚡ **TRX**: TVXWaU4ScNV9RBYX5RqFmySuB4zF991QaE
+
+* 🚀 **LTC**: LN5ApP1Yhk4iU9Bo1tLU8eHX39zDzzyZxB
+
 ## Usage
 
 ### Authentication Options
