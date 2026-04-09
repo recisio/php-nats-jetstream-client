@@ -22,8 +22,8 @@ final class KeyValueBucketTest extends TestCase
         $deletePayload = '{"success":true}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($deletePayload), $deletePayload),
         ]);
@@ -54,8 +54,8 @@ final class KeyValueBucketTest extends TestCase
         $deleteAck = '{"stream":"KV_cfg","seq":2,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($putAck), $putAck),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($getPayload), $getPayload),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($deleteAck), $deleteAck),
@@ -90,8 +90,8 @@ final class KeyValueBucketTest extends TestCase
         $missingPayload = '{"error":{"code":404,"description":"message not found"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($missingPayload), $missingPayload),
         ]);
 
@@ -109,8 +109,8 @@ final class KeyValueBucketTest extends TestCase
     public function testInvalidKeyRejected(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -130,8 +130,8 @@ final class KeyValueBucketTest extends TestCase
         $updateAck = '{"stream":"KV_cfg","seq":3,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($updateAck), $updateAck),
         ]);
 
@@ -153,8 +153,8 @@ final class KeyValueBucketTest extends TestCase
         $purgeAck = '{"stream":"KV_cfg","seq":4,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($purgeAck), $purgeAck),
         ]);
 
@@ -176,8 +176,8 @@ final class KeyValueBucketTest extends TestCase
         $streamInfo = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":7,"bytes":128,"subjects":{"$KV.cfg.theme":3}}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),
         ]);
 
@@ -205,8 +205,8 @@ final class KeyValueBucketTest extends TestCase
         $mEmail = sprintf('{"message":{"subject":"$KV.cfg.email","seq":4,"data":"%s"}}', base64_encode('b@example.com'));
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($mUsername), $mUsername),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($mEmail), $mEmail),
@@ -227,8 +227,8 @@ final class KeyValueBucketTest extends TestCase
         $putAck = '{"stream":"KV_cfg","seq":1,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($putAck), $putAck),
         ]);
 
@@ -242,8 +242,8 @@ final class KeyValueBucketTest extends TestCase
     public function testPutRejectsKeyWithWildcard(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -257,8 +257,8 @@ final class KeyValueBucketTest extends TestCase
     public function testPutRejectsKeyWithTab(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -276,8 +276,8 @@ final class KeyValueBucketTest extends TestCase
         $createPayload = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
@@ -306,8 +306,8 @@ final class KeyValueBucketTest extends TestCase
     public function testWatchDispatchesEntries(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG \$KV.cfg.theme 1 4\r\nblue\r\n",
         ]);
 
@@ -336,8 +336,8 @@ final class KeyValueBucketTest extends TestCase
         $errorPayload = '{"error":{"code":500,"description":"internal error"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
@@ -363,8 +363,8 @@ final class KeyValueBucketTest extends TestCase
         );
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
         ]);
 
@@ -381,8 +381,8 @@ final class KeyValueBucketTest extends TestCase
     public function testBucketNameHelpers(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -396,8 +396,8 @@ final class KeyValueBucketTest extends TestCase
     public function testUpdateRejectsNonPositiveExpectedRevision(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -413,8 +413,8 @@ final class KeyValueBucketTest extends TestCase
         $payload = '{"message":{"subject":"$KV.cfg.theme","seq":6,"data":"%%%not-base64%%%"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
         ]);
 
@@ -433,8 +433,8 @@ final class KeyValueBucketTest extends TestCase
         $message = '{"message":{"subject":"$KV.cfg.theme","seq":6,"data":"%%%not-base64%%%"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($message), $message),
         ]);
@@ -453,8 +453,8 @@ final class KeyValueBucketTest extends TestCase
         $streamInfo = '{"config":{"name":"KV_cfg"},"state":{"messages":11,"bytes":128}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),
         ]);
 
@@ -472,8 +472,8 @@ final class KeyValueBucketTest extends TestCase
         $errorPayload = '{"error":{"code":500,"description":"delete failed"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 

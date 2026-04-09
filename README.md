@@ -103,6 +103,10 @@ Current scheduling note: scheduled messages are implemented with NATS scheduler 
 
 Use `IDCT\\NATS\\JetStream\\Schedule::at(...)` or `Schedule::atTimestamp(...)` to generate valid `@at` expressions.
 
+## TODO
+
+- Align `ProtocolParser` control-line parsing more closely with the NATS wire spec by accepting case-insensitive operation names and tab-delimited field separators.
+
 ## 🚀 This project looks for funding. Love my work? Support it! 💖
 
 * ☕ **Buy me a coffee**: https://buymeacoffee.com/idct

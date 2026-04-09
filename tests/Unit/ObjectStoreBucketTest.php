@@ -24,8 +24,8 @@ final class ObjectStoreBucketTest extends TestCase
         $deletePayload = '{"success":true}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($deletePayload), $deletePayload),
         ]);
@@ -73,8 +73,8 @@ final class ObjectStoreBucketTest extends TestCase
         $deleteConsumerPayload = '{"success":true}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($chunkAck), $chunkAck),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($metaAck), $metaAck),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($metaGetPayload), $metaGetPayload),
@@ -129,8 +129,8 @@ final class ObjectStoreBucketTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($deleteAck), $deleteAck),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($deletedMetaPayload), $deletedMetaPayload),
         ]);
@@ -155,8 +155,8 @@ final class ObjectStoreBucketTest extends TestCase
     public function testInvalidObjectNameRejected(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -240,8 +240,8 @@ final class ObjectStoreBucketTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($seq1ChunkPayload), $seq1ChunkPayload),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($seq2LogoPayload), $seq2LogoPayload),
@@ -281,8 +281,8 @@ final class ObjectStoreBucketTest extends TestCase
         $metaAck = '{"stream":"OBJ_assets","seq":2,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($chunkAck), $chunkAck),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($metaAck), $metaAck),
         ]);
@@ -297,8 +297,8 @@ final class ObjectStoreBucketTest extends TestCase
     public function testPutRejectsNameWithWildcard(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -312,8 +312,8 @@ final class ObjectStoreBucketTest extends TestCase
     public function testPutRejectsNameWithTab(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -354,8 +354,8 @@ final class ObjectStoreBucketTest extends TestCase
 
         // info() request subscribes SID 1, then create ephemeral consumer + pull fetch + delete.
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.any 1 %d\r\n%s\r\n", strlen($metaResponse), $metaResponse),
             sprintf("MSG _INBOX.any 2 %d\r\n%s\r\n", strlen($ephemeralConsumerPayload), $ephemeralConsumerPayload),
             sprintf("MSG _INBOX.JS.FETCH.a 3 %d\r\n%s\r\n", strlen($corruptedData), $corruptedData),
@@ -398,8 +398,8 @@ final class ObjectStoreBucketTest extends TestCase
         $deleteConsumerPayload = '{"success":true}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($metaPayload), $metaPayload),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ephemeralConsumerPayload), $ephemeralConsumerPayload),
             "MSG _INBOX.JS.FETCH.a 3 5\r\nhello\r\n",
@@ -430,8 +430,8 @@ final class ObjectStoreBucketTest extends TestCase
         $missing = '{"error":{"code":404,"description":"message not found"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($missing), $missing),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($missing), $missing),
         ]);
@@ -461,8 +461,8 @@ final class ObjectStoreBucketTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG \$O.assets.M.logo.txt 1 %d\r\n%s\r\n", strlen((string) $metadata), (string) $metadata),
         ]);
 
@@ -485,8 +485,8 @@ final class ObjectStoreBucketTest extends TestCase
     public function testBucketSubjectHelpers(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -518,8 +518,8 @@ final class ObjectStoreBucketTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($badBase64), $badBase64),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($badJson), $badJson),
@@ -543,8 +543,8 @@ final class ObjectStoreBucketTest extends TestCase
         $errorPayload = '{"error":{"code":500,"description":"sequence read failed"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
@@ -565,8 +565,8 @@ final class ObjectStoreBucketTest extends TestCase
         $ack4 = '{"stream":"OBJ_assets","seq":4,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ack1), $ack1),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ack2), $ack2),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($ack3), $ack3),
@@ -607,8 +607,8 @@ final class ObjectStoreBucketTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($deletedPayload), $deletedPayload),
         ]);
 

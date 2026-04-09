@@ -796,8 +796,8 @@ final class NatsClientIntegrationTest extends TestCase
         $this->requireIntegrationEnabled();
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nhe",
             "llo\r\n",
         ]);
@@ -826,8 +826,8 @@ final class NatsClientIntegrationTest extends TestCase
         $this->requireIntegrationEnabled();
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nfirst\r\nMSG updates 1 6\r\nsecond\r\n",
         ]);
 
@@ -1121,13 +1121,13 @@ final class NatsClientIntegrationTest extends TestCase
         $transport = new FlakyTransport(
             readQueuesByConnection: [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     '__THROW__',
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     "MSG {$subject} 1 5\r\nhello\r\n",
                 ],
             ],
@@ -1179,12 +1179,12 @@ final class NatsClientIntegrationTest extends TestCase
         $transport = new FlakyTransport(
             readQueuesByConnection: [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ],
             connectFailures: 0,
@@ -1226,8 +1226,8 @@ final class NatsClientIntegrationTest extends TestCase
 
             /** @var list<string> */
             private array $readQueue = [
-                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                'PONG',
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
             ];
 
             public function connect(string $dsn, int $timeoutMs): Future
@@ -1307,13 +1307,13 @@ final class NatsClientIntegrationTest extends TestCase
             /** @var array<int, list<string>> */
             private array $readQueues = [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     '__THROW__',
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ];
 

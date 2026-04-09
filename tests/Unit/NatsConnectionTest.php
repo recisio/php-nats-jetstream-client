@@ -31,8 +31,8 @@ final class NatsConnectionTest extends TestCase
     public function testConnectTransitionsToOpenAndSendsConnectAndPing(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -58,10 +58,10 @@ final class NatsConnectionTest extends TestCase
     public function testConnectHandlesOkAndPingBeforePong(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            '+OK',
-            'PING',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "+OK\r\n",
+            "PING\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
@@ -72,13 +72,42 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
-     * Verifies missing PONG eventually fails and closes connection state.
+     * Verifies that an unknown control-line op during handshake raises a ConnectionException
+     * wrapping the parser's ProtocolException.
+     *
+     * When the parser receives a CRLF-terminated line it does not recognise, it throws a
+     * ProtocolException which the connection layer wraps in a ConnectionException.
+     */
+    public function testConnectFailsOnUnknownControlLineDuringHandshake(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "UNKNOWN\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Unsupported control frame: UNKNOWN');
+
+        try {
+            $connection->connect()->await();
+        } finally {
+            self::assertSame(ConnectionState::Closed, $connection->state());
+        }
+    }
+
+    /**
+     * Verifies that an incomplete chunk without CRLF exhausts the poll budget and times out.
+     *
+     * When the transport delivers a partial line that never terminates, the parser buffers it
+     * indefinitely and the handshake loop runs out of polls, resulting in a ConnectionException.
      */
     public function testConnectFailsWhenNoPongAndMovesToClosed(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'UNKNOWN',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            'INCOMPLETE_NO_CRLF',
         ]);
 
         $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
@@ -99,8 +128,8 @@ final class NatsConnectionTest extends TestCase
     public function testConnectFailsOnServerErrLine(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            '-ERR Authentication Violation',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "-ERR Authentication Violation\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
@@ -117,8 +146,8 @@ final class NatsConnectionTest extends TestCase
     public function testConnectIncludesJwtSignatureFromInfoNonce(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"nonce":"n-123"}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"nonce":"n-123"}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -167,8 +196,8 @@ final class NatsConnectionTest extends TestCase
     public function testSubscribeAndUnsubscribeSendProtocolCommands(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(), $transport);
@@ -190,8 +219,8 @@ final class NatsConnectionTest extends TestCase
     public function testProcessIncomingDispatchesMsgToSubscriber(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nhello\r\n",
         ]);
 
@@ -223,8 +252,8 @@ final class NatsConnectionTest extends TestCase
         $merged = $headerPayload . $bodyPayload;
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "HMSG updates 1 12 17\r\n{$merged}\r\n",
         ]);
 
@@ -251,8 +280,8 @@ final class NatsConnectionTest extends TestCase
     public function testProcessIncomingRespondsToServerPing(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "PING\r\n",
         ]);
 
@@ -270,8 +299,8 @@ final class NatsConnectionTest extends TestCase
     public function testSlowConsumerDropOldestPolicy(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nfirst\r\nMSG updates 1 6\r\nsecond\r\n",
         ]);
 
@@ -299,8 +328,8 @@ final class NatsConnectionTest extends TestCase
     public function testSlowConsumerDropNewestPolicy(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nfirst\r\nMSG updates 1 6\r\nsecond\r\n",
         ]);
 
@@ -328,8 +357,8 @@ final class NatsConnectionTest extends TestCase
     public function testSlowConsumerErrorPolicyThrows(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nfirst\r\nMSG updates 1 6\r\nsecond\r\n",
         ]);
 
@@ -355,8 +384,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestReturnsFirstReplyMessage(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG _INBOX.any 1 5\r\nhello\r\n",
         ]);
 
@@ -377,8 +406,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestTimesOutWithoutReply(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(), $transport);
@@ -400,8 +429,8 @@ final class NatsConnectionTest extends TestCase
     public function testDrainStopsWhenHandlerUnsubscribesItself(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nfirst\r\nMSG updates 1 6\r\nsecond\r\n",
         ]);
 
@@ -428,8 +457,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestUsesConfiguredInboxPrefix(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG TMPBOX.any 1 5\r\nhello\r\n",
         ]);
 
@@ -449,8 +478,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestRejectsNonPositiveTimeout(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(), $transport);
@@ -468,8 +497,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestCanBeCancelledAndCleansUpSubscription(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(), $transport);
@@ -495,13 +524,13 @@ final class NatsConnectionTest extends TestCase
         $transport = new FlakyTransport(
             readQueuesByConnection: [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     '__THROW__',
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     "MSG updates 1 5\r\nhello\r\n",
                 ],
             ],
@@ -543,8 +572,8 @@ final class NatsConnectionTest extends TestCase
         $transport = new FlakyTransport(
             readQueuesByConnection: [
                 [
-                    'INFO {"server_id":"S3","server_name":"n3","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S3","server_name":"n3","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ],
             connectFailures: 1,
@@ -574,8 +603,8 @@ final class NatsConnectionTest extends TestCase
     public function testProcessIncomingHandlesServerPongSilently(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "PONG\r\n",
         ]);
 
@@ -597,8 +626,8 @@ final class NatsConnectionTest extends TestCase
     public function testProcessIncomingUpdatesServerInfoFromAsyncInfoFrame(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":64,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":64,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "INFO {\"server_id\":\"S1\",\"server_name\":\"n1\",\"version\":\"2.12.1\",\"jetstream\":true,\"max_payload\":128,\"headers\":true}\r\n",
         ]);
 
@@ -627,8 +656,8 @@ final class NatsConnectionTest extends TestCase
     public function testProcessIncomingIgnoresRecoverableServerErrFrame(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "-ERR 'Permissions Violation for Publish to updates'\r\n",
         ]);
 
@@ -650,8 +679,8 @@ final class NatsConnectionTest extends TestCase
     public function testPingTimerSendsPingAtInterval(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         // Use a very short interval (1 second) and let the event loop tick.
@@ -681,8 +710,8 @@ final class NatsConnectionTest extends TestCase
     public function testPingTimerDisabledWhenIntervalIsZero(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $options = new NatsOptions(
@@ -709,8 +738,8 @@ final class NatsConnectionTest extends TestCase
     public function testDisconnectCancelsPingTimer(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $options = new NatsOptions(
@@ -739,8 +768,8 @@ final class NatsConnectionTest extends TestCase
     public function testPingTimerClosesWhenMaxPingsExceededAndReconnectFails(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -764,8 +793,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishRejectsOversizedPayload(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":64,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":64,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -786,8 +815,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishAcceptsPayloadAtExactLimit(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":64,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":64,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -807,8 +836,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishWithHeadersRejectsOversizedTotal(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":32,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":32,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -829,8 +858,8 @@ final class NatsConnectionTest extends TestCase
     public function testConnectPayloadIncludesNoResponders(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -851,8 +880,8 @@ final class NatsConnectionTest extends TestCase
         $headerBytes = strlen($noRespondersHeader);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "HMSG _INBOX.any 1 {$headerBytes} {$headerBytes}\r\n{$noRespondersHeader}\r\n",
         ]);
 
@@ -873,8 +902,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishRejectsEmptySubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -891,8 +920,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishRejectsSubjectWithWhitespace(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -909,8 +938,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishRejectsWildcardSubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -927,8 +956,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishRejectsEmptyTokenInSubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -945,8 +974,8 @@ final class NatsConnectionTest extends TestCase
     public function testPublishRejectsFullWildcardToken(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -963,8 +992,8 @@ final class NatsConnectionTest extends TestCase
     public function testSubscribeAcceptsWildcardSubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -983,8 +1012,8 @@ final class NatsConnectionTest extends TestCase
     public function testSubscribeRejectsGreaterThanNotInLastToken(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -1001,8 +1030,8 @@ final class NatsConnectionTest extends TestCase
     public function testSubscribeRejectsPartialWildcardToken(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(
@@ -1021,8 +1050,8 @@ final class NatsConnectionTest extends TestCase
     public function testDrainUnsubscribesAllAndCloses(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "PONG\r\n",
         ]);
 
@@ -1059,8 +1088,8 @@ final class NatsConnectionTest extends TestCase
     public function testDrainDeliversBufferedMessagesBeforeClosing(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG events 1 5\r\nhello\r\n",
             "PONG\r\n",
         ]);
@@ -1086,8 +1115,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestTimeoutPreservesOriginalExceptionDuringCleanup(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(), $transport);
@@ -1106,8 +1135,8 @@ final class NatsConnectionTest extends TestCase
     public function testMalformedHmsgRejectsInvalidHeaderBoundary(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "HMSG updates 1 20 10\r\n1234567890\r\n",
         ]);
 
@@ -1154,8 +1183,8 @@ final class NatsConnectionTest extends TestCase
     public function testRequestWithHeadersReturnsReply(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG _INBOX.any 1 2\r\nok\r\n",
         ]);
 
@@ -1199,8 +1228,8 @@ final class NatsConnectionTest extends TestCase
     public function testProcessIncomingThrowsOnErrFrame(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "-ERR 'Permissions Violation'\r\n",
         ]);
 
@@ -1215,8 +1244,8 @@ final class NatsConnectionTest extends TestCase
     public function testConnectUsesDefaultServerWhenListEmpty(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(servers: []), $transport);
@@ -1228,8 +1257,8 @@ final class NatsConnectionTest extends TestCase
     public function testSubscribeRejectsEmbeddedWildcardToken(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
@@ -1254,12 +1283,12 @@ final class NatsConnectionTest extends TestCase
             /** @var array<int, list<string>> */
             private array $queues = [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ];
 
@@ -1330,12 +1359,12 @@ final class NatsConnectionTest extends TestCase
             /** @var array<int, list<string>> */
             private array $queues = [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ];
 
@@ -1405,12 +1434,12 @@ final class NatsConnectionTest extends TestCase
             /** @var array<int, list<string>> */
             private array $queues = [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ];
 
@@ -1471,18 +1500,18 @@ final class NatsConnectionTest extends TestCase
         $transport = new FlakyTransport(
             readQueuesByConnection: [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     '__THROW__',
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     "-ERR 'Authorization Violation'\r\n",
                 ],
                 [
-                    'INFO {"server_id":"S3","server_name":"n3","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S3","server_name":"n3","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                     "MSG updates 1 5\r\nhello\r\n",
                 ],
             ],
@@ -1534,12 +1563,12 @@ final class NatsConnectionTest extends TestCase
             /** @var array<int, list<string>> */
             private array $queues = [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
                 [
-                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ];
 
@@ -1596,5 +1625,84 @@ final class NatsConnectionTest extends TestCase
         self::assertCount(2, $transport->connectCalls);
 
         $connection->disconnect()->await();
+    }
+
+    /**
+     * Verifies handshake succeeds when the INFO frame arrives in multiple TCP segments.
+     *
+     * Simulates a NATS 2.10+ server whose INFO frame (containing the xkey field) is large
+     * enough to be split by TCP into two reads. The first read delivers a partial JSON payload
+     * with no CRLF terminator; the second read delivers the remainder with the terminator.
+     * The ProtocolParser must buffer the first chunk and complete the frame on the second read.
+     */
+    public function testConnectHandlesFragmentedInfoFrame(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.10.0","jetstream":true,"max_payload":1048576,"headers":true,"xkey":"XNEYS5JGCB',
+            "ID6OKSWDBK6DRYIBYQX3NWJQQSXMVDGU3DPK\"}\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false),
+            $transport,
+        );
+
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
+    /**
+     * Verifies handshake succeeds when a re-INFO frame during the PONG phase is complete.
+     *
+     * This is the non-fragmented counterpart to the fragmented re-INFO regression test and
+     * ensures awaitInitialPong() still handles a normal server INFO update before the final
+     * PONG arrives.
+     */
+    public function testConnectHandlesNonFragmentedReInfoDuringPongPhase(): void
+    {
+        $transport = new FakeTransport([
+            "INFO {\"server_id\":\"S1\",\"server_name\":\"n1\",\"version\":\"2.10.0\",\"jetstream\":true,\"max_payload\":1048576,\"headers\":true}\r\n",
+            "INFO {\"server_id\":\"S1\",\"server_name\":\"n1\",\"version\":\"2.10.1\",\"jetstream\":true,\"max_payload\":2097152,\"headers\":true,\"xkey\":\"XNEYS5JGCBID6OKSWDBK6DRYIBYQX3NWJQQSXMVDGU3DPK\"}\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false),
+            $transport,
+        );
+
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertSame(2097152, $connection->serverInfo()?->maxPayload);
+    }
+
+    /**
+     * Verifies handshake succeeds when a re-INFO frame during the PONG phase is fragmented.
+     *
+     * After the initial INFO exchange the server may send a second INFO (e.g. after TLS upgrade)
+     * during the PONG phase. If that re-INFO contains the xkey field it can also be split across
+     * TCP segments. The partial chunk must be buffered by the ProtocolParser and not parsed
+     * directly via the raw-chunk fallback, which would receive truncated JSON and fail.
+     */
+    public function testConnectHandlesFragmentedReInfoDuringPongPhase(): void
+    {
+        $transport = new FakeTransport([
+            "INFO {\"server_id\":\"S1\",\"server_name\":\"n1\",\"version\":\"2.10.0\",\"jetstream\":true,\"max_payload\":1048576,\"headers\":true}\r\n",
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.10.0","jetstream":true,"max_payload":1048576,"headers":true,"xkey":"XNEYS5JGCB',
+            "ID6OKSWDBK6DRYIBYQX3NWJQQSXMVDGU3DPK\"}\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false),
+            $transport,
+        );
+
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
     }
 }
