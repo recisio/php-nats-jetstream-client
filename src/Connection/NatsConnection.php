@@ -610,34 +610,6 @@ final class NatsConnection
             }
 
             $frames = $this->parser->push($chunk);
-            if ($frames === []) {
-                $line = trim($chunk);
-
-                if ($line === '' || $line === '+OK') {
-                    continue;
-                }
-
-                if ($line === 'PING') {
-                    $this->transport->write($this->codec->encodePong())->await();
-                    continue;
-                }
-
-                if (str_starts_with($line, 'INFO ')) {
-                    $this->serverInfo = $this->codec->parseServerInfo($line);
-
-                    continue;
-                }
-
-                if ($line === 'PONG') {
-                    return;
-                }
-
-                if (str_starts_with($line, '-ERR')) {
-                    throw new ConnectionException('Server error during connect: ' . $line);
-                }
-
-                continue;
-            }
 
             foreach ($frames as $frame) {
                 if ($frame->type === ProtocolFrameType::Ok) {
@@ -683,28 +655,6 @@ final class NatsConnection
             }
 
             $frames = $this->parser->push($chunk);
-            if ($frames === []) {
-                $line = trim($chunk);
-                if (str_starts_with($line, 'INFO ')) {
-                    return $this->codec->parseServerInfo($line);
-                }
-
-                if ($line === 'PING') {
-                    $this->transport->write($this->codec->encodePong())->await();
-
-                    continue;
-                }
-
-                if ($line === '' || $line === '+OK' || $line === 'PONG') {
-                    continue;
-                }
-
-                if (str_starts_with($line, '-ERR')) {
-                    throw new ConnectionException('Server error during connect: ' . $line);
-                }
-
-                continue;
-            }
 
             foreach ($frames as $frame) {
                 if ($frame->type === ProtocolFrameType::Info && $frame->infoPayload !== null) {

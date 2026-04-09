@@ -34,8 +34,8 @@ final class JetStreamContextTest extends TestCase
         $accountPayload = '{"memory":11,"storage":22,"streams":3,"consumers":4}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.any 1 %d\r\n%s\r\n", strlen($accountPayload), $accountPayload),
         ]);
 
@@ -55,8 +55,8 @@ final class JetStreamContextTest extends TestCase
     public function testStreamCrud(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG _INBOX.a 1 52\r\n{\"config\":{\"name\":\"ORDERS\",\"subjects\":[\"orders.*\"]}}\r\n",
             "MSG _INBOX.b 2 52\r\n{\"config\":{\"name\":\"ORDERS\",\"subjects\":[\"orders.*\"]}}\r\n",
             "MSG _INBOX.c 3 16\r\n{\"success\":true}\r\n",
@@ -85,8 +85,8 @@ final class JetStreamContextTest extends TestCase
     public function testJetStreamApiErrorMapping(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG _INBOX.a 1 48\r\n{\"error\":{\"code\":404,\"description\":\"not found\"}}\r\n",
         ]);
 
@@ -166,8 +166,8 @@ final class JetStreamContextTest extends TestCase
         $deletePayload = '{"success":true}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($infoPayload), $infoPayload),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($deletePayload), $deletePayload),
@@ -198,8 +198,8 @@ final class JetStreamContextTest extends TestCase
         $ackPayload = '{"stream":"ORDERS","seq":42,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
@@ -222,8 +222,8 @@ final class JetStreamContextTest extends TestCase
         $errorPayload = '{"error":{"code":500,"description":"publish failed"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
@@ -244,8 +244,8 @@ final class JetStreamContextTest extends TestCase
         $streamPayload = '{"config":{"name":"SCHED","subjects":["schedules.>","events.>"]}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
         ]);
 
@@ -269,8 +269,8 @@ final class JetStreamContextTest extends TestCase
         $ackPayload = '{"stream":"SCHED","seq":7,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
@@ -301,8 +301,8 @@ final class JetStreamContextTest extends TestCase
     public function testPublishScheduledRejectsUnsupportedPattern(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -331,8 +331,8 @@ final class JetStreamContextTest extends TestCase
         $ackPayload = '{"stream":"SCHED","seq":8,"duplicate":false}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
@@ -360,8 +360,8 @@ final class JetStreamContextTest extends TestCase
         $errorPayload = '{"error":{"code":503,"description":"scheduler down"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
@@ -389,8 +389,8 @@ final class JetStreamContextTest extends TestCase
         $deliveryPayload = '{"event":"created"}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($deliveryPayload), $deliveryPayload),
         ]);
 
@@ -410,8 +410,8 @@ final class JetStreamContextTest extends TestCase
     public function testFetchNextRejectsInvalidExpiresMs(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -431,8 +431,8 @@ final class JetStreamContextTest extends TestCase
         $deliveryPayload = '{"event":"created"}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 reply.ack %d\r\n%s\r\n", strlen($deliveryPayload), $deliveryPayload),
         ]);
 
@@ -469,8 +469,8 @@ final class JetStreamContextTest extends TestCase
     public function testNakWithDelayRejectsInvalidDelay(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -489,8 +489,8 @@ final class JetStreamContextTest extends TestCase
     public function testAckRequiresReplySubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -511,8 +511,8 @@ final class JetStreamContextTest extends TestCase
         $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC","deliver_subject":"deliver.proc"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
@@ -536,8 +536,8 @@ final class JetStreamContextTest extends TestCase
         $createPayload = '{"stream_name":"ORDERS","name":"EP1","config":{"deliver_subject":"deliver.ep"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
@@ -564,8 +564,8 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
             sprintf(
                 "HMSG deliver.proc 2 fc.reply %d %d\r\n%s\r\n",
@@ -610,8 +610,8 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
             sprintf(
                 "HMSG deliver.proc 2 hb.reply %d %d\r\n%s\r\n",
@@ -649,8 +649,8 @@ final class JetStreamContextTest extends TestCase
         $createPayload = '{"stream_name":"ORDERS","name":"E1","config":{"ack_policy":"explicit"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
@@ -675,8 +675,8 @@ final class JetStreamContextTest extends TestCase
         $createPayload = '{"stream_name":"ORDERS","name":"E_PUSH","config":{"deliver_subject":"deliver.ephemeral"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
             "MSG deliver.ephemeral 2 5\r\nhello\r\n",
         ]);
@@ -707,8 +707,8 @@ final class JetStreamContextTest extends TestCase
     public function testCreateStreamRejectsEmptySubjects(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -724,8 +724,8 @@ final class JetStreamContextTest extends TestCase
         $streamPayload = '{"config":{"name":"MIRROR","subjects":[],"mirror":{"name":"ORIGIN"}}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
         ]);
 
@@ -745,8 +745,8 @@ final class JetStreamContextTest extends TestCase
     public function testCreateConsumerRejectsEmptyFilterSubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -762,8 +762,8 @@ final class JetStreamContextTest extends TestCase
         $malformedPayload = 'NOT_JSON{';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.any 1 %d\r\n%s\r\n", strlen($malformedPayload), $malformedPayload),
         ]);
 
@@ -782,8 +782,8 @@ final class JetStreamContextTest extends TestCase
         $responsePayload = '{"config":{"name":"ORDERS","subjects":["orders.>","events.>"]}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($responsePayload), $responsePayload),
         ]);
 
@@ -804,8 +804,8 @@ final class JetStreamContextTest extends TestCase
         $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC","max_deliver":5}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
@@ -833,8 +833,8 @@ final class JetStreamContextTest extends TestCase
         $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC","deliver_subject":"deliver.proc","ack_policy":"none"}}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
@@ -854,8 +854,8 @@ final class JetStreamContextTest extends TestCase
         $msg2 = '{"event":"second"}';
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg1), $msg1),
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg2), $msg2),
         ]);
@@ -877,8 +877,8 @@ final class JetStreamContextTest extends TestCase
     public function testFetchBatchRejectsInvalidBatch(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -896,8 +896,8 @@ final class JetStreamContextTest extends TestCase
         $headerBytes = strlen($statusHeaders);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg1), $msg1),
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
@@ -918,8 +918,8 @@ final class JetStreamContextTest extends TestCase
         $headerBytes = strlen($controlHeaders);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $controlHeaders),
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg1), $msg1),
         ]);
@@ -939,8 +939,8 @@ final class JetStreamContextTest extends TestCase
         $headerBytes = strlen($statusHeaders);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
 
@@ -959,8 +959,8 @@ final class JetStreamContextTest extends TestCase
         $headerBytes = strlen($statusHeaders);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
 
@@ -981,8 +981,8 @@ final class JetStreamContextTest extends TestCase
     public function testPauseConsumerSendsCorrectPayload(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse('{"paused":true,"pause_until":"2026-12-01T00:00:00Z"}'),
         ]);
 
@@ -1001,8 +1001,8 @@ final class JetStreamContextTest extends TestCase
     public function testResumeConsumerSendsEmptyBody(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse('{"paused":false}'),
         ]);
 
@@ -1034,8 +1034,8 @@ final class JetStreamContextTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse($consumerCreateResponse),
         ]);
 
@@ -1058,8 +1058,8 @@ final class JetStreamContextTest extends TestCase
     public function testPurgeStream(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse('{"purged":42}'),
         ]);
 
@@ -1075,8 +1075,8 @@ final class JetStreamContextTest extends TestCase
     public function testPurgeStreamWithSubjectFilter(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse('{"purged":10}'),
         ]);
 
@@ -1099,8 +1099,8 @@ final class JetStreamContextTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse($listPayload),
         ]);
 
@@ -1124,8 +1124,8 @@ final class JetStreamContextTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse($listPayload),
         ]);
 
@@ -1149,8 +1149,8 @@ final class JetStreamContextTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse($listPayload),
         ]);
 
@@ -1177,8 +1177,8 @@ final class JetStreamContextTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             $this->jsOkResponse($msgPayload),
         ]);
 
@@ -1260,8 +1260,8 @@ final class JetStreamContextTest extends TestCase
     public function testHandlePushControlMessageRepliesToJetStreamFlowControlSubject(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
         $client = new NatsClient(new NatsOptions(), $transport);
         $client->connect()->await();

@@ -25,8 +25,8 @@ final class SubscriptionQueueTest extends TestCase
     private function infoAndPong(): array
     {
         return [
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ];
     }
 

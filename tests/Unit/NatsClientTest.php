@@ -21,8 +21,8 @@ final class NatsClientTest extends TestCase
     public function testClientConnectAndPublishDelegatesToConnection(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(
@@ -46,8 +46,8 @@ final class NatsClientTest extends TestCase
     public function testClientSubscribeAndProcessIncoming(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG updates 1 5\r\nhello\r\n",
         ]);
 
@@ -71,8 +71,8 @@ final class NatsClientTest extends TestCase
     public function testClientRequestReturnsReply(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG _INBOX.any 1 5\r\nhello\r\n",
         ]);
 
@@ -90,8 +90,8 @@ final class NatsClientTest extends TestCase
     public function testClientRequestCanBeCancelled(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -111,8 +111,8 @@ final class NatsClientTest extends TestCase
     {
         $replyPayload = '{"ok":true}';
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             sprintf("MSG _INBOX.any 1 %d\r\n%s\r\n", strlen($replyPayload), $replyPayload),
         ]);
 
@@ -135,9 +135,9 @@ final class NatsClientTest extends TestCase
     public function testClientServiceFactoryDisconnectAndDrain(): void
     {
         $transportA = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "PONG\r\n",
         ]);
 
         $clientA = new NatsClient(new NatsOptions(), $transportA);

@@ -43,8 +43,8 @@ final class ServiceTest extends TestCase
     public function testStartRegistersSubscriptions(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -72,8 +72,8 @@ final class ServiceTest extends TestCase
     public function testDiscoveryReplies(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG \$SRV.PING 1 _INBOX.ping 0\r\n\r\n",
             "MSG \$SRV.INFO.echo 5 _INBOX.info 0\r\n\r\n",
             "MSG \$SRV.STATS.echo 8 _INBOX.stats 0\r\n\r\n",
@@ -105,8 +105,8 @@ final class ServiceTest extends TestCase
     public function testEndpointHandlesRequests(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req 5\r\nhello\r\n",
         ]);
 
@@ -130,8 +130,8 @@ final class ServiceTest extends TestCase
     public function testStopUnsubscribesAll(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -153,8 +153,8 @@ final class ServiceTest extends TestCase
     public function testGroupedEndpointHierarchy(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.v1.echo 13 _INBOX.req 5\r\nhello\r\n",
         ]);
 
@@ -186,8 +186,8 @@ final class ServiceTest extends TestCase
     public function testGroupJoinHandlesEmptySegments(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -212,8 +212,8 @@ final class ServiceTest extends TestCase
     public function testSchemaDiscoveryResponse(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG \$SRV.SCHEMA.echo 11 _INBOX.schema 0\r\n\r\n",
         ]);
 
@@ -241,8 +241,8 @@ final class ServiceTest extends TestCase
     public function testStatsIncludeDetailedMetrics(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req1 5\r\nhello\r\n",
             "MSG svc.echo 13 _INBOX.req2 4\r\nboom\r\n",
         ]);
@@ -284,8 +284,8 @@ final class ServiceTest extends TestCase
     public function testResetClearsStats(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req1 5\r\nhello\r\n",
         ]);
 
@@ -315,8 +315,8 @@ final class ServiceTest extends TestCase
     public function testRequestValidatorCanRejectRequests(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req1 5\r\nhello\r\n",
         ]);
 
@@ -360,8 +360,8 @@ final class ServiceTest extends TestCase
         $totalBytes = strlen($merged);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "HMSG svc.echo 13 _INBOX.req {$headerBytes} {$totalBytes}\r\n{$merged}\r\n",
         ]);
 
@@ -394,8 +394,8 @@ final class ServiceTest extends TestCase
     public function testWithSchemaValidatorUsesAdapter(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req1 16\r\n{\"id\":\"invalid\"}\r\n",
         ]);
 
@@ -433,8 +433,8 @@ final class ServiceTest extends TestCase
         $totalBytes = strlen($merged);
 
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "HMSG svc.echo 13 _INBOX.req {$headerBytes} {$totalBytes}\r\n{$merged}\r\n",
         ]);
 
@@ -460,8 +460,8 @@ final class ServiceTest extends TestCase
     public function testEndpointAcceptsObjectHandlerAdapter(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req 5\r\nhello\r\n",
         ]);
 
@@ -484,8 +484,8 @@ final class ServiceTest extends TestCase
     public function testEndpointAcceptsClassStringHandlerAdapter(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req 5\r\nhello\r\n",
         ]);
 
@@ -508,8 +508,8 @@ final class ServiceTest extends TestCase
     public function testEndpointRejectsInvalidObjectHandlerAdapter(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -528,8 +528,8 @@ final class ServiceTest extends TestCase
     public function testRunProcessesAndStopsOnTimeout(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
             "MSG svc.echo 13 _INBOX.req 5\r\nhello\r\n",
         ]);
 
@@ -553,8 +553,8 @@ final class ServiceTest extends TestCase
     public function testRunSupportsExternalCancellation(): void
     {
         $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-            'PONG',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);

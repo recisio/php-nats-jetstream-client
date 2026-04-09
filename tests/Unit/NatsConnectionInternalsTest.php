@@ -138,8 +138,8 @@ final class NatsConnectionInternalsTest extends TestCase
         $transport = new FlakyTransport(
             readQueuesByConnection: [
                 [
-                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
-                    'PONG',
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
                 ],
             ],
             connectFailures: 10,
@@ -180,7 +180,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitServerInfoThrowsWhenInfoNeverArrives(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport(['PONG', '+OK', 'PING', '', '', '', '', '']));
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport(["PONG\r\n", "+OK\r\n", "PING\r\n", '', '', '', '', '']));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Expected INFO during connect');
@@ -189,7 +189,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitInitialPongThrowsWhenPongNeverArrives(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport(['+OK', 'PING', '', 'INFO {}', '', '', '', '']));
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport(["+OK\r\n", "PING\r\n", '', 'INFO {}', '', '', '', '']));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Expected PONG after CONNECT');
@@ -223,7 +223,7 @@ final class NatsConnectionInternalsTest extends TestCase
     {
         $queue = array_merge(
             array_fill(0, 12, ''),
-            ['INFO {"server_id":"S9","server_name":"n9","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}'],
+            ["INFO {\"server_id\":\"S9\",\"server_name\":\"n9\",\"version\":\"2.12.0\",\"jetstream\":true,\"max_payload\":1048576,\"headers\":true}\r\n"],
         );
 
         $connection = new NatsConnection(new NatsOptions(connectTimeoutMs: 100), new FakeTransport($queue));
@@ -235,7 +235,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitInitialPongAllowsMoreThanEightPollsBeforePongArrives(): void
     {
-        $queue = array_merge(array_fill(0, 12, '+OK'), ['PONG']);
+        $queue = array_merge(array_fill(0, 12, "+OK\r\n"), ["PONG\r\n"]);
 
         $connection = new NatsConnection(new NatsOptions(connectTimeoutMs: 100), new FakeTransport($queue));
 
@@ -245,8 +245,8 @@ final class NatsConnectionInternalsTest extends TestCase
     public function testAwaitServerInfoRespondsToPingBeforeInfo(): void
     {
         $transport = new FakeTransport([
-            'PING',
-            'INFO {"server_id":"S4","server_name":"n4","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
+            "PING\r\n",
+            'INFO {"server_id":"S4","server_name":"n4","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
         ]);
         $connection = new NatsConnection(new NatsOptions(connectTimeoutMs: 100), $transport);
 
@@ -259,7 +259,7 @@ final class NatsConnectionInternalsTest extends TestCase
     public function testAwaitServerInfoParsesInfoLine(): void
     {
         $connection = new NatsConnection(new NatsOptions(), new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}',
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
         ]));
 
         $info = $this->invokePrivate($connection, 'awaitServerInfo');
@@ -283,7 +283,7 @@ final class NatsConnectionInternalsTest extends TestCase
     public function testAwaitInitialPongThrowsOnErrLine(): void
     {
         $connection = new NatsConnection(new NatsOptions(), new FakeTransport([
-            '-ERR Permissions Violation',
+            "-ERR Permissions Violation\r\n",
         ]));
 
         $this->expectException(ConnectionException::class);
