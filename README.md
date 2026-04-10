@@ -61,7 +61,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Configuration Option Mapping](#configuration-option-mapping)
 - [Performance Benchmark Recipe](#performance-benchmark-recipe)
 - [Testing](#testing)
-- [Contributing](#contributing)
+- [Contributing and contributors](#contributing-and-contributors)
 - [Current Test Baseline](#current-test-baseline)
 
 ## Features
@@ -1395,7 +1395,7 @@ Contributions should keep changes focused and paired with the narrowest useful v
 - Review `AGENTS.md` for repository structure, standards, and continuation guidance before larger changes.
 
 Many thanks for all the contributions:
-* [@amirdzhanyane-bit](https://www.github.com/amirdzhanyane-bit) [Protocol messages fragmentation issue][https://github.com/ideaconnect/php-nats-jetstream-client/pull/1]
+* [@amirdzhanyane-bit](https://www.github.com/amirdzhanyane-bit) [Protocol messages fragmentation issue](https://github.com/ideaconnect/php-nats-jetstream-client/issues/2)
 
 ## Current Test Baseline
 
