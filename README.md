@@ -1384,7 +1384,7 @@ composer test:integration:repeat
 
 The CI workflow also exposes a manual `workflow_dispatch` soak job named `integration-soak`. When triggered from GitHub Actions, it runs `scripts/repeat-integration.sh` with a configurable repeat count on PHP 8.5.
 
-## Contributing
+## Contributing and contributors
 
 Contributions should keep changes focused and paired with the narrowest useful verification.
 
@@ -1393,6 +1393,9 @@ Contributions should keep changes focused and paired with the narrowest useful v
 - Do not hand-edit generated JWT fixture files under `build/nats/jwt/`; regenerate them with `composer fixture:jwt`.
 - Run `composer stan` for code changes and `composer fix` when style adjustments are needed.
 - Review `AGENTS.md` for repository structure, standards, and continuation guidance before larger changes.
+
+Many thanks for all the contributions:
+* [@amirdzhanyane-bit](https://www.github.com/amirdzhanyane-bit) [Protocol messages fragmentation issue][https://github.com/ideaconnect/php-nats-jetstream-client/pull/1]
 
 ## Current Test Baseline
 
