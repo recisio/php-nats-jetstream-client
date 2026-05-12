@@ -567,12 +567,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -589,7 +589,7 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -655,12 +655,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -741,12 +741,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -813,12 +813,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -835,7 +835,7 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -897,12 +897,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -919,7 +919,7 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public const INFO_LINE = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
@@ -978,12 +978,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -1000,7 +1000,7 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public const INFO_LINE = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";

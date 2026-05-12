@@ -8669,6 +8669,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $e;
         }), $transport);
         $client->connect()->await();
+        $before = self::countRepeatTimers();
 
         $js = $client->jetStream();
         $sid = $js->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, 'events.>')->await();
@@ -8713,7 +8714,7 @@ final class JetStreamContextTest extends TestCase
             static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'recreate failed'),
         )), 'teardown failures on a stopped consumer must not surface as a terminal recreate error');
         // No watchdog was re-armed for the never-installed instance.
-        self::assertSame(0, self::countRepeatTimers(), 'a stopped consumer must not re-arm a heartbeat watchdog');
+        self::assertSame($before, self::countRepeatTimers(), 'a stopped consumer must not re-arm a heartbeat watchdog');
 
         $transport->throwOnWriteContaining = null;
         $client->disconnect()->await();
@@ -9799,6 +9800,7 @@ final class JetStreamContextTest extends TestCase
 
         $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1000), $transport);
         $client->connect()->await();
+        $before = self::countRepeatTimers();
 
         // Zero: not a positive interval -> no watchdog.
         $sidZero = $client->jetStream()->subscribePushConsumer(
@@ -9809,7 +9811,7 @@ final class JetStreamContextTest extends TestCase
             null,
             ['idle_heartbeat' => 0],
         )->await();
-        self::assertSame(0, self::countRepeatTimers(), 'idle_heartbeat=0 must not arm a watchdog timer');
+        self::assertSame($before, self::countRepeatTimers(), 'idle_heartbeat=0 must not arm a watchdog timer');
 
         // Numeric string: not an int -> no watchdog, and no type error from the extractor.
         $sidString = $client->jetStream()->subscribePushConsumer(
@@ -9820,7 +9822,7 @@ final class JetStreamContextTest extends TestCase
             null,
             ['idle_heartbeat' => '40000000'],
         )->await();
-        self::assertSame(0, self::countRepeatTimers(), 'a string idle_heartbeat must not arm a watchdog timer');
+        self::assertSame($before, self::countRepeatTimers(), 'a string idle_heartbeat must not arm a watchdog timer');
 
         self::assertGreaterThan(0, $sidZero);
         self::assertGreaterThan($sidZero, $sidString);
@@ -9845,6 +9847,7 @@ final class JetStreamContextTest extends TestCase
 
         $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1000), $transport);
         $client->connect()->await();
+        $before = self::countRepeatTimers();
 
         $sid = $client->jetStream()->subscribeEphemeralPushConsumer(
             'ORDERS',
@@ -9854,7 +9857,7 @@ final class JetStreamContextTest extends TestCase
             ['idle_heartbeat' => 50_000_000],
         )->await();
 
-        self::assertSame(1, self::countRepeatTimers(), 'an idle_heartbeat ephemeral push subscription must arm exactly one watchdog timer');
+        self::assertSame($before + 1, self::countRepeatTimers(), 'an idle_heartbeat ephemeral push subscription must arm exactly one watchdog timer');
 
         $client->unsubscribe($sid)->await();
         $client->disconnect()->await();
@@ -10279,6 +10282,7 @@ final class JetStreamContextTest extends TestCase
         // heartbeat makes the watchdog tick (and its defunct discovery) prompt.
         $client = new NatsClient(new NatsOptions(requestTimeoutMs: 2000, pingIntervalSeconds: 0), $transport);
         $client->connect()->await();
+        $before = self::countRepeatTimers();
 
         $js = $client->jetStream();
         $received = [];
@@ -10355,7 +10359,7 @@ final class JetStreamContextTest extends TestCase
         // Teardown, not install: the fresh inbox is released and the just-created instance deleted.
         self::assertStringContainsString("UNSUB {$freshSid}\r\n", $written, 'the never-installed fresh inbox must be unsubscribed');
         self::assertStringContainsString('$JS.API.CONSUMER.DELETE.EVENTS.ORDX', $written, 'the created-but-not-installed instance must be best-effort deleted');
-        self::assertSame(0, self::countRepeatTimers(), 'no watchdog may be re-armed for a defunct consumer');
+        self::assertSame($before, self::countRepeatTimers(), 'no watchdog may be re-armed for a defunct consumer');
 
         // And nothing may deliver through the fresh inbox: a post-release frame on it is inert.
         $transport->pushReadChunk("MSG deliver.fresh {$freshSid} \$JS.ACK.EVENTS.ORDX.1.9.1.0.0 5\r\nnope!\r\n");

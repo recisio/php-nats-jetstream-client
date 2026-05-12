@@ -38,17 +38,17 @@ final class NatsConnection_5MutationTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -62,7 +62,7 @@ final class NatsConnection_5MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
     }

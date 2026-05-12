@@ -1,5 +1,7 @@
 # IDCT PHP NATS JetStream Client
 
+This repository is a `recisio`-maintained fork intended to keep the client usable on PHP 8.1.
+
 [![codecov](https://codecov.io/gh/ideaconnect/php-nats-jetstream-client/graph/badge.svg?token=A816f4EXon)](https://codecov.io/gh/ideaconnect/php-nats-jetstream-client)
 [![CI](https://github.com/ideaconnect/php-nats-jetstream-client/actions/workflows/ci.yml/badge.svg)](https://github.com/ideaconnect/php-nats-jetstream-client/actions/workflows/ci.yml)
 [![Made in the EU](https://raw.githubusercontent.com/ideaconnect/made-in-the-eu/main/software-badge/made-in-the-eu.svg)](https://github.com/ideaconnect/made-in-the-eu)

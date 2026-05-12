@@ -120,7 +120,7 @@ final class ProtocolCodec
     {
         if (class_exists(InstalledVersions::class)) {
             try {
-                $version = InstalledVersions::getPrettyVersion('idct/php-nats-jetstream-client');
+                $version = InstalledVersions::getPrettyVersion('recisio/php-nats-jetstream-client');
                 if ($version !== null && $version !== '') {
                     return $version;
                 }

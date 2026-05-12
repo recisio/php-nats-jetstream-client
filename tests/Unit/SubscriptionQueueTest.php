@@ -82,12 +82,12 @@ final class SubscriptionQueueTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -112,7 +112,7 @@ final class SubscriptionQueueTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
