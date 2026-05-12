@@ -1,9 +1,11 @@
-# IDCT PHP NATS JetStream Client
+# Recisio PHP NATS JetStream Client
 
-[![codecov](https://codecov.io/gh/ideaconnect/php-nats-jetstream-client/graph/badge.svg?token=A816f4EXon)](https://codecov.io/gh/ideaconnect/php-nats-jetstream-client)
-[![CI](https://github.com/ideaconnect/php-nats-jetstream-client/actions/workflows/ci.yml/badge.svg)](https://github.com/ideaconnect/php-nats-jetstream-client/actions/workflows/ci.yml)
+This repository is a `recisio`-maintained fork intended to keep the client usable on PHP 8.1.
 
-Async-first NATS and JetStream client for PHP 8.2+ with first-class support for core NATS messaging, JetStream, KeyValue, ObjectStore, and NATS microservices.
+[![codecov](https://codecov.io/gh/recisio/php-nats-jetstream-client/graph/badge.svg?token=A816f4EXon)](https://codecov.io/gh/recisio/php-nats-jetstream-client)
+[![CI](https://github.com/recisio/php-nats-jetstream-client/actions/workflows/ci.yml/badge.svg)](https://github.com/recisio/php-nats-jetstream-client/actions/workflows/ci.yml)
+
+Async-first NATS and JetStream client for PHP 8.1+ with first-class support for core NATS messaging, JetStream, KeyValue, ObjectStore, and NATS microservices.
 
 The library is built around Amp and provides a typed, high-level API for connection management, publish/subscribe, request/reply, reconnect handling, authentication flows, and JetStream resource management without falling back to blocking I/O.
 
@@ -14,12 +16,12 @@ It is intended for real application use, including service-to-service messaging,
 Install from Packagist:
 
 ```bash
-composer require idct/php-nats-jetstream-client
+composer require recisio/php-nats-jetstream-client
 ```
 
-Package name: `idct/php-nats-jetstream-client`
+Package name: `recisio/php-nats-jetstream-client`
 
-Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
+Source repository: https://github.com/recisio/php-nats-jetstream-client
 
 ## Index
 

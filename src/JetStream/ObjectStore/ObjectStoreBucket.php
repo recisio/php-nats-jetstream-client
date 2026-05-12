@@ -131,7 +131,7 @@ final class ObjectStoreBucket
                 return new ObjectData($info, null);
             }
 
-            $expectedChunks = $info->chunks ?? 1;
+            $expectedChunks = $info->chunks;
             $assembled = '';
 
             $consumerName = null;
