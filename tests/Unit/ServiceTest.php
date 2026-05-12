@@ -1264,7 +1264,7 @@ final class ServiceTest extends TestCase
 
         $handled = false;
         $service = $client->service('fire', '1.0.0')
-            ->addEndpoint('fire', 'svc.fire', static function (NatsMessage $m) use (&$handled): null {
+            ->addEndpoint('fire', 'svc.fire', static function (NatsMessage $m) use (&$handled): mixed {
                 $handled = true;
 
                 return null;

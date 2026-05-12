@@ -756,7 +756,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -781,7 +781,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -840,7 +840,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -865,7 +865,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -3872,7 +3872,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -3896,7 +3896,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -3959,7 +3959,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -3983,7 +3983,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -4876,7 +4876,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -4901,7 +4901,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
         };
 
@@ -4982,7 +4982,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
@@ -5070,7 +5070,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): null => null);
+                return async(static fn(): mixed => null);
             }
 
             public function write(string $bytes): Future
