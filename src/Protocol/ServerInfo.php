@@ -18,6 +18,7 @@ final class ServerInfo
      * @param bool $jetStreamEnabled Whether INFO advertises JetStream support.
      * @param int $maxPayload Maximum accepted payload bytes (`max_payload`) for PUB/HPUB commands.
      * @param bool $headersSupported Whether server supports NATS headers (`headers` capability).
+     * @param bool $tlsRequired Whether the server requires the client to upgrade the connection to TLS (`tls_required`).
      * @param string|null $nonce Optional nonce challenge from INFO used for JWT/NKey signature auth.
      */
     public function __construct(
@@ -27,6 +28,7 @@ final class ServerInfo
         public readonly bool $jetStreamEnabled,
         public readonly int $maxPayload,
         public readonly bool $headersSupported,
+        public readonly bool $tlsRequired = false,
         public readonly ?string $nonce = null,
     ) {
     }
@@ -45,6 +47,7 @@ final class ServerInfo
             jetStreamEnabled: (bool) ($payload['jetstream'] ?? false),
             maxPayload: (int) ($payload['max_payload'] ?? 0),
             headersSupported: (bool) ($payload['headers'] ?? false),
+            tlsRequired: (bool) ($payload['tls_required'] ?? false),
             nonce: isset($payload['nonce']) ? (string) $payload['nonce'] : null,
         );
     }

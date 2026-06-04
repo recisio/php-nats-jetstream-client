@@ -53,6 +53,62 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies the connection upgrades to TLS after reading INFO when the server advertises
+     * `tls_required` and the client is not in handshake-first mode (upgrade-after-INFO mode).
+     */
+    public function testConnectUpgradesToTlsAfterInfoWhenServerRequiresIt(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertSame([5000], $transport->setupTlsCalls);
+    }
+
+    /**
+     * Verifies the connection does not call setupTls again when the client is configured for
+     * handshake-first TLS — the transport already performed TLS during connect().
+     */
+    public function testConnectSkipsPostInfoTlsUpgradeWhenHandshakeFirstIsEnabled(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false, tlsHandshakeFirst: true),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertSame([], $transport->setupTlsCalls);
+    }
+
+    /**
+     * Verifies the connection never calls setupTls when the server does not advertise tls_required.
+     */
+    public function testConnectDoesNotUpgradeToTlsWhenServerDoesNotRequireIt(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertSame([], $transport->setupTlsCalls);
+    }
+
+    /**
      * Verifies handshake accepts +OK and responds to server PING before final PONG.
      */
     public function testConnectHandlesOkAndPingBeforePong(): void
@@ -1300,6 +1356,12 @@ final class NatsConnectionTest extends TestCase
                 });
             }
 
+            public function setupTls(int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function write(string $bytes): \Amp\Future
             {
                 return async(function () use ($bytes): void {
@@ -1376,6 +1438,12 @@ final class NatsConnectionTest extends TestCase
                 });
             }
 
+            public function setupTls(int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function write(string $bytes): \Amp\Future
             {
                 return async(function () use ($bytes): void {
@@ -1448,6 +1516,12 @@ final class NatsConnectionTest extends TestCase
                 return async(function () use ($dsn, $timeoutMs): void {
                     $this->connected++;
                     $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+                });
+            }
+
+            public function setupTls(int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
                 });
             }
 
@@ -1577,6 +1651,12 @@ final class NatsConnectionTest extends TestCase
                 return async(function () use ($dsn, $timeoutMs): void {
                     $this->connected++;
                     $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+                });
+            }
+
+            public function setupTls(int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
                 });
             }
 

@@ -1,6 +1,6 @@
 # Recisio PHP NATS JetStream Client
 
-This repository is a `recisio`-maintained fork intended to keep the client usable on PHP 8.1.
+This repository is a `recisio`-maintained fork of `ideaconnect/php-nats-jetstream-client`, intended to keep the client usable on PHP 8.1.
 
 [![codecov](https://codecov.io/gh/recisio/php-nats-jetstream-client/graph/badge.svg?token=A816f4EXon)](https://codecov.io/gh/recisio/php-nats-jetstream-client)
 [![CI](https://github.com/recisio/php-nats-jetstream-client/actions/workflows/ci.yml/badge.svg)](https://github.com/recisio/php-nats-jetstream-client/actions/workflows/ci.yml)

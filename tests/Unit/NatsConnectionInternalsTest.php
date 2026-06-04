@@ -417,6 +417,12 @@ final class NatsConnectionInternalsTest extends TestCase
                 });
             }
 
+            public function setupTls(int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function write(string $bytes): \Amp\Future
             {
                 return async(static function () use ($bytes): void {
@@ -492,6 +498,12 @@ final class NatsConnectionInternalsTest extends TestCase
     {
         $transport = new class () implements TransportInterface {
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function setupTls(int $timeoutMs): \Amp\Future
             {
                 return async(static function (): void {
                 });

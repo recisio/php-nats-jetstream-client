@@ -14,6 +14,9 @@ final class FakeTransport implements TransportInterface
     /** @var list<string> */
     public array $connectCalls = [];
 
+    /** @var list<int> */
+    public array $setupTlsCalls = [];
+
     /** @var list<string> */
     public array $writes = [];
 
@@ -35,6 +38,16 @@ final class FakeTransport implements TransportInterface
     {
         return async(function () use ($dsn, $timeoutMs): void {
             $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+        });
+    }
+
+    /**
+     * Records TLS upgrade requests for assertions.
+     */
+    public function setupTls(int $timeoutMs): Future
+    {
+        return async(function () use ($timeoutMs): void {
+            $this->setupTlsCalls[] = $timeoutMs;
         });
     }
 

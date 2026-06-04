@@ -21,6 +21,8 @@ use function Amp\Socket\connect;
 final class AmpSocketTransport implements TransportInterface
 {
     private ?Socket $socket = null;
+    private bool $tlsContextConfigured = false;
+    private bool $tlsNegotiated = false;
 
     /**
      * @param NatsOptions $options Client connection options controlling TLS and socket behavior.
@@ -31,6 +33,11 @@ final class AmpSocketTransport implements TransportInterface
 
     /**
      * Connects to a server DSN using Amp socket transport.
+     *
+     * Performs the TLS handshake immediately when the client is configured for handshake-first mode
+     * (`NatsOptions::tlsHandshakeFirst`). Otherwise, only the TCP connection is established and the
+     * caller must call {@see setupTls()} after reading the server INFO frame when it advertises
+     * `tls_required`.
      */
     public function connect(string $dsn, int $timeoutMs): Future
     {
@@ -38,11 +45,31 @@ final class AmpSocketTransport implements TransportInterface
             // Amp expects timeout in seconds, while options use milliseconds.
             $context = (new ConnectContext())->withConnectTimeout(max(1, $timeoutMs) / 1000);
             $context = $this->withTlsContext($context, $dsn);
+            $this->tlsContextConfigured = $context->getTlsContext() !== null;
+            $this->tlsNegotiated = false;
             $this->socket = connect($this->normalizeSocketUri($dsn), $context);
 
-            if ($context->getTlsContext() !== null) {
+            if ($this->tlsContextConfigured && $this->options->tlsHandshakeFirst) {
                 $this->socket->setupTls(new TimeoutCancellation(max(1, $timeoutMs) / 1000));
+                $this->tlsNegotiated = true;
             }
+        });
+    }
+
+    /**
+     * Upgrades the active socket to TLS when the server INFO requested it.
+     *
+     * No-op when no TLS context is configured or when TLS has already been negotiated
+     * during {@see connect()} via handshake-first mode.
+     */
+    public function setupTls(int $timeoutMs): Future
+    {
+        return async(function () use ($timeoutMs): void {
+            if ($this->socket === null || !$this->tlsContextConfigured || $this->tlsNegotiated) {
+                return;
+            }
+            $this->socket->setupTls(new TimeoutCancellation(max(1, $timeoutMs) / 1000));
+            $this->tlsNegotiated = true;
         });
     }
 

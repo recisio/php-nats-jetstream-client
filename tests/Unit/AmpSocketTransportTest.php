@@ -107,6 +107,26 @@ final class AmpSocketTransportTest extends TestCase
     }
 
     /**
+     * Verifies setupTls is a safe no-op when no socket has been connected.
+     */
+    public function testSetupTlsIsNoOpWithoutSocket(): void
+    {
+        $transport = new AmpSocketTransport(new NatsOptions(tlsRequired: true));
+        $transport->setupTls(100)->await();
+        self::assertTrue(true);
+    }
+
+    /**
+     * Verifies setupTls is a safe no-op when no TLS context was configured for the connection.
+     */
+    public function testSetupTlsIsNoOpWhenTlsNotRequired(): void
+    {
+        $transport = new AmpSocketTransport(new NatsOptions(tlsRequired: false));
+        $transport->setupTls(100)->await();
+        self::assertTrue(true);
+    }
+
+    /**
      * Verifies tls:// URIs are rewritten to tcp:// for Amp while preserving TLS semantics.
      */
     public function testNormalizeSocketUriRewritesTlsScheme(): void

@@ -468,6 +468,10 @@ final class NatsConnection
 
         $this->serverInfo = $this->awaitServerInfo();
 
+        if ($this->serverInfo->tlsRequired && !$this->options->tlsHandshakeFirst) {
+            $this->transport->setupTls($this->options->connectTimeoutMs)->await();
+        }
+
         $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce))->await();
         $this->transport->write($this->codec->encodePing())->await();
 

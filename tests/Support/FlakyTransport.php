@@ -60,6 +60,15 @@ final class FlakyTransport implements TransportInterface
     }
 
     /**
+     * No-op TLS upgrade for the flaky transport (TLS is never exercised in reconnect tests).
+     */
+    public function setupTls(int $timeoutMs): Future
+    {
+        return async(function (): void {
+        });
+    }
+
+    /**
      * Records outgoing protocol writes.
      */
     public function write(string $bytes): Future
