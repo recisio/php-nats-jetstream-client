@@ -2040,6 +2040,116 @@ final class NatsConnectionTest extends TestCase
         $connection->disconnect()->await();
     }
 
+    public function testProcessIncomingSkipsWhenAnotherReadIsInProgress(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        // Simulate a read already owning the socket (e.g. the heartbeat self-read).
+        (new \ReflectionProperty($connection, 'readInProgress'))->setValue($connection, true);
+
+        // processIncoming() must not start a second overlapping read; it reports zero frames.
+        self::assertSame(0, $connection->processIncoming()->await());
+    }
+
+    public function testHeartbeatReadSkippedWhenAnotherReadIsInProgress(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        (new \ReflectionProperty($connection, 'readInProgress'))->setValue($connection, true);
+
+        // The heartbeat self-read must yield to the in-flight read rather than colliding with it.
+        (new \ReflectionMethod($connection, 'consumeHeartbeatResponse'))->invoke($connection);
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
+    public function testHeartbeatReadHandlesEmptyErrorAndFatalFrames(): void
+    {
+        $transport = new class () implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            public string $mode = 'empty';
+            /** @var list<string> */
+            private array $queue = [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            ];
+
+            public function connect(string $dsn, int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function write(string $bytes): \Amp\Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                    if ($bytes === "PING\r\n") {
+                        $this->queue[] = "PONG\r\n";
+                    }
+                });
+            }
+
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
+            {
+                return async(function (): string {
+                    if ($this->queue !== []) {
+                        return (string) array_shift($this->queue);
+                    }
+
+                    return match ($this->mode) {
+                        'throw' => throw new \RuntimeException('transient read error'),
+                        'fatal' => "-ERR 'fatal boom'\r\n",
+                        default => '',
+                    };
+                });
+            }
+
+            public function close(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+        };
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        $invoke = new \ReflectionMethod($connection, 'consumeHeartbeatResponse');
+
+        $transport->mode = 'empty';
+        $invoke->invoke($connection); // empty read returns early
+
+        $transport->mode = 'throw';
+        $invoke->invoke($connection); // a transient read error is swallowed
+
+        $transport->mode = 'fatal';
+        $invoke->invoke($connection); // a fatal -ERR frame is swallowed rather than thrown out of the timer
+
+        // None of these escalate out of the heartbeat read or close the connection.
+        self::assertSame(ConnectionState::Open, $connection->state());
+
+        $connection->disconnect()->await();
+    }
+
     // ─── TLS upgrade ordering (P1-4) ────────────────────────────────────
 
     public function testStandardTlsUpgradeRunsAfterInfoWhenNotHandshakeFirst(): void

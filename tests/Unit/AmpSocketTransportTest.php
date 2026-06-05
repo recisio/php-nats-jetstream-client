@@ -28,6 +28,20 @@ final class AmpSocketTransportTest extends TestCase
     }
 
     /**
+     * Verifies upgradeTls() short-circuits when TLS was never configured (no socket to upgrade),
+     * so the standard non-TLS connect flow can call it unconditionally.
+     */
+    public function testUpgradeTlsIsNoOpWhenTlsNotConfigured(): void
+    {
+        $transport = new AmpSocketTransport(new NatsOptions());
+
+        // No connect(): there is no socket and no TLS context, so the handshake must not run.
+        $transport->upgradeTls()->await();
+
+        self::assertSame('', $transport->readLine()->await());
+    }
+
+    /**
      * Verifies non-TLS DSNs keep connect context unchanged.
      */
     public function testWithTlsContextReturnsOriginalContextWhenTlsNotRequired(): void

@@ -532,4 +532,205 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertSame(1, substr_count($writes, 'PUB $JS.API.CONSUMER.MSG.NEXT.OBJ_assets'));
         self::assertStringContainsString('"batch":3', $writes);
     }
+
+    /**
+     * Verifies list() rethrows a non-404 error raised while reading a meta record.
+     */
+    public function testListRethrowsNonNotFoundError(): void
+    {
+        $streamInfo = (string) json_encode([
+            'state' => ['subjects' => ['$O.assets.M.' . $this->encodeName('doc.txt') => 1]],
+        ], JSON_THROW_ON_ERROR);
+        $error = '{"error":{"code":500,"description":"boom"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),  // metaSubjects()
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($error), $error),            // last_by_subj -> error
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('boom');
+        $client->jetStream()->objectStore('assets')->list()->await();
+    }
+
+    /**
+     * Verifies list() surfaces an error from the meta-subject enumeration request.
+     */
+    public function testListThrowsWhenSubjectEnumerationFails(): void
+    {
+        $error = '{"error":{"code":500,"description":"info failed"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($error), $error),  // metaSubjects() -> error
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('info failed');
+        $client->jetStream()->objectStore('assets')->list()->await();
+    }
+
+    /**
+     * Verifies delete() still succeeds when the best-effort chunk purge fails.
+     */
+    public function testDeleteToleratesPurgeFailure(): void
+    {
+        $meta = $this->metaGetResponse('logo.txt', ['nuid' => 'delnuidfail', 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')]);
+        $purgeError = '{"error":{"code":500,"description":"purge failed"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                       // existing-object lookup
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(7)), $this->pubAck(7)),  // tombstone ack
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($purgeError), $purgeError),            // purge -> error (swallowed)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $deleted = $client->jetStream()->objectStore('assets')->delete('logo.txt')->await();
+
+        self::assertTrue($deleted->deleted);
+    }
+
+    /**
+     * Verifies list() skips a meta subject whose record is no longer present (404).
+     */
+    public function testListSkipsNotFoundSubject(): void
+    {
+        $streamInfo = (string) json_encode([
+            'state' => ['subjects' => [
+                '$O.assets.M.' . $this->encodeName('gone.txt') => 1,
+                '$O.assets.M.' . $this->encodeName('logo.txt') => 1,
+            ]],
+        ], JSON_THROW_ON_ERROR);
+        $logoMeta = $this->metaGetResponse('logo.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),               // metaSubjects()
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),   // first subject -> 404 (skipped)
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($logoMeta), $logoMeta),                   // second subject -> present
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $objects = $client->jetStream()->objectStore('assets')->list()->await();
+
+        self::assertCount(1, $objects);
+        self::assertSame('logo.txt', $objects[0]->name);
+    }
+
+    /**
+     * Verifies delete() proceeds when the previous-metadata lookup fails with a non-404 error.
+     */
+    public function testDeleteToleratesMissingPreviousMetadata(): void
+    {
+        $lookupError = '{"error":{"code":500,"description":"lookup failed"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($lookupError), $lookupError),              // lookup -> 500 (swallowed)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(7)), $this->pubAck(7)),        // tombstone ack
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $deleted = $client->jetStream()->objectStore('assets')->delete('logo.txt')->await();
+
+        self::assertTrue($deleted->deleted);
+    }
+
+    /**
+     * Verifies delete() surfaces an error when the metadata (tombstone) publish is rejected.
+     */
+    public function testDeleteThrowsWhenMetadataPublishFails(): void
+    {
+        $publishError = '{"error":{"code":400,"description":"publish rejected"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),    // lookup -> 404 (no previous)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($publishError), $publishError),            // tombstone publish -> error
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('publish rejected');
+        $client->jetStream()->objectStore('assets')->delete('logo.txt')->await();
+    }
+
+    /**
+     * Verifies a pull timeout (408) during download stops the loop, so the short read is caught by
+     * the digest check rather than hanging.
+     */
+    public function testGetStopsOnPullTimeoutAndFailsDigest(): void
+    {
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuidto01', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHTO","config":{"ack_policy":"explicit"}}';
+        $deleteConsumer = '{"success":true}';
+        $status = "NATS/1.0 408 Request Timeout\r\nStatus: 408\r\nDescription: Request Timeout\r\n\r\n";
+        $hb = strlen($status);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                          // info()
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),                  // create consumer
+            sprintf("HMSG _INBOX.JS.FETCH.c 3 %d %d\r\n%s\r\n", $hb, $hb, $status),                 // pull -> 408 (break)
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),       // delete consumer
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Object digest mismatch');
+        $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+    }
+
+    /**
+     * Verifies a non-timeout pull error during download is propagated rather than swallowed.
+     */
+    public function testGetRethrowsNonTimeoutPullError(): void
+    {
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuiderr01', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHERR","config":{"ack_policy":"explicit"}}';
+        $deleteConsumer = '{"success":true}';
+        $status = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\nDescription: Consumer Deleted\r\n\r\n";
+        $hb = strlen($status);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
+            sprintf("HMSG _INBOX.JS.FETCH.c 3 %d %d\r\n%s\r\n", $hb, $hb, $status),                 // pull -> 409 (rethrow)
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('status 409');
+        $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+    }
 }
