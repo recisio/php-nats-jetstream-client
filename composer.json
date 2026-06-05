@@ -32,6 +32,11 @@
     "test:bdd": "bash scripts/run-tests-bdd.sh",
     "test:bdd:core": "vendor/bin/behat --suite core",
     "test:e2e": "bash scripts/run-tests-e2e.sh",
+    "test:everything": [
+      "@putenv SKIP_JWT_FIXTURE_CHECK=1",
+      "@stan",
+      "@test:e2e"
+    ],
     "test:integration:repeat": "bash scripts/repeat-integration.sh 3",
     "fixture:jwt": "bash scripts/regenerate-jwt-fixture.sh",
     "fixture:jwt:check": "bash scripts/check-jwt-fixture.sh",
@@ -41,6 +46,9 @@
     "coverage:check": "bash scripts/check-coverage.sh 90",
     "stan": "phpstan analyse",
     "fix": "php-cs-fixer fix"
+  },
+  "scripts-descriptions": {
+    "test:everything": "Full verification of code health: PHPStan level 8, then the compose-backed e2e flow (Docker stack up, unit + integration + Behat, stack down). Skips the JWT fixture-sync check; run 'composer fixture:jwt:check' separately for that."
   },
   "minimum-stability": "stable",
   "prefer-stable": true
