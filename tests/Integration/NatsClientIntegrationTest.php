@@ -153,10 +153,13 @@ final class NatsClientIntegrationTest extends TestCase
             'Content-Type' => 'text/plain',
         ])->await();
 
-        $deadline = microtime(true) + 2.0;
-        while ($received === null && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(20_000);
+        $cancellation = new TimeoutCancellation(2.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+            // No message within the window; the assertion below reports it.
         }
 
         self::assertInstanceOf(NatsMessage::class, $received);
@@ -1650,27 +1653,29 @@ final class NatsClientIntegrationTest extends TestCase
         $matchB = 'it.wild.' . $suffix . '.b';
         $nonMatch = 'it.wild.' . $suffix . '.a.tail';
 
-        $subscriber = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
-        $publisher = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
-
-        $subscriber->connect()->await();
-        $publisher->connect()->await();
+        // One connection: the SUB is ordered before these publishes and the server echoes them
+        // back to this subscription, so there is no cross-connection registration race.
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
 
         $subjects = [];
         $payloads = [];
-        $subscriber->subscribe($pattern, static function (NatsMessage $message) use (&$subjects, &$payloads): void {
+        $client->subscribe($pattern, static function (NatsMessage $message) use (&$subjects, &$payloads): void {
             $subjects[] = $message->subject;
             $payloads[] = $message->payload;
         })->await();
 
-        $publisher->publish($matchA, 'a')->await();
-        $publisher->publish($matchB, 'b')->await();
-        $publisher->publish($nonMatch, 'x')->await();
+        $client->publish($matchA, 'a')->await();
+        $client->publish($matchB, 'b')->await();
+        $client->publish($nonMatch, 'x')->await();
 
-        $deadline = microtime(true) + 3.0;
-        while (count($subjects) < 2 && microtime(true) < $deadline) {
-            $subscriber->processIncoming()->await();
-            usleep(20_000);
+        $cancellation = new TimeoutCancellation(3.0);
+        try {
+            while (count($subjects) < 2) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+            // Window elapsed; the assertions below report what was received.
         }
 
         sort($subjects);
@@ -1679,8 +1684,7 @@ final class NatsClientIntegrationTest extends TestCase
         self::assertSame([$matchA, $matchB], $subjects);
         self::assertSame(['a', 'b'], $payloads);
 
-        $subscriber->disconnect()->await();
-        $publisher->disconnect()->await();
+        $client->disconnect()->await();
     }
 
     /**
@@ -1717,7 +1721,9 @@ final class NatsClientIntegrationTest extends TestCase
 
         $requestCancellation = new DeferredCancellation();
         async(static function () use ($requestCancellation): void {
-            usleep(150_000);
+            // Non-blocking wait so the request is genuinely in-flight before it is cancelled;
+            // a blocking usleep here would freeze the event loop, not just this fiber.
+            delay(0.15);
             $requestCancellation->cancel();
         });
 

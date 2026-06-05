@@ -8,6 +8,9 @@ use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
+use Amp\CancelledException;
+use Amp\TimeoutCancellation;
+use function Amp\delay;
 use IDCT\NATS\Exception\JetStreamException;
 use PHPUnit\Framework\TestCase;
 
@@ -293,7 +296,7 @@ final class JetStreamIntegrationTest extends TestCase
                 continue;
             }
 
-            usleep(250_000);
+            delay(0.25);
         }
 
         self::assertSame($stream, $ack->stream);
@@ -434,7 +437,7 @@ final class JetStreamIntegrationTest extends TestCase
         self::assertSame('{"event":"redeliver"}', $first->payload);
 
         $js->nakWithDelay($first, 1200)->await();
-        usleep(1_500_000);
+        delay(1.5);
 
         $second = $js->fetchNext($stream, $consumer, 4000)->await();
         self::assertSame('{"event":"redeliver"}', $second->payload);
@@ -472,7 +475,7 @@ final class JetStreamIntegrationTest extends TestCase
         $first = $js->fetchNext($stream, $consumer, 4_000)->await();
         self::assertSame('{"event":"wpi"}', $first->payload);
 
-        usleep(600_000);
+        delay(0.6);
         $js->inProgress($first)->await();
 
         try {
@@ -504,7 +507,7 @@ final class JetStreamIntegrationTest extends TestCase
         self::assertSame('{"event":"term"}', $toTerm->payload);
         $js->term($toTerm)->await();
 
-        usleep(1_300_000);
+        delay(1.3);
         try {
             $js->fetchBatch($stream, $consumer, 1, 700)->await();
             self::fail('Expected TERM-ed message to stop redelivery.');
@@ -597,10 +600,12 @@ final class JetStreamIntegrationTest extends TestCase
 
         $js->publish($subject, '{"event":"push"}')->await();
 
-        $deadline = microtime(true) + 4.0;
-        while ($received === null && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(100_000);
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertInstanceOf(NatsMessage::class, $received);
@@ -644,10 +649,12 @@ final class JetStreamIntegrationTest extends TestCase
 
         $js->publish($subject, '{"event":"push-explicit"}')->await();
 
-        $deadline = microtime(true) + 4.0;
-        while ($received === null && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(100_000);
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertInstanceOf(NatsMessage::class, $received);
@@ -690,10 +697,12 @@ final class JetStreamIntegrationTest extends TestCase
 
         $js->publish($subject, '{"event":"ephemeral-push"}')->await();
 
-        $deadline = microtime(true) + 4.0;
-        while ($received === null && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(100_000);
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertInstanceOf(NatsMessage::class, $received);
@@ -736,10 +745,12 @@ final class JetStreamIntegrationTest extends TestCase
 
         $js->publish($matchingSubject, '{"event":"ordered"}')->await();
 
-        $deadline = microtime(true) + 4.0;
-        while ($received === [] && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(100_000);
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($received === []) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertSame(['{"event":"ordered"}'], $received);
@@ -800,10 +811,12 @@ final class JetStreamIntegrationTest extends TestCase
 
         $kv->put('theme', 'dark')->await();
 
-        $deadline = microtime(true) + 4.0;
-        while ($watched === null && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(100_000);
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($watched === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertNotNull($watched);
@@ -1026,7 +1039,7 @@ final class JetStreamIntegrationTest extends TestCase
                 break;
             }
 
-            usleep(100_000);
+            delay(0.1);
         }
 
         self::assertNull($expired, 'Expected KV entry to expire within the extended observation window.');
@@ -1065,10 +1078,12 @@ final class JetStreamIntegrationTest extends TestCase
         $kv->put($key, 'v1')->await();
         $kv->put($key, 'v2')->await();
 
-        $deadline = microtime(true) + 5.0;
-        while ((count($watcherA) < 2 || count($watcherB) < 2) && microtime(true) < $deadline) {
-            $client->processIncoming()->await();
-            usleep(50_000);
+        $cancellation = new TimeoutCancellation(5.0);
+        try {
+            while ((count($watcherA) < 2 || count($watcherB) < 2)) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertGreaterThanOrEqual(2, count($watcherA));
@@ -1239,11 +1254,15 @@ final class JetStreamIntegrationTest extends TestCase
             ],
         )->await();
 
+        // Observe the flow-control / heartbeat window: read frames until the bounded cancellation
+        // fires. No user payloads should appear, but at least one control frame should.
         $framesProcessed = 0;
-        $deadline = microtime(true) + 2.5;
-        while (microtime(true) < $deadline) {
-            $framesProcessed += $client->processIncoming()->await();
-            usleep(100_000);
+        $observeCancel = new TimeoutCancellation(2.5);
+        try {
+            while (!$observeCancel->isRequested()) {
+                $framesProcessed += $client->processIncoming($observeCancel)->await();
+            }
+        } catch (CancelledException) {
         }
 
         // Heartbeat/control traffic may surface as empty payloads but should not surface user data.
@@ -1253,10 +1272,12 @@ final class JetStreamIntegrationTest extends TestCase
 
         $js->publish($subject, '{"event":"push-hb"}')->await();
 
-        $deliveryDeadline = microtime(true) + 4.0;
-        while ($receivedPayloads === [] && microtime(true) < $deliveryDeadline) {
-            $client->processIncoming()->await();
-            usleep(100_000);
+        $deliveryCancel = new TimeoutCancellation(4.0);
+        try {
+            while ($receivedPayloads === []) {
+                $client->processIncoming($deliveryCancel)->await();
+            }
+        } catch (CancelledException) {
         }
 
         self::assertSame(['{"event":"push-hb"}'], $receivedPayloads);
