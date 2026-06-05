@@ -192,6 +192,16 @@ trait IntegrationTestBootstrap
     }
 
     /**
+     * Returns the configured standard (non-handshake-first) TLS-upgrade NATS server URL.
+     */
+    protected function integrationTlsUpgradeServerUrl(): string
+    {
+        $url = getenv('NATS_TLS_UPGRADE_URL');
+
+        return is_string($url) && $url !== '' ? $url : 'tls://127.0.0.1:14228';
+    }
+
+    /**
      * Returns the CA file path for the TLS integration fixture when present.
      */
     protected function integrationTlsCaFile(): ?string

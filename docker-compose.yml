@@ -58,6 +58,22 @@ services:
       - "14225:4222"
       - "18225:8222"
 
+  nats-tls-upgrade:
+    image: nats:2.12-alpine
+    command: ["--config", "/etc/nats-config/tls-upgrade.conf", "-DV"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/varz >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+    volumes:
+      - ${NATS_PROJECT_ROOT:-.}/build/nats:/etc/nats-config:ro
+      - ${NATS_PROJECT_ROOT:-.}/build/tls:/etc/nats-certs:ro
+    ports:
+      - "14228:4222"
+      - "18228:8222"
+
   nats-nkey:
     image: nats:2.12-alpine
     command: ["--config", "/etc/nats-config/nkey.conf", "-DV"]

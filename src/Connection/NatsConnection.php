@@ -49,6 +49,8 @@ final class NatsConnection
     private int $outstandingPings = 0;
     private ?string $pingTimerId = null;
     private bool $drainFlushPending = false;
+    /** Guards against two overlapping socket reads (user read vs heartbeat self-read). */
+    private bool $readInProgress = false;
 
     /**
      * Creates a connection runtime with transport and protocol dependencies.
@@ -181,6 +183,9 @@ final class NatsConnection
             }
 
             $this->validateSubject($subject);
+            if ($replyTo !== null) {
+                $this->validateSubject($replyTo);
+            }
             $this->enforceMaxPayload(strlen($payload));
 
             try {
@@ -210,6 +215,9 @@ final class NatsConnection
             }
 
             $this->validateSubject($subject);
+            if ($replyTo !== null) {
+                $this->validateSubject($replyTo);
+            }
             $headerBytes = strlen(NatsHeaders::toWireBlock($headers));
             $this->enforceMaxPayload($headerBytes + strlen($payload));
 
@@ -236,6 +244,9 @@ final class NatsConnection
             }
 
             $this->validateSubject($subject, allowWildcards: true);
+            if ($queue !== null) {
+                $this->validateQueueGroup($queue);
+            }
             $sid = $this->nextSid++;
             $this->subscriptions[$sid] = $handler;
             $this->subscriptionMeta[$sid] = ['subject' => $subject, 'queue' => $queue];
@@ -267,23 +278,35 @@ final class NatsConnection
     /**
      * Reads one transport chunk, parses frames, and dispatches message callbacks.
      *
+     * @param Cancellation|null $cancellation Optional token that cancels the underlying socket read,
+     *                                        so a timed-out caller does not orphan an in-flight read.
      * @return Future<int>
      */
-    public function processIncoming(): Future
+    public function processIncoming(?Cancellation $cancellation = null): Future
     {
-        return async(function (): int {
+        return async(function () use ($cancellation): int {
             if ($this->state !== ConnectionState::Open && $this->state !== ConnectionState::Draining) {
                 throw new ConnectionException('Connection is not open');
             }
 
+            if ($this->readInProgress) {
+                // A concurrent read (e.g. the heartbeat timer) owns the socket; avoid a second
+                // overlapping read which the transport would reject with a pending-read error.
+                return 0;
+            }
+
+            $this->readInProgress = true;
+
             try {
-                $chunk = $this->transport->readLine()->await();
+                $chunk = $this->transport->readLine($cancellation)->await();
             } catch (CancelledException $cancelledException) {
                 throw $cancelledException;
             } catch (\Throwable) {
                 $this->recoverConnection();
 
                 return 0;
+            } finally {
+                $this->readInProgress = false;
             }
 
             if ($chunk === '') {
@@ -294,6 +317,9 @@ final class NatsConnection
             foreach ($frames as $frame) {
                 $this->handleFrame($frame);
             }
+
+            // Any successful read proves the link is alive; clear outstanding ping tracking.
+            $this->outstandingPings = 0;
 
             // Drain buffered deliveries after each chunk to preserve wire-order delivery.
             $this->drainAllPending();
@@ -388,7 +414,7 @@ final class NatsConnection
 
             while (!$deferred->isComplete()) {
                 try {
-                    $frames = $this->processIncoming()->await($waitCancellation);
+                    $frames = $this->processIncoming($waitCancellation)->await();
                 } catch (CancelledException $e) {
                     if ($cancellation !== null && $cancellation->isRequested()) {
                         throw $e;
@@ -443,6 +469,17 @@ final class NatsConnection
     }
 
     /**
+     * Determines whether the connection must be upgraded to TLS, based on the configured option,
+     * the server URL scheme, and the server's advertised TLS requirement.
+     */
+    private function requiresTls(string $server, ServerInfo $serverInfo): bool
+    {
+        return $this->options->tlsRequired
+            || str_starts_with($server, 'tls://')
+            || $serverInfo->tlsRequired;
+    }
+
+    /**
      * Normalizes NATS DSN scheme to the transport-compatible scheme.
      */
     private function normalizeDsn(string $server): string
@@ -467,6 +504,12 @@ final class NatsConnection
         $this->transport->connect($dsn, $this->options->connectTimeoutMs)->await();
 
         $this->serverInfo = $this->awaitServerInfo();
+
+        // Standard NATS TLS upgrade: after the plaintext INFO, upgrade the socket to TLS unless the
+        // handshake-first path already negotiated TLS during connect().
+        if (!$this->options->tlsHandshakeFirst && $this->requiresTls($server, $this->serverInfo)) {
+            $this->transport->upgradeTls()->await();
+        }
 
         $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce))->await();
         $this->transport->write($this->codec->encodePing())->await();
@@ -917,8 +960,56 @@ final class NatsConnection
                 } catch (\Throwable) {
                     $this->state = ConnectionState::Closed;
                 }
+
+                return;
             }
+
+            // Consume the server PONG ourselves so liveness detection does not depend on the
+            // application actively calling processIncoming(). If a user read is already running,
+            // it will consume the PONG instead and reset the counter.
+            $this->consumeHeartbeatResponse();
         });
+    }
+
+    /**
+     * Performs a short, bounded read to consume the heartbeat PONG (and any other control frames)
+     * without colliding with an in-flight user read. Message frames are buffered for the next
+     * processIncoming() call; control frames (PONG/PING/INFO) are handled immediately.
+     */
+    private function consumeHeartbeatResponse(): void
+    {
+        if ($this->readInProgress) {
+            return;
+        }
+
+        $timeoutSeconds = min(2.0, max(0.05, (float) $this->options->pingIntervalSeconds));
+
+        $this->readInProgress = true;
+
+        try {
+            $chunk = $this->transport->readLine(new TimeoutCancellation($timeoutSeconds))->await();
+        } catch (\Throwable) {
+            // No PONG within the window (or a transient read error); leave escalation to the next
+            // tick or to the application's own processIncoming() loop.
+            return;
+        } finally {
+            $this->readInProgress = false;
+        }
+
+        if ($chunk === '') {
+            return;
+        }
+
+        try {
+            foreach ($this->parser->push($chunk) as $frame) {
+                $this->handleFrame($frame);
+            }
+
+            $this->outstandingPings = 0;
+        } catch (\Throwable) {
+            // A fatal frame surfaced during the heartbeat read; let the next user read / tick
+            // surface and act on it rather than throwing out of the event-loop timer.
+        }
     }
 
     /**
@@ -969,6 +1060,23 @@ final class NatsConnection
             if (str_contains($token, '*') || str_contains($token, '>')) {
                 throw new ProtocolException('Wildcards must occupy an entire token');
             }
+        }
+    }
+
+    /**
+     * Validates a NATS queue group name against protocol rules.
+     *
+     * Queue groups are interpolated into the SUB control line, so they must not
+     * be empty or contain whitespace/CR/LF that could break or inject wire frames.
+     */
+    private function validateQueueGroup(string $queue): void
+    {
+        if ($queue === '') {
+            throw new ProtocolException('Queue group must not be empty');
+        }
+
+        if (preg_match('/[\s\r\n]/', $queue)) {
+            throw new ProtocolException('Queue group must not contain whitespace');
         }
     }
 

@@ -60,6 +60,15 @@ final class FlakyTransport implements TransportInterface
     }
 
     /**
+     * No-op TLS upgrade for test transport.
+     */
+    public function upgradeTls(): Future
+    {
+        return async(function (): void {
+        });
+    }
+
+    /**
      * Records outgoing protocol writes.
      */
     public function write(string $bytes): Future

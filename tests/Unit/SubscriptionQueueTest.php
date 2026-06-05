@@ -94,6 +94,36 @@ final class SubscriptionQueueTest extends TestCase
         self::assertNull($msg);
     }
 
+    public function testNextWithoutTimeoutRunsSingleCycleAndReturnsMessage(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            "MSG data 1 3\r\nxyz\r\n",
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('data')->await();
+
+        // No timeout configured (default 0): a single processIncoming cycle should surface the message.
+        $msg = $queue->next();
+        self::assertNotNull($msg);
+        self::assertSame('xyz', $msg->payload);
+    }
+
+    public function testNextWithoutTimeoutReturnsNullWhenEmpty(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('empty')->await();
+
+        // Default timeout 0 must NOT block indefinitely; a single empty cycle returns null.
+        $msg = $queue->next();
+        self::assertNull($msg);
+    }
+
     public function testFetchAllCollectsMultipleMessages(): void
     {
         $transport = new FakeTransport([

@@ -409,7 +409,8 @@ $queue->setTimeout(5.0);
 // Non-blocking fetch — returns null if nothing available.
 $msg = $queue->fetch();
 
-// Blocking fetch — waits up to the configured timeout.
+// Blocking fetch — waits up to the configured timeout, returns null on timeout.
+// With no timeout configured it performs a single processIncoming() cycle (like fetch()).
 $msg = $queue->next();
 
 // Batch fetch — collects up to 10 messages within the timeout window.
@@ -614,6 +615,9 @@ $store = $client->jetStream()->objectStore('assets');
 $store->create()->await();
 $store->put('logo.txt', 'hello-object')->await();
 
+// getToCallback streams the object chunk-by-chunk: the callback is invoked once per stored
+// chunk as it is downloaded (the whole object is never buffered in memory), and the SHA-256
+// digest is verified incrementally after the final chunk.
 $info = $store->getToCallback('logo.txt', static function (string $chunk): void {
 	echo $chunk;
 })->await();
@@ -1116,7 +1120,7 @@ This repository tracks parity against the basis-company `nats.php` README exampl
 | JetStream API Usage | workflow parity | Stream/consumer lifecycle, pull/push flows, ephemeral consumers, scheduling, ordered-consumer helpers, batching/iteration chain API, republish/subject-transform live behavior, mirror/source live behavior, and typed enums are covered. |
 | Microservices | workflow parity | Service registration, discovery (PING/INFO/STATS/SCHEMA), grouped hierarchy, enriched endpoint stats (requests/errors/last-error/processing time), reset API, opt-in schema validation hook with built-in adapter, handler adapters (callable/object/class-string), request lifecycle observers, standardized error envelopes, and run-loop helper are covered. |
 | Key Value Storage | workflow parity | Core KV flows plus update/purge/getAll/status parity are covered. |
-| Object Store | extended | Bucket/object lifecycle, object listing, chunked uploads, and digest verification are covered. |
+| Object Store | parity | Uses the official on-wire layout (meta subjects keyed by `base64url(name)`, chunks under a per-object NUID subject, `SHA-256=<base64url>` digest, rollup meta), so buckets interoperate with the `nats` CLI and other clients. Bucket/object lifecycle, streaming download, object listing, chunked uploads, and digest verification are covered. Overwrites and deletes purge the previous revision's chunks. |
 
 ## Behavior Notes
 
@@ -1136,6 +1140,12 @@ while (microtime(true) < $deadline) {
 ```
 
 The client also applies asynchronous `INFO` updates received after connect, so `serverInfo()` can change during the lifetime of an open connection when the server advertises updated capabilities such as `max_payload` or cluster topology details.
+
+### Heartbeat and Request Timeouts
+
+The heartbeat timer answers its own `PONG`: after sending a `PING` it performs a short, bounded read to consume the reply (unless an application `processIncoming()` read is already in flight). Liveness detection therefore does not depend on the application continuously calling `processIncoming()`, so an otherwise idle connection (for example a pure publisher) is not closed by spurious `maxPingsOut` detection. Any successful read also resets the outstanding-ping counter.
+
+Request and pull-fetch timeouts cancel the underlying socket read rather than leaving it pending. A timed-out `request()` (or `fetchBatch()`/`fetchNext()`) cleanly releases the read, so it cannot orphan an in-flight read or trigger a spurious reconnect on the next operation.
 
 ### Reconnect Behavior
 
@@ -1177,7 +1187,7 @@ The initial handshake is bounded by `connectTimeoutMs`, not by a fixed number of
 | `pedantic` | `bool` | `false` | NATS pedantic protocol mode. |
 | `noEcho` | `bool` | `false` | Suppresses server echo of own published messages. |
 | `tlsRequired` | `bool` | `false` | Forces TLS context in transport. |
-| `tlsHandshakeFirst` | `bool` | `false` | Performs TLS handshake immediately after connecting, before server INFO. |
+| `tlsHandshakeFirst` | `bool` | `false` | When `true`, performs the TLS handshake immediately after connecting (before server INFO). When `false` (default), the client uses the standard NATS flow: read the plaintext INFO, then upgrade to TLS when TLS is required (option, `tls://` scheme, or server `tls_required`). |
 | `tlsCaFile` | `?string` | `null` | CA bundle path for peer verification. |
 | `tlsCertFile` | `?string` | `null` | Client certificate path. |
 | `tlsKeyFile` | `?string` | `null` | Client private key path. |

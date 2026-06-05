@@ -19,7 +19,7 @@ final class ObjectInfo
      * @param string $digest Server-provided content digest for integrity checks.
      * @param string $modified RFC3339 timestamp of last object modification.
      * @param bool $deleted Whether this metadata represents a deleted tombstone.
-     * @param string $chunkSubject Internal subject where object chunks are stored.
+     * @param string $nuid Object NUID; chunks are stored under `$O.<bucket>.C.<nuid>` (official layout).
      * @param array<string,string> $metadata
      */
     public function __construct(
@@ -30,7 +30,7 @@ final class ObjectInfo
         public readonly string $digest,
         public readonly string $modified,
         public readonly bool $deleted,
-        public readonly string $chunkSubject,
+        public readonly string $nuid,
         public readonly array $metadata = [],
     ) {
     }
@@ -44,14 +44,14 @@ final class ObjectInfo
         $metadata = is_array($data['metadata'] ?? null) ? array_map('strval', $data['metadata']) : [];
 
         return new self(
-            bucket: $bucket,
+            bucket: (string) ($data['bucket'] ?? $bucket),
             name: (string) ($data['name'] ?? ''),
             size: (int) ($data['size'] ?? 0),
-            chunks: (int) ($data['chunks'] ?? 1),
+            chunks: (int) ($data['chunks'] ?? 0),
             digest: (string) ($data['digest'] ?? ''),
             modified: (string) ($data['mtime'] ?? ''),
             deleted: (bool) ($data['deleted'] ?? false),
-            chunkSubject: (string) ($data['chunk_subject'] ?? ''),
+            nuid: (string) ($data['nuid'] ?? ''),
             metadata: $metadata,
         );
     }

@@ -880,6 +880,38 @@ final class NatsClientIntegrationTest extends TestCase
     }
 
     /**
+     * Verifies the standard NATS TLS upgrade (read plaintext INFO, then upgrade) against a fixture
+     * that is NOT configured handshake-first, using the default tlsHandshakeFirst=false.
+     */
+    public function testStandardTlsUpgradeConnection(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $url = $this->integrationTlsUpgradeServerUrl();
+        $caFile = $this->integrationTlsCaFile();
+        $certFile = $this->integrationTlsCertFile();
+        $keyFile = $this->integrationTlsKeyFile();
+
+        if ($caFile === null || $certFile === null || $keyFile === null) {
+            $this->markTestSkipped('Set TLS env vars or generate local TLS fixtures to run the standard TLS upgrade integration test.');
+        }
+
+        $client = new NatsClient(new NatsOptions(
+            servers: [$url],
+            tlsRequired: true,
+            tlsHandshakeFirst: false,
+            tlsCaFile: $caFile,
+            tlsCertFile: $certFile,
+            tlsKeyFile: $keyFile,
+            tlsVerifyPeer: (getenv('NATS_TLS_SKIP_VERIFY') !== '1'),
+        ));
+
+        $client->connect()->await();
+        self::assertNotNull($client->serverInfo());
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies the TLS fixture rejects clients that do not present the required certificate.
      */
     public function testTlsConnectionFailsWithoutClientCertificate(): void
@@ -1246,6 +1278,12 @@ final class NatsClientIntegrationTest extends TestCase
                 });
             }
 
+            public function upgradeTls(): Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function readLine(?\Amp\Cancellation $cancellation = null): Future
             {
                 return async(function (): string {
@@ -1334,6 +1372,12 @@ final class NatsClientIntegrationTest extends TestCase
             }
 
             public function write(string $bytes): Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function upgradeTls(): Future
             {
                 return async(static function (): void {
                 });

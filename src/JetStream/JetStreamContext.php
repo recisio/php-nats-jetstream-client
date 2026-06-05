@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\JetStream;
 
+use Amp\CancelledException;
 use Amp\Future;
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Core\Inbox;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
@@ -18,6 +20,7 @@ use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
 use function Amp\async;
+use function Amp\delay;
 
 /**
  * High-level JetStream client for stream, consumer, KV, and Object Store operations.
@@ -660,9 +663,18 @@ final class JetStreamContext
             try {
                 $this->client->publish($subject, $json, $inbox)->await();
 
-                $deadline = microtime(true) + ($expiresMs + 1000) / 1000;
-                while (count($messages) < $batch && $terminalStatus === null && microtime(true) < $deadline) {
-                    $this->client->processIncoming()->await();
+                // Bound the pull by the server expiry (plus slack). The cancellation cancels the
+                // underlying socket read so a silent server cannot hang the fetch indefinitely.
+                $waitCancellation = new TimeoutCancellation(($expiresMs + 1000) / 1000);
+                try {
+                    while (count($messages) < $batch && $terminalStatus === null) {
+                        $frames = $this->client->processIncoming($waitCancellation)->await();
+                        if ($frames === 0) {
+                            delay(0.001, cancellation: $waitCancellation);
+                        }
+                    }
+                } catch (CancelledException) {
+                    // Deadline reached; fall through to evaluate collected messages / terminal status.
                 }
             } finally {
                 $this->client->unsubscribe($sid)->await();
@@ -866,12 +878,25 @@ final class JetStreamContext
         }
 
         $parts = explode('.', $message->replyTo);
-        // ACK reply subjects follow: $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>
-        if (count($parts) < 9 || $parts[0] !== '$JS' || $parts[1] !== 'ACK') {
+        if ($parts[0] !== '$JS' || ($parts[1] ?? null) !== 'ACK') {
             return null;
         }
 
-        $seq = filter_var($parts[5], FILTER_VALIDATE_INT);
+        // Two ACK reply-subject shapes exist (matching nats.go token-count detection):
+        //   9 tokens:  $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>
+        //  12 tokens:  $JS.ACK.<domain>.<account>.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>.<token>
+        // The stream sequence sits at index 5 in the short form and index 7 in the domain form.
+        $streamSeqIndex = match (count($parts)) {
+            9 => 5,
+            12 => 7,
+            default => null,
+        };
+
+        if ($streamSeqIndex === null) {
+            return null;
+        }
+
+        $seq = filter_var($parts[$streamSeqIndex], FILTER_VALIDATE_INT);
 
         return ($seq !== false) ? $seq : null;
     }

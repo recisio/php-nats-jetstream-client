@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Core;
 
+use Amp\CancelledException;
+use Amp\TimeoutCancellation;
 use SplQueue;
 use function Amp\delay;
 
@@ -68,9 +70,11 @@ final class SubscriptionQueue
     }
 
     /**
-     * Blocks until a message is available, up to configured timeout.
+     * Blocks until a message is available, up to the configured timeout.
      *
-     * @throws \IDCT\NATS\Exception\TimeoutException If timeout is exceeded without a message.
+     * Returns the next message, or `null` when no message arrives within the configured timeout.
+     * When no timeout is configured (`timeout <= 0`) a single `processIncoming()` cycle is
+     * attempted, matching {@see fetch()} rather than blocking indefinitely.
      */
     public function next(): ?NatsMessage
     {
@@ -78,18 +82,30 @@ final class SubscriptionQueue
             return $this->messages->dequeue();
         }
 
-        $deadline = $this->timeout > 0 ? microtime(true) + $this->timeout : PHP_FLOAT_MAX;
-
-        do {
+        if ($this->timeout <= 0) {
             $this->client->processIncoming()->await();
 
-            if ($this->messages->count() > 0) {
-                break;
-            }
+            return $this->messages->count() > 0 ? $this->messages->dequeue() : null;
+        }
 
-            // Nothing arrived — yield briefly to avoid a tight spin.
-            delay(0.001);
-        } while (microtime(true) < $deadline);
+        // Bound the wait with a cancellation so the underlying socket read cannot block past the
+        // configured timeout, then yield cooperatively between cycles to avoid a tight spin.
+        $cancellation = new TimeoutCancellation($this->timeout);
+        $deadline = microtime(true) + $this->timeout;
+
+        try {
+            do {
+                $this->client->processIncoming($cancellation)->await();
+
+                if ($this->messages->count() > 0) {
+                    break;
+                }
+
+                delay(0.001, cancellation: $cancellation);
+            } while (microtime(true) < $deadline);
+        } catch (CancelledException) {
+            // Timeout elapsed without a message.
+        }
 
         return $this->messages->count() > 0 ? $this->messages->dequeue() : null;
     }
@@ -106,22 +122,33 @@ final class SubscriptionQueue
     public function fetchAll(?int $limit = null): array
     {
         $collected = [];
-        $deadline = $this->timeout > 0 ? microtime(true) + $this->timeout : PHP_FLOAT_MAX;
 
-        while (($limit === null || count($collected) < $limit) && microtime(true) < $deadline) {
-            // Drain already queued messages first.
-            while (!$this->messages->isEmpty() && ($limit === null || count($collected) < $limit)) {
-                $collected[] = $this->messages->dequeue();
-            }
+        // Drain anything already buffered first.
+        while (!$this->messages->isEmpty() && ($limit === null || count($collected) < $limit)) {
+            $collected[] = $this->messages->dequeue();
+        }
 
-            if ($limit !== null && count($collected) >= $limit) {
-                break;
-            }
+        if ($limit !== null && count($collected) >= $limit) {
+            return $collected;
+        }
 
-            $frames = $this->client->processIncoming()->await();
-            if ($frames === 0 && $this->messages->isEmpty()) {
-                break;
+        // A cancellation bounds each read so a real socket cannot block past the timeout window.
+        $cancellation = $this->timeout > 0 ? new TimeoutCancellation($this->timeout) : null;
+
+        try {
+            while ($limit === null || count($collected) < $limit) {
+                $frames = $this->client->processIncoming($cancellation)->await();
+
+                while (!$this->messages->isEmpty() && ($limit === null || count($collected) < $limit)) {
+                    $collected[] = $this->messages->dequeue();
+                }
+
+                if ($frames === 0 && $this->messages->isEmpty()) {
+                    break;
+                }
             }
+        } catch (CancelledException) {
+            // Timeout window elapsed; return what was collected.
         }
 
         // Final drain of any remaining buffered messages.

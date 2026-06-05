@@ -1207,6 +1207,20 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(42, $parsed);
     }
 
+    public function testExtractStreamSequenceParsesDomainQualifiedReplySubject(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $method = new \ReflectionMethod($js, 'extractStreamSequence');
+
+        // Domain-qualified ACK subject (12 tokens): stream sequence sits at index 7.
+        $message = new NatsMessage('s', 1, '$JS.ACK.hub.ACC123.ORDERS.CONS.1.42.2.123.0.rnd', 'x');
+        $parsed = $method->invoke($js, $message);
+
+        self::assertSame(42, $parsed);
+    }
+
     public function testExtractStreamSequenceReturnsNullForInvalidReplySubject(): void
     {
         $client = new NatsClient(new NatsOptions(), new FakeTransport());

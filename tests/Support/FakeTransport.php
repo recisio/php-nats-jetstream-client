@@ -19,6 +19,8 @@ final class FakeTransport implements TransportInterface
 
     public bool $closed = false;
 
+    public int $upgradeTlsCalls = 0;
+
     /**
      * Creates an in-memory fake transport with pre-seeded read chunks.
      *
@@ -35,6 +37,16 @@ final class FakeTransport implements TransportInterface
     {
         return async(function () use ($dsn, $timeoutMs): void {
             $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+        });
+    }
+
+    /**
+     * Records TLS upgrade requests for assertions.
+     */
+    public function upgradeTls(): Future
+    {
+        return async(function (): void {
+            $this->upgradeTlsCalls++;
         });
     }
 

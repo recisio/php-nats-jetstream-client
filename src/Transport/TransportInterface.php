@@ -20,6 +20,16 @@ interface TransportInterface
     public function connect(string $dsn, int $timeoutMs): Future;
 
     /**
+     * Performs a TLS handshake on the already-connected socket (standard post-INFO upgrade).
+     *
+     * Implementations that already negotiated TLS during {@see connect()} (handshake-first) must
+     * treat this as a no-op so callers can invoke it unconditionally.
+     *
+     * @return Future<void>
+     */
+    public function upgradeTls(): Future;
+
+    /**
      * Writes raw protocol bytes to the transport.
      *
      * @return Future<void>

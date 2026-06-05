@@ -141,11 +141,12 @@ final class NatsClient
     /**
      * Processes a single incoming transport chunk and dispatches parsed frames.
      *
+     * @param Cancellation|null $cancellation Optional token that cancels the underlying socket read.
      * @return Future<int>
      */
-    public function processIncoming(): Future
+    public function processIncoming(?Cancellation $cancellation = null): Future
     {
-        return $this->connection->processIncoming();
+        return $this->connection->processIncoming($cancellation);
     }
 
     /**

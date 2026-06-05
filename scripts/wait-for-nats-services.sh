@@ -11,7 +11,7 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-services=(18222 18223 18224 18225 18226 18227)
+services=(18222 18223 18224 18225 18226 18227 18228)
 deadline_seconds="${NATS_WAIT_TIMEOUT_SECONDS:-30}"
 
 if ! [[ "$deadline_seconds" =~ ^[1-9][0-9]*$ ]]; then

@@ -14,7 +14,9 @@ use IDCT\NATS\JetStream\Models\StreamInfo;
 use function Amp\async;
 
 /**
- * Implements NATS JetStream Object Store bucket operations.
+ * Implements NATS JetStream Object Store bucket operations using the official on-wire layout
+ * (meta subjects keyed by base64url(name), chunks under a per-object NUID subject, SHA-256 digest
+ * in base64url, and rollup meta), so buckets interoperate with the `nats` CLI and other clients.
  */
 final class ObjectStoreBucket
 {
@@ -48,6 +50,7 @@ final class ObjectStoreBucket
             $defaults = [
                 'description' => 'Object Store bucket ' . $this->bucket,
                 'allow_direct' => true,
+                'allow_rollup_hdrs' => true,
                 'discard' => 'new',
             ];
 
@@ -70,7 +73,7 @@ final class ObjectStoreBucket
     }
 
     /**
-     * Stores an object payload and publishes metadata.
+     * Stores an object payload and publishes metadata, purging any previous revision's chunks.
      *
      * @param array<string,string> $metadata
      * @return Future<ObjectInfo>
@@ -80,7 +83,10 @@ final class ObjectStoreBucket
         return async(function () use ($name, $data, $metadata): ObjectInfo {
             $this->assertValidName($name);
 
-            $chunkSubject = $this->chunkPrefix() . bin2hex(random_bytes(8));
+            $previous = $this->lookupExisting($name);
+
+            $nuid = $this->nuid();
+            $chunkSubject = $this->chunkSubjectForNuid($nuid);
             $totalSize = strlen($data);
             $chunks = 0;
 
@@ -99,16 +105,24 @@ final class ObjectStoreBucket
 
             $info = [
                 'name' => $name,
+                'bucket' => $this->bucket,
+                'nuid' => $nuid,
                 'size' => $totalSize,
                 'chunks' => $chunks,
-                'digest' => 'SHA-256=' . base64_encode(hash('sha256', $data, true)),
+                'digest' => $this->digestOf($data),
                 'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
                 'deleted' => false,
-                'chunk_subject' => $chunkSubject,
+                'options' => ['max_chunk_size' => $this->chunkSize],
                 'metadata' => $metadata,
             ];
 
-            $this->jetStream->publish($this->metaSubject($name), json_encode($info, JSON_THROW_ON_ERROR))->await();
+            $this->publishMeta($name, $info);
+
+            // Best-effort cleanup of the previous revision's chunks (rollup keeps only the latest
+            // meta, but chunk subjects are NUID-specific and must be purged explicitly).
+            if ($previous !== null && $previous->nuid !== '' && $previous->nuid !== $nuid) {
+                $this->purgeChunks($previous->nuid);
+            }
 
             return ObjectInfo::fromArray($this->bucket, $info);
         });
@@ -131,59 +145,23 @@ final class ObjectStoreBucket
                 return new ObjectData($info, null);
             }
 
-            $expectedChunks = $info->chunks ?? 1;
             $assembled = '';
+            $actualDigest = $this->streamChunks($info, static function (string $chunk) use (&$assembled): void {
+                $assembled .= $chunk;
+            });
 
-            $consumerName = null;
-            try {
-                $consumer = $this->jetStream->createEphemeralConsumer(
-                    $this->streamName(),
-                    $info->chunkSubject,
-                    ['deliver_policy' => 'all'],
-                )->await();
-                $consumerName = $consumer->name;
-
-                for ($i = 0; $i < $expectedChunks; $i++) {
-                    try {
-                        $message = $this->jetStream->fetchNext($this->streamName(), $consumerName, 2_000)->await();
-                    } catch (JetStreamException $e) {
-                        if ($e->getCode() === 408) {
-                            break;
-                        }
-
-                        throw $e;
-                    }
-
-                    $assembled .= $message->payload;
-                    if ($message->replyTo !== null && $message->replyTo !== '') {
-                        $this->jetStream->ack($message)->await();
-                    }
-                }
-            } finally {
-                if ($consumerName !== null && $consumerName !== '') {
-                    try {
-                        $this->jetStream->deleteConsumer($this->streamName(), $consumerName)->await();
-                    } catch (JetStreamException) {
-                        // Best-effort ephemeral consumer cleanup.
-                    }
-                }
-            }
-
-            // Verify digest integrity when metadata contains one.
-            if ($info->digest !== '') {
-                $expected = $info->digest;
-                $actual = 'SHA-256=' . base64_encode(hash('sha256', $assembled, true));
-                if ($expected !== $actual) {
-                    throw new JetStreamException('Object digest mismatch: expected ' . $expected . ', got ' . $actual);
-                }
-            }
+            $this->verifyDigest($info, $actualDigest);
 
             return new ObjectData($info, $assembled);
         });
     }
 
     /**
-     * Streams object payload to a callback.
+     * Streams object payload to a callback chunk-by-chunk without buffering the whole object.
+     *
+     * The callback is invoked once per stored chunk as it is downloaded, so large objects do not
+     * have to be held in memory. The content digest is computed incrementally and verified after
+     * the final chunk.
      *
      * @param callable(string):void $chunkHandler
      * @return Future<ObjectInfo|null>
@@ -191,17 +169,84 @@ final class ObjectStoreBucket
     public function getToCallback(string $name, callable $chunkHandler): Future
     {
         return async(function () use ($name, $chunkHandler): ?ObjectInfo {
-            $objectData = $this->get($name)->await();
-            if ($objectData === null) {
+            $info = $this->info($name)->await();
+            if ($info === null) {
                 return null;
             }
 
-            if ($objectData->data !== null && $objectData->data !== '') {
-                $chunkHandler($objectData->data);
+            if ($info->deleted) {
+                return $info;
             }
 
-            return $objectData->info;
+            $actualDigest = $this->streamChunks($info, $chunkHandler);
+            $this->verifyDigest($info, $actualDigest);
+
+            return $info;
         });
+    }
+
+    /**
+     * Downloads an object's chunks via a transient ephemeral consumer, forwarding each chunk to the
+     * callback and computing the SHA-256 content digest incrementally. Returns the computed digest
+     * string ("SHA-256=...") so callers can verify integrity without re-buffering the payload.
+     *
+     * @param callable(string):void $onChunk
+     */
+    private function streamChunks(ObjectInfo $info, callable $onChunk): string
+    {
+        $expectedChunks = max(1, $info->chunks);
+        $hashContext = hash_init('sha256');
+
+        $consumerName = null;
+        try {
+            $consumer = $this->jetStream->createEphemeralConsumer(
+                $this->streamName(),
+                $this->chunkSubjectForNuid($info->nuid),
+                ['deliver_policy' => 'all'],
+            )->await();
+            $consumerName = $consumer->name;
+
+            for ($i = 0; $i < $expectedChunks; $i++) {
+                try {
+                    $message = $this->jetStream->fetchNext($this->streamName(), $consumerName, 2_000)->await();
+                } catch (JetStreamException $e) {
+                    if ($e->getCode() === 408) {
+                        break;
+                    }
+
+                    throw $e;
+                }
+
+                hash_update($hashContext, $message->payload);
+                $onChunk($message->payload);
+
+                if ($message->replyTo !== null && $message->replyTo !== '') {
+                    $this->jetStream->ack($message)->await();
+                }
+            }
+        } finally {
+            if ($consumerName !== null && $consumerName !== '') {
+                try {
+                    $this->jetStream->deleteConsumer($this->streamName(), $consumerName)->await();
+                } catch (JetStreamException) {
+                    // Best-effort ephemeral consumer cleanup.
+                }
+            }
+        }
+
+        return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
+    }
+
+    /**
+     * Verifies a downloaded object's computed digest against the digest recorded in its metadata.
+     */
+    private function verifyDigest(ObjectInfo $info, string $actualDigest): void
+    {
+        if ($info->digest !== '' && $info->digest !== $actualDigest) {
+            throw new JetStreamException(
+                'Object digest mismatch: expected ' . $info->digest . ', got ' . $actualDigest,
+            );
+        }
     }
 
     /**
@@ -230,21 +275,17 @@ final class ObjectStoreBucket
                 return null;
             }
 
-            $encodedData = (string) ($message['data'] ?? '');
-            $metadataJson = $encodedData === '' ? '' : base64_decode($encodedData, true);
-            if ($metadataJson === false || $metadataJson === '') {
+            $metadata = $this->decodeMetadataFromApiMessage($message);
+            if ($metadata === null) {
                 return null;
             }
-
-            /** @var array<string,mixed> $metadata */
-            $metadata = json_decode($metadataJson, true, 512, JSON_THROW_ON_ERROR);
 
             return ObjectInfo::fromArray($this->bucket, $metadata);
         });
     }
 
     /**
-     * Marks an object as deleted by writing a metadata tombstone.
+     * Marks an object as deleted by writing a metadata tombstone and purging its chunks.
      *
      * @return Future<ObjectInfo>
      */
@@ -253,17 +294,26 @@ final class ObjectStoreBucket
         return async(function () use ($name): ObjectInfo {
             $this->assertValidName($name);
 
+            $previous = $this->lookupExisting($name);
+
             $info = [
                 'name' => $name,
+                'bucket' => $this->bucket,
+                'nuid' => '',
                 'size' => 0,
+                'chunks' => 0,
                 'digest' => '',
                 'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
                 'deleted' => true,
-                'chunk_subject' => '',
+                'options' => ['max_chunk_size' => $this->chunkSize],
                 'metadata' => [],
             ];
 
-            $this->jetStream->publish($this->metaSubject($name), json_encode($info, JSON_THROW_ON_ERROR))->await();
+            $this->publishMeta($name, $info);
+
+            if ($previous !== null && $previous->nuid !== '') {
+                $this->purgeChunks($previous->nuid);
+            }
 
             return ObjectInfo::fromArray($this->bucket, $info);
         });
@@ -289,23 +339,30 @@ final class ObjectStoreBucket
     /**
      * Lists latest metadata records for objects in this bucket.
      *
+     * Enumerates only the meta subjects (via a subjects filter) and reads the latest record per
+     * subject, so cost is O(objects) rather than O(all stream messages).
+     *
      * @return Future<list<ObjectInfo>>
      */
     public function list(bool $includeDeleted = false): Future
     {
         return async(function () use ($includeDeleted): array {
-            $status = $this->getStatus()->await();
-            $lastSequence = (int) ($status['last_sequence'] ?? 0);
-            $latestByName = [];
+            $result = [];
 
-            for ($seq = 1; $seq <= $lastSequence; $seq++) {
-                $message = $this->requestObjectMessageBySequence($seq);
-                if ($message === null) {
-                    continue;
+            foreach ($this->metaSubjects() as $subject) {
+                try {
+                    $response = $this->requestStreamMessage($subject);
+                } catch (JetStreamException $e) {
+                    if ($e->getCode() === 404) {
+                        continue;
+                    }
+
+                    throw $e;
                 }
 
-                $subject = (string) ($message['subject'] ?? '');
-                if (!str_starts_with($subject, $this->metaPrefix())) {
+                /** @var array<string,mixed>|null $message */
+                $message = is_array($response['message'] ?? null) ? $response['message'] : null;
+                if ($message === null) {
                     continue;
                 }
 
@@ -319,11 +376,6 @@ final class ObjectStoreBucket
                     continue;
                 }
 
-                $latestByName[$info->name] = $info;
-            }
-
-            $result = [];
-            foreach ($latestByName as $info) {
                 if (!$includeDeleted && $info->deleted) {
                     continue;
                 }
@@ -383,11 +435,105 @@ final class ObjectStoreBucket
     }
 
     /**
-     * Resolves metadata subject for an object name.
+     * Resolves the metadata subject for an object name (official base64url-of-name encoding).
      */
     private function metaSubject(string $name): string
     {
-        return $this->metaPrefix() . $name;
+        return $this->metaPrefix() . $this->encodeName($name);
+    }
+
+    /**
+     * Resolves the chunk subject for a given object NUID.
+     */
+    private function chunkSubjectForNuid(string $nuid): string
+    {
+        return $this->chunkPrefix() . $nuid;
+    }
+
+    /**
+     * Looks up an existing object's metadata, returning null when absent (best-effort, swallows
+     * not-found and lookup errors so a fresh put/delete is never blocked by it).
+     */
+    private function lookupExisting(string $name): ?ObjectInfo
+    {
+        try {
+            return $this->info($name)->await();
+        } catch (JetStreamException) {
+            return null;
+        }
+    }
+
+    /**
+     * Publishes an object metadata record with a rollup header so only the latest record per object
+     * is retained, then validates the publish acknowledgement.
+     *
+     * @param array<string,mixed> $info
+     */
+    private function publishMeta(string $name, array $info): void
+    {
+        $message = $this->client->requestWithHeaders(
+            $this->metaSubject($name),
+            json_encode($info, JSON_THROW_ON_ERROR),
+            ['Nats-Rollup' => 'sub'],
+        )->await();
+
+        /** @var array<string,mixed> $data */
+        $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+
+        /** @var array<string,mixed>|null $error */
+        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+        if ($error !== null) {
+            throw new JetStreamException(
+                (string) ($error['description'] ?? 'JetStream publish error'),
+                (int) ($error['code'] ?? 0),
+            );
+        }
+    }
+
+    /**
+     * Best-effort purge of all chunk messages for a given object NUID.
+     */
+    private function purgeChunks(string $nuid): void
+    {
+        try {
+            $this->jetStream->purgeStream(
+                $this->streamName(),
+                ['filter' => $this->chunkSubjectForNuid($nuid)],
+            )->await();
+        } catch (JetStreamException) {
+            // Best-effort cleanup; never fail the surrounding operation on purge errors.
+        }
+    }
+
+    /**
+     * Enumerates the meta subjects currently present in the bucket using a subjects filter.
+     *
+     * @return list<string>
+     */
+    private function metaSubjects(): array
+    {
+        $apiSubject = JetStreamApi::STREAM_INFO_PREFIX . $this->streamName();
+        $payload = json_encode(['subjects_filter' => $this->metaPrefix() . '>'], JSON_THROW_ON_ERROR);
+        $message = $this->client->request($apiSubject, $payload)->await();
+
+        /** @var array<string,mixed> $data */
+        $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+
+        /** @var array<string,mixed>|null $error */
+        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+        if ($error !== null) {
+            throw new JetStreamException(
+                (string) ($error['description'] ?? 'JetStream API error'),
+                (int) ($error['code'] ?? 0),
+            );
+        }
+
+        /** @var array<string,mixed> $state */
+        $state = is_array($data['state'] ?? null) ? $data['state'] : [];
+        /** @var array<string,int> $subjects */
+        $subjects = is_array($state['subjects'] ?? null) ? $state['subjects'] : [];
+
+        return array_map('strval', array_keys($subjects));
     }
 
     /**
@@ -414,36 +560,6 @@ final class ObjectStoreBucket
     }
 
     /**
-     * @return array<string,mixed>|null
-     */
-    private function requestObjectMessageBySequence(int $sequence): ?array
-    {
-        $subject = JetStreamApi::STREAM_MSG_GET_PREFIX . $this->streamName();
-        $payload = json_encode(['seq' => $sequence], JSON_THROW_ON_ERROR);
-        $message = $this->client->request($subject, $payload)->await();
-
-        /** @var array<string,mixed> $data */
-        $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
-
-        /** @var array<string,mixed>|null $error */
-        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
-        if ($error !== null) {
-            $code = (int) ($error['code'] ?? 0);
-            if ($code === 404) {
-                return null;
-            }
-
-            $description = (string) ($error['description'] ?? 'JetStream API error');
-            throw new JetStreamException($description, $code);
-        }
-
-        /** @var array<string,mixed>|null $payloadMessage */
-        $payloadMessage = is_array($data['message'] ?? null) ? $data['message'] : null;
-
-        return $payloadMessage;
-    }
-
-    /**
      * @param array<string,mixed> $message
      * @return array<string,mixed>|null
      */
@@ -466,11 +582,44 @@ final class ObjectStoreBucket
     }
 
     /**
-     * Validates object names against wildcard and whitespace usage.
+     * Computes the official Object Store content digest ("SHA-256=" + base64url).
+     */
+    private function digestOf(string $data): string
+    {
+        return 'SHA-256=' . $this->base64Url(hash('sha256', $data, true));
+    }
+
+    /**
+     * Encodes an object name into its meta-subject token using URL-safe base64 (official layout).
+     */
+    private function encodeName(string $name): string
+    {
+        return $this->base64Url($name);
+    }
+
+    /**
+     * URL-safe base64 encoding (with padding), matching the official Object Store encoding.
+     */
+    private function base64Url(string $bytes): string
+    {
+        return strtr(base64_encode($bytes), '+/', '-_');
+    }
+
+    /**
+     * Generates a unique object NUID used as the chunk subject token and stored in metadata.
+     */
+    private function nuid(): string
+    {
+        return bin2hex(random_bytes(11));
+    }
+
+    /**
+     * Validates object names. Names are base64url-encoded into the meta subject, so any non-empty
+     * name is acceptable (the encoding keeps the wire subject valid).
      */
     private function assertValidName(string $name): void
     {
-        if ($name === '' || preg_match('/[\s*>]/', $name)) {
+        if ($name === '') {
             throw new JetStreamException('Invalid object name');
         }
     }

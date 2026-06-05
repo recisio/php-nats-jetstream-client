@@ -228,6 +228,46 @@ final class ProtocolParserTest extends TestCase
         return $chunks;
     }
 
+    /**
+     * Verifies a large MSG payload containing embedded CRLF bytes reassembles correctly when fed
+     * one byte at a time (exercises the pending-frame path that avoids re-scanning the buffer).
+     */
+    public function testParsesLargeFragmentedMsgWithEmbeddedCrlf(): void
+    {
+        $payload = str_repeat("ab\r\ncd", 1000); // 6000 bytes, with embedded CRLF sequences
+        $wire = 'MSG big 7 ' . strlen($payload) . "\r\n" . $payload . "\r\n";
+
+        $parser = new ProtocolParser();
+        $frames = [];
+        foreach (str_split($wire, 1) as $byte) {
+            $frames = array_merge($frames, $parser->push($byte));
+        }
+
+        self::assertCount(1, $frames);
+        self::assertSame(ProtocolFrameType::Msg, $frames[0]->type);
+        self::assertSame('big', $frames[0]->subject);
+        self::assertSame(7, $frames[0]->sid);
+        self::assertSame($payload, $frames[0]->payload);
+    }
+
+    /**
+     * Verifies trailing bytes after a completed fragmented frame remain buffered for the next frame.
+     */
+    public function testCompletedPendingFrameLeavesTrailingBytesForNextFrame(): void
+    {
+        $parser = new ProtocolParser();
+
+        // First frame's payload is pending after the control line; the next push completes it
+        // and also carries a following control frame.
+        self::assertCount(0, $parser->push("MSG a 1 5\r\n"));
+        $frames = $parser->push("hello\r\nPONG\r\n");
+
+        self::assertCount(2, $frames);
+        self::assertSame(ProtocolFrameType::Msg, $frames[0]->type);
+        self::assertSame('hello', $frames[0]->payload);
+        self::assertSame(ProtocolFrameType::Pong, $frames[1]->type);
+    }
+
     // ─── Max Frame Size Limit ───────────────────────────────────────────
 
     /**

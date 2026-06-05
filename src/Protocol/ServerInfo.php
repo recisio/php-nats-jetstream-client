@@ -19,6 +19,8 @@ final class ServerInfo
      * @param int $maxPayload Maximum accepted payload bytes (`max_payload`) for PUB/HPUB commands.
      * @param bool $headersSupported Whether server supports NATS headers (`headers` capability).
      * @param string|null $nonce Optional nonce challenge from INFO used for JWT/NKey signature auth.
+     * @param bool $tlsRequired Whether the server requires a TLS upgrade (`tls_required`).
+     * @param bool $tlsAvailable Whether the server offers an optional TLS upgrade (`tls_available`).
      */
     public function __construct(
         public readonly string $serverId,
@@ -28,6 +30,8 @@ final class ServerInfo
         public readonly int $maxPayload,
         public readonly bool $headersSupported,
         public readonly ?string $nonce = null,
+        public readonly bool $tlsRequired = false,
+        public readonly bool $tlsAvailable = false,
     ) {
     }
 
@@ -46,6 +50,8 @@ final class ServerInfo
             maxPayload: (int) ($payload['max_payload'] ?? 0),
             headersSupported: (bool) ($payload['headers'] ?? false),
             nonce: isset($payload['nonce']) ? (string) $payload['nonce'] : null,
+            tlsRequired: (bool) ($payload['tls_required'] ?? false),
+            tlsAvailable: (bool) ($payload['tls_available'] ?? false),
         );
     }
 }

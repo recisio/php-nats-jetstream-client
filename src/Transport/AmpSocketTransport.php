@@ -22,6 +22,15 @@ final class AmpSocketTransport implements TransportInterface
 {
     private ?Socket $socket = null;
 
+    /** Whether the connect context carries a TLS context (TLS is required for this connection). */
+    private bool $tlsContextConfigured = false;
+
+    /** Whether the TLS handshake has already been performed on the current socket. */
+    private bool $tlsEstablished = false;
+
+    /** Last connect timeout in milliseconds, reused to bound a deferred TLS handshake. */
+    private int $lastConnectTimeoutMs = 5_000;
+
     /**
      * @param NatsOptions $options Client connection options controlling TLS and socket behavior.
      */
@@ -31,19 +40,52 @@ final class AmpSocketTransport implements TransportInterface
 
     /**
      * Connects to a server DSN using Amp socket transport.
+     *
+     * When TLS is required the TLS context is always configured on the socket, but the handshake is
+     * performed immediately only for handshake-first connections. Otherwise the handshake is
+     * deferred to {@see upgradeTls()} so the standard "read INFO, then upgrade" flow is supported.
      */
     public function connect(string $dsn, int $timeoutMs): Future
     {
         return async(function () use ($dsn, $timeoutMs): void {
             // Amp expects timeout in seconds, while options use milliseconds.
-            $context = (new ConnectContext())->withConnectTimeout(max(1, $timeoutMs) / 1000);
+            $this->lastConnectTimeoutMs = max(1, $timeoutMs);
+            $this->tlsEstablished = false;
+
+            $context = (new ConnectContext())->withConnectTimeout($this->lastConnectTimeoutMs / 1000);
             $context = $this->withTlsContext($context, $dsn);
+            $this->tlsContextConfigured = $context->getTlsContext() !== null;
+
             $this->socket = connect($this->normalizeSocketUri($dsn), $context);
 
-            if ($context->getTlsContext() !== null) {
-                $this->socket->setupTls(new TimeoutCancellation(max(1, $timeoutMs) / 1000));
+            if ($this->tlsContextConfigured && $this->options->tlsHandshakeFirst) {
+                $this->establishTls();
             }
         });
+    }
+
+    /**
+     * Performs the deferred TLS handshake (standard post-INFO upgrade). No-op when TLS is not
+     * configured or was already negotiated handshake-first.
+     */
+    public function upgradeTls(): Future
+    {
+        return async(function (): void {
+            $this->establishTls();
+        });
+    }
+
+    /**
+     * Runs the TLS handshake on the current socket exactly once.
+     */
+    private function establishTls(): void
+    {
+        if ($this->socket === null || !$this->tlsContextConfigured || $this->tlsEstablished) {
+            return;
+        }
+
+        $this->socket->setupTls(new TimeoutCancellation($this->lastConnectTimeoutMs / 1000));
+        $this->tlsEstablished = true;
     }
 
     /**

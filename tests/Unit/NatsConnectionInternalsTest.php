@@ -426,6 +426,12 @@ final class NatsConnectionInternalsTest extends TestCase
                 });
             }
 
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
             {
                 return async(static function (): string {
@@ -503,6 +509,12 @@ final class NatsConnectionInternalsTest extends TestCase
                     if ($bytes === "PING\r\n") {
                         throw new \RuntimeException('ping write failed');
                     }
+                });
+            }
+
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
                 });
             }
 

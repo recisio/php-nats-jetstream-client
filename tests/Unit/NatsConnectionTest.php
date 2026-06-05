@@ -1312,6 +1312,12 @@ final class NatsConnectionTest extends TestCase
                 });
             }
 
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
             {
                 return async(function (): string {
@@ -1388,6 +1394,12 @@ final class NatsConnectionTest extends TestCase
                 });
             }
 
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
             {
                 return async(function (): string {
@@ -1455,6 +1467,12 @@ final class NatsConnectionTest extends TestCase
             {
                 return async(function () use ($bytes): void {
                     $this->writes[] = $bytes;
+                });
+            }
+
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
                 });
             }
 
@@ -1590,6 +1608,12 @@ final class NatsConnectionTest extends TestCase
                 });
             }
 
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
             {
                 return async(function (): string {
@@ -1704,5 +1728,305 @@ final class NatsConnectionTest extends TestCase
         $connection->connect()->await();
 
         self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
+    // ─── Reply / queue-group injection guards (P0-3) ────────────────────
+
+    public function testPublishRejectsReplyToWithCrlfInjection(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Subject must not contain whitespace');
+        $connection->publish('orders.created', 'data', "reply\r\nPUB hack 0\r\n")->await();
+    }
+
+    public function testPublishWithHeadersRejectsReplyToWithCrlfInjection(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Subject must not contain whitespace');
+        $connection->publishWithHeaders('orders.created', 'data', ['X' => '1'], "reply\r\nPUB hack 0\r\n")->await();
+    }
+
+    public function testPublishAcceptsValidReplyTo(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $connection->publish('orders.created', 'data', '_INBOX.reply.1')->await();
+
+        self::assertSame("PUB orders.created _INBOX.reply.1 4\r\ndata\r\n", $transport->writes[2]);
+    }
+
+    public function testSubscribeRejectsQueueGroupWithWhitespace(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Queue group must not contain whitespace');
+        $connection->subscribe('tasks.process', static function (NatsMessage $message): void {
+        }, "workers\r\nSUB hack 99")->await();
+    }
+
+    public function testSubscribeRejectsEmptyQueueGroup(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Queue group must not be empty');
+        $connection->subscribe('tasks.process', static function (NatsMessage $message): void {
+        }, '')->await();
+    }
+
+    // ─── Cancellable reads / no orphaned read on timeout (P0-1) ─────────
+
+    public function testRequestTimeoutCancelsReadAndAllowsSubsequentRequest(): void
+    {
+        $transport = new class () implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            public int $maxConcurrentReads = 0;
+            public int $cancelledReads = 0;
+            private int $activeReads = 0;
+            /** @var list<string> */
+            public array $queue = [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+            ];
+
+            public function connect(string $dsn, int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function write(string $bytes): \Amp\Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
+            {
+                return async(function () use ($cancellation): string {
+                    if ($this->queue !== []) {
+                        return (string) array_shift($this->queue);
+                    }
+
+                    // No data: behave like a real, cancellable long-blocking socket read.
+                    $this->activeReads++;
+                    $this->maxConcurrentReads = max($this->maxConcurrentReads, $this->activeReads);
+
+                    try {
+                        delay(30, cancellation: $cancellation ?? new \Amp\NullCancellation());
+
+                        return '';
+                    } catch (\Amp\CancelledException $e) {
+                        $this->cancelledReads++;
+
+                        throw $e;
+                    } finally {
+                        $this->activeReads--;
+                    }
+                });
+            }
+
+            public function close(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function pushReply(string $chunk): void
+            {
+                $this->queue[] = $chunk;
+            }
+        };
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        // First request times out: the underlying read must be cancelled, not orphaned.
+        try {
+            $connection->request('svc.echo', 'x', 20)->await();
+            self::fail('Expected timeout');
+        } catch (TimeoutException) {
+            // expected
+        }
+
+        self::assertGreaterThanOrEqual(1, $transport->cancelledReads);
+
+        // A subsequent request must succeed with no reconnect and no overlapping read.
+        $transport->pushReply("MSG _INBOX.any 2 2\r\nok\r\n");
+
+        $reply = $connection->request('svc.echo', 'x', 500)->await();
+
+        self::assertSame('ok', $reply->payload);
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertLessThanOrEqual(1, $transport->maxConcurrentReads);
+    }
+
+    // ─── Idle heartbeat does not self-disconnect (P0-2) ─────────────────
+
+    public function testIdleConnectionStaysOpenViaHeartbeatSelfRead(): void
+    {
+        // Live-server fake: every PING write produces a PONG on the next read. The application
+        // never calls processIncoming(), so without the heartbeat self-read the outstanding-ping
+        // counter would exceed maxPingsOut and (with reconnect disabled) close the connection.
+        $transport = new class () implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            public int $pings = 0;
+            /** @var list<string> */
+            private array $queue = [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            ];
+
+            public function connect(string $dsn, int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function write(string $bytes): \Amp\Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                    if ($bytes === "PING\r\n") {
+                        $this->pings++;
+                        $this->queue[] = "PONG\r\n";
+                    }
+                });
+            }
+
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
+            {
+                return async(function () use ($cancellation): string {
+                    if ($this->queue !== []) {
+                        return (string) array_shift($this->queue);
+                    }
+
+                    delay(30, cancellation: $cancellation ?? new \Amp\NullCancellation());
+
+                    return '';
+                });
+            }
+
+            public function close(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+        };
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 1, maxPingsOut: 1, reconnectEnabled: false),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // Let several heartbeat ticks elapse without any application processIncoming() calls.
+        delay(2.5);
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertGreaterThanOrEqual(2, $transport->pings);
+
+        $connection->disconnect()->await();
+    }
+
+    // ─── TLS upgrade ordering (P1-4) ────────────────────────────────────
+
+    public function testStandardTlsUpgradeRunsAfterInfoWhenNotHandshakeFirst(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(tlsRequired: true, tlsHandshakeFirst: false, pingIntervalSeconds: 0),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        // Post-INFO upgrade path performs exactly one explicit TLS upgrade.
+        self::assertSame(1, $transport->upgradeTlsCalls);
+    }
+
+    public function testHandshakeFirstDoesNotCallExplicitUpgrade(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(tlsRequired: true, tlsHandshakeFirst: true, pingIntervalSeconds: 0),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        // Handshake-first negotiates TLS during connect(), so no explicit post-INFO upgrade.
+        self::assertSame(0, $transport->upgradeTlsCalls);
+    }
+
+    public function testPlainConnectionDoesNotUpgradeTls(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertSame(0, $transport->upgradeTlsCalls);
     }
 }

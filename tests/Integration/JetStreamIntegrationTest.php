@@ -1094,21 +1094,24 @@ final class JetStreamIntegrationTest extends TestCase
         $info = $store->info($objectName)->await();
         self::assertNotNull($info);
 
-        $corruptedDigest = 'SHA-256=' . base64_encode(hash('sha256', 'different-bytes', true));
+        $corruptedDigest = 'SHA-256=' . strtr(base64_encode(hash('sha256', 'different-bytes', true)), '+/', '-_');
         self::assertNotSame($stored->digest, $corruptedDigest);
 
         $tampered = [
             'name' => $info->name,
+            'bucket' => $info->bucket,
+            'nuid' => $info->nuid,
             'size' => $info->size,
             'chunks' => $info->chunks,
             'digest' => $corruptedDigest,
             'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
             'deleted' => false,
-            'chunk_subject' => $info->chunkSubject,
             'metadata' => $info->metadata,
         ];
 
-        $js->publish($store->metaPrefix() . $objectName, json_encode($tampered, JSON_THROW_ON_ERROR))->await();
+        // Meta subjects are keyed by base64url(name); a newer publish on that subject rolls up.
+        $encodedName = strtr(base64_encode($objectName), '+/', '-_');
+        $js->publish($store->metaPrefix() . $encodedName, json_encode($tampered, JSON_THROW_ON_ERROR))->await();
 
         try {
             $store->get($objectName)->await();
