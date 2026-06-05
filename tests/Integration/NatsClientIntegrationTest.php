@@ -6,6 +6,7 @@ namespace IDCT\NATS\Tests\Integration;
 
 use Amp\CancelledException;
 use Amp\DeferredCancellation;
+use Amp\DeferredFuture;
 use Amp\Future;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Auth\NkeySeedSigner;
@@ -307,14 +308,11 @@ final class NatsClientIntegrationTest extends TestCase
         $servicePump = async(static function () use ($serviceClient, $servicePumpCancellation): void {
             $cancellation = $servicePumpCancellation->getCancellation();
 
-            while (!$cancellation->isRequested()) {
-                try {
-                    $serviceClient->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $serviceClient->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -390,14 +388,11 @@ final class NatsClientIntegrationTest extends TestCase
         $servicePump = async(static function () use ($serviceClient, $servicePumpCancellation): void {
             $cancellation = $servicePumpCancellation->getCancellation();
 
-            while (!$cancellation->isRequested()) {
-                try {
-                    $serviceClient->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $serviceClient->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -503,14 +498,11 @@ final class NatsClientIntegrationTest extends TestCase
         $servicePump = async(static function () use ($serviceClient, $servicePumpCancellation): void {
             $cancellation = $servicePumpCancellation->getCancellation();
 
-            while (!$cancellation->isRequested()) {
-                try {
-                    $serviceClient->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $serviceClient->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -624,14 +616,11 @@ final class NatsClientIntegrationTest extends TestCase
         $servicePump = async(static function () use ($serviceClient, $servicePumpCancellation): void {
             $cancellation = $servicePumpCancellation->getCancellation();
 
-            while (!$cancellation->isRequested()) {
-                try {
-                    $serviceClient->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $serviceClient->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -697,14 +686,11 @@ final class NatsClientIntegrationTest extends TestCase
         $servicePump = async(static function () use ($serviceClient, $servicePumpCancellation): void {
             $cancellation = $servicePumpCancellation->getCancellation();
 
-            while (!$cancellation->isRequested()) {
-                try {
-                    $serviceClient->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $serviceClient->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -763,7 +749,8 @@ final class NatsClientIntegrationTest extends TestCase
 
         $service = $serviceClient->service('conc-' . $suffix, '1.0.0', 'Concurrent service')
             ->addEndpoint('concurrent', $subject, static function (NatsMessage $message): string {
-                usleep(25_000);
+                // Simulate work without blocking the event loop, so the in-flight requests overlap.
+                delay(0.025);
 
                 return 'ok:' . $message->payload;
             });
@@ -773,14 +760,11 @@ final class NatsClientIntegrationTest extends TestCase
         $servicePump = async(static function () use ($serviceClient, $servicePumpCancellation): void {
             $cancellation = $servicePumpCancellation->getCancellation();
 
-            while (!$cancellation->isRequested()) {
-                try {
-                    $serviceClient->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $serviceClient->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -1496,22 +1480,64 @@ final class NatsClientIntegrationTest extends TestCase
 
         $seenA = [];
         $seenB = [];
-        $workerA->subscribe($subject, static function (NatsMessage $message) use (&$seenA): void {
+        $done = new DeferredFuture();
+        $workerA->subscribe($subject, static function (NatsMessage $message) use (&$seenA, &$seenB, $messageCount, $done): void {
             $seenA[] = $message->payload;
+            if (count($seenA) + count($seenB) >= $messageCount && !$done->isComplete()) {
+                $done->complete();
+            }
         }, $group)->await();
-        $workerB->subscribe($subject, static function (NatsMessage $message) use (&$seenB): void {
+        $workerB->subscribe($subject, static function (NatsMessage $message) use (&$seenA, &$seenB, $messageCount, $done): void {
             $seenB[] = $message->payload;
+            if (count($seenA) + count($seenB) >= $messageCount && !$done->isComplete()) {
+                $done->complete();
+            }
         }, $group)->await();
+
+        // Round-trip each worker so its queue-group subscription is registered on the server before
+        // publishing from a separate connection; otherwise the first messages could be missed.
+        $flush = static function (NatsClient $client): void {
+            try {
+                $client->request('it.queue.flush.' . bin2hex(random_bytes(4)), '', 1_000)->await();
+            } catch (\Throwable) {
+                // A no-responder reply is expected; the round-trip itself flushes the subscription.
+            }
+        };
+        $flush($workerA);
+        $flush($workerB);
+
+        // Drain both workers continuously; the completion future is resolved from the handlers above.
+        $pumpCancellation = new DeferredCancellation();
+        $pumpToken = $pumpCancellation->getCancellation();
+        $pumpA = async(static function () use ($workerA, $pumpToken): void {
+            try {
+                while (!$pumpToken->isRequested()) {
+                    $workerA->processIncoming($pumpToken)->await();
+                }
+            } catch (CancelledException) {
+            }
+        });
+        $pumpB = async(static function () use ($workerB, $pumpToken): void {
+            try {
+                while (!$pumpToken->isRequested()) {
+                    $workerB->processIncoming($pumpToken)->await();
+                }
+            } catch (CancelledException) {
+            }
+        });
 
         for ($i = 0; $i < $messageCount; $i++) {
             $publisher->publish($subject, (string) $i)->await();
         }
 
-        $deadline = microtime(true) + 5.0;
-        while ((count($seenA) + count($seenB)) < $messageCount && microtime(true) < $deadline) {
-            $workerA->processIncoming()->await();
-            $workerB->processIncoming()->await();
-            usleep(20_000);
+        try {
+            $done->getFuture()->await(new TimeoutCancellation(5.0));
+        } catch (CancelledException) {
+            // Window elapsed; the assertions below report what was distributed.
+        } finally {
+            $pumpCancellation->cancel();
+            $pumpA->await();
+            $pumpB->await();
         }
 
         $allSeen = array_merge($seenA, $seenB);
@@ -1551,14 +1577,11 @@ final class NatsClientIntegrationTest extends TestCase
         $serverPumpCancellation = new DeferredCancellation();
         $serverPump = async(static function () use ($server, $serverPumpCancellation): void {
             $cancellation = $serverPumpCancellation->getCancellation();
-            while (!$cancellation->isRequested()) {
-                try {
-                    $server->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $server->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
@@ -1708,14 +1731,11 @@ final class NatsClientIntegrationTest extends TestCase
         $serverPumpCancellation = new DeferredCancellation();
         $serverPump = async(static function () use ($server, $serverPumpCancellation): void {
             $cancellation = $serverPumpCancellation->getCancellation();
-            while (!$cancellation->isRequested()) {
-                try {
-                    $server->processIncoming()->await($cancellation);
-                } catch (CancelledException) {
-                    break;
-                } catch (\Throwable) {
-                    usleep(20_000);
+            try {
+                while (!$cancellation->isRequested()) {
+                    $server->processIncoming($cancellation)->await();
                 }
+            } catch (CancelledException) {
             }
         });
 
