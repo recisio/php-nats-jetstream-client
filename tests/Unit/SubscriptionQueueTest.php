@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Unit;
 
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\SubscriptionQueue;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
+
+use function Amp\async;
 
 final class SubscriptionQueueTest extends TestCase
 {
@@ -264,5 +267,55 @@ final class SubscriptionQueueTest extends TestCase
         $messages = $queue->fetchAll(1);
         self::assertCount(1, $messages);
         self::assertSame('a', $messages[0]->payload);
+    }
+
+    public function testFetchDoesNotBlockOnIdleSubject(): void
+    {
+        // blockWhenEmpty mirrors a live but idle socket: readLine() suspends until cancelled. The
+        // outer 2s bound fails the test if fetch() ever parks the caller (it must return ~instantly).
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('idle.subject')->await();
+
+        $result = \Amp\Future\await([async(static fn (): ?\IDCT\NATS\Core\NatsMessage => $queue->fetch())], new TimeoutCancellation(2.0))[0];
+
+        self::assertNull($result);
+        self::assertTrue($transport->lastReadHadCancellation, 'fetch() must bound the read with a cancellation');
+    }
+
+    public function testNextWithDefaultTimeoutDoesNotBlockOnIdleSubject(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('idle.subject')->await();
+
+        // Default timeout is 0 (the <= 0 branch); it must not block the calling fiber.
+        $result = \Amp\Future\await([async(static fn (): ?\IDCT\NATS\Core\NatsMessage => $queue->next())], new TimeoutCancellation(2.0))[0];
+
+        self::assertNull($result);
+    }
+
+    public function testNextWithNegativeTimeoutDoesNotBlockOnIdleSubject(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('idle.subject')->await();
+        $queue->setTimeout(-1.0);
+
+        $result = \Amp\Future\await([async(static fn (): ?\IDCT\NATS\Core\NatsMessage => $queue->next())], new TimeoutCancellation(2.0))[0];
+
+        self::assertNull($result);
+    }
+
+    public function testFetchAllWithDefaultTimeoutDoesNotBlockOnIdleSubject(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('idle.subject')->await();
+
+        // No setTimeout(): fetchAll() must still bound its read and return [] rather than parking.
+        $result = \Amp\Future\await([async(static fn (): array => $queue->fetchAll())], new TimeoutCancellation(2.0))[0];
+
+        self::assertSame([], $result);
     }
 }

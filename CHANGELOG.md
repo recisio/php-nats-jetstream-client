@@ -37,6 +37,14 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` `SubscriptionQueue::fetch()`, `next()` (with no/zero/negative timeout),
+  and `fetchAll()` (with no timeout) no longer block the calling fiber forever on an
+  idle subject against a real socket. Each now bounds its single poll with a small
+  cancellation, honoring the documented non-blocking contract.
+- `[bugfix]` `Service::run()` now passes its cancellation into `processIncoming()`,
+  not only the outer `await()`. Previously a timed/cancelled run loop left the idle
+  socket read running detached, wedging the shared connection (every later read
+  short-circuited and the heartbeat stalled). The read is now torn down on cancel.
 - `[bugfix]` `getStreamMessage()` no longer returns an empty payload when the stored
   body is the single character `0`. The decoded body was passed through a falsy
   fallback, so a legitimate `"0"` payload was replaced with an empty string.

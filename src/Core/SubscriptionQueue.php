@@ -18,6 +18,13 @@ use function Amp\delay;
  */
 final class SubscriptionQueue
 {
+    /**
+     * Bounds a single "non-blocking" / no-timeout poll so the underlying socket read cannot suspend
+     * the calling fiber indefinitely on an idle subject. Small enough to be effectively immediate,
+     * large enough not to race past bytes already in flight.
+     */
+    private const NON_BLOCKING_TIMEOUT = 0.001;
+
     /** @var SplQueue<NatsMessage> */
     private SplQueue $messages;
     private float $timeout = 0;
@@ -64,8 +71,14 @@ final class SubscriptionQueue
             return $this->messages->dequeue();
         }
 
-        // Try one processIncoming cycle to see if anything arrives.
-        $this->client->processIncoming()->await();
+        // Try one bounded processIncoming cycle so an idle socket read cannot park the caller.
+        $cancellation = new TimeoutCancellation(self::NON_BLOCKING_TIMEOUT);
+
+        try {
+            $this->client->processIncoming($cancellation)->await();
+        } catch (CancelledException) {
+            // Nothing was immediately available; honor the non-blocking contract.
+        }
 
         return $this->messages->count() > 0 ? $this->messages->dequeue() : null;
     }
@@ -84,7 +97,14 @@ final class SubscriptionQueue
         }
 
         if ($this->timeout <= 0) {
-            $this->client->processIncoming()->await();
+            // No timeout configured: a single bounded cycle, matching fetch() rather than blocking.
+            $cancellation = new TimeoutCancellation(self::NON_BLOCKING_TIMEOUT);
+
+            try {
+                $this->client->processIncoming($cancellation)->await();
+            } catch (CancelledException) {
+                // Nothing was immediately available.
+            }
 
             return $this->messages->count() > 0 ? $this->messages->dequeue() : null;
         }
@@ -133,8 +153,9 @@ final class SubscriptionQueue
             return $collected;
         }
 
-        // A cancellation bounds each read so a real socket cannot block past the timeout window.
-        $cancellation = $this->timeout > 0 ? new TimeoutCancellation($this->timeout) : null;
+        // A finite cancellation always bounds each read so a real socket cannot block past the
+        // timeout window — and, when no timeout is configured, past a single non-blocking cycle.
+        $cancellation = new TimeoutCancellation($this->timeout > 0 ? $this->timeout : self::NON_BLOCKING_TIMEOUT);
 
         try {
             while ($limit === null || count($collected) < $limit) {

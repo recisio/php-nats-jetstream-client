@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Support;
 
 use Amp\Cancellation;
+use Amp\DeferredFuture;
 use Amp\Future;
 use IDCT\NATS\Transport\TransportInterface;
 
 use function Amp\async;
+use function Amp\delay;
 
 final class FakeTransport implements TransportInterface
 {
@@ -22,12 +24,20 @@ final class FakeTransport implements TransportInterface
 
     public int $upgradeTlsCalls = 0;
 
+    // Diagnostics for blocking-mode reads (see $blockWhenEmpty).
+    public int $startedReads = 0;
+    public int $resolvedReads = 0;
+    public ?bool $lastReadHadCancellation = null;
+
     /**
      * Creates an in-memory fake transport with pre-seeded read chunks.
      *
      * @param list<string> $readQueue
+     * @param bool $blockWhenEmpty When true, readLine() on an exhausted queue mirrors a real socket:
+     *                             it suspends until the supplied cancellation fires (or forever when
+     *                             the cancellation is null) instead of returning '' immediately.
      */
-    public function __construct(private array $readQueue = []) {}
+    public function __construct(private array $readQueue = [], private bool $blockWhenEmpty = false) {}
 
     /**
      * Records connect calls for assertions.
@@ -64,7 +74,32 @@ final class FakeTransport implements TransportInterface
      */
     public function readLine(?Cancellation $cancellation = null): Future
     {
-        return async(fn(): string => array_shift($this->readQueue) ?? '');
+        return async(function () use ($cancellation): string {
+            if ($this->readQueue !== []) {
+                return (string) array_shift($this->readQueue);
+            }
+
+            if (!$this->blockWhenEmpty) {
+                return '';
+            }
+
+            // Faithfully model a live but idle socket: suspend until cancelled (or forever if no
+            // cancellation was supplied, mirroring AmpSocketTransport::readLine(null)).
+            $this->startedReads++;
+            $this->lastReadHadCancellation = $cancellation !== null;
+
+            try {
+                if ($cancellation === null) {
+                    (new DeferredFuture())->getFuture()->await();
+                }
+
+                delay(PHP_INT_MAX, cancellation: $cancellation);
+            } finally {
+                $this->resolvedReads++;
+            }
+
+            return '';
+        });
     }
 
     /**

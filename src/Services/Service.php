@@ -251,7 +251,10 @@ final class Service
                     }
 
                     try {
-                        $processed = $this->client->processIncoming()->await($effectiveCancellation);
+                        // Thread the cancellation INTO processIncoming (not just the outer await) so
+                        // the underlying socket read is actually bounded and torn down on cancel —
+                        // otherwise an idle read is orphaned and leaves the shared connection wedged.
+                        $processed = $this->client->processIncoming($effectiveCancellation)->await($effectiveCancellation);
                         if ($processed === 0) {
                             // Yield briefly to avoid a tight loop when transport is idle.
                             delay(0.01, cancellation: $effectiveCancellation);

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Unit;
 
 use Amp\DeferredCancellation;
+use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsMessage;
@@ -639,5 +640,51 @@ final class ServiceTest extends TestCase
         $writes = implode('', $transport->writes);
         self::assertStringContainsString('SUB svc.echo 13' . "\r\n", $writes);
         self::assertStringNotContainsString('SUB svc.echo q', $writes);
+    }
+
+    public function testRunPassesCancellationIntoSocketRead(): void
+    {
+        // blockWhenEmpty models a live idle socket: the run loop's read suspends until cancelled.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ], blockWhenEmpty: true);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload)
+            ->run(0.03)->await();
+
+        // The idle read was given a cancellation and was actually torn down (not orphaned): every
+        // started read resolved. On the unfixed code the read got a null cancellation and never
+        // resolved, so startedReads > resolvedReads and lastReadHadCancellation would be false.
+        self::assertTrue($transport->lastReadHadCancellation);
+        self::assertGreaterThan(0, $transport->startedReads);
+        self::assertSame($transport->startedReads, $transport->resolvedReads);
+    }
+
+    public function testRunLeavesConnectionReusableAfterTimeout(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ], blockWhenEmpty: true);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload)
+            ->run(0.03)->await();
+
+        // The shared connection must not be left with a read in progress (which would short-circuit
+        // every subsequent read). On the unfixed code the orphaned read leaves this true forever.
+        $connectionProp = new \ReflectionProperty(NatsClient::class, 'connection');
+        $connection = $connectionProp->getValue($client);
+        self::assertInstanceOf(NatsConnection::class, $connection);
+        $readInProgress = new \ReflectionProperty(NatsConnection::class, 'readInProgress');
+        self::assertFalse($readInProgress->getValue($connection));
     }
 }
