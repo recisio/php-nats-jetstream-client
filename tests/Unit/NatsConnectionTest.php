@@ -563,6 +563,153 @@ final class NatsConnectionTest extends TestCase
         self::assertSame("SUB updates 1\r\n", $transport->writes[5]);
     }
 
+    public function testProcessIncomingRecoversOnPeerEof(): void
+    {
+        // A graceful peer close (EOF), not a thrown read error, must still trigger reconnect + replay.
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__EOF__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    "MSG updates 1 5\r\nhello\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $options = new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 3, reconnectDelayMs: 1, reconnectJitterMs: 0);
+        $connection = new NatsConnection($options, $transport);
+        $connection->connect()->await();
+
+        $received = [];
+        $connection->subscribe('updates', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        })->await();
+
+        self::assertSame(0, $connection->processIncoming()->await()); // hits EOF -> recovers
+        self::assertSame(ConnectionState::Open, $connection->state());
+
+        $connection->processIncoming()->await();
+
+        self::assertSame(['hello'], $received);
+        self::assertCount(2, $transport->connectCalls);
+        self::assertSame("SUB updates 1\r\n", $transport->writes[5]);
+    }
+
+    public function testProcessIncomingRecoversOnPeerEofWithPingsDisabled(): void
+    {
+        // With pings disabled the read path is the ONLY way to detect loss, so EOF recovery is the
+        // only thing standing between a peer close and a permanent silent outage.
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__EOF__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $options = new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 3, reconnectDelayMs: 1, reconnectJitterMs: 0, pingIntervalSeconds: 0);
+        $connection = new NatsConnection($options, $transport);
+        $connection->connect()->await();
+
+        self::assertSame(0, $connection->processIncoming()->await());
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertCount(2, $transport->connectCalls);
+    }
+
+    public function testProcessIncomingMovesToClosedOnPeerEofWhenReconnectDisabled(): void
+    {
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__EOF__',
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        try {
+            $connection->processIncoming()->await();
+        } catch (\Throwable) {
+            // recoverConnection() throws 'Reconnect is disabled'; the connection is left Closed.
+        }
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        self::assertCount(1, $transport->connectCalls);
+    }
+
+    public function testConsumeHeartbeatResponseRecoversOnPeerEof(): void
+    {
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__EOF__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 3, reconnectDelayMs: 1, reconnectJitterMs: 0), $transport);
+        $connection->connect()->await();
+
+        // The heartbeat self-read hits EOF: it must recover (after clearing readInProgress), not swallow.
+        (new \ReflectionMethod($connection, 'consumeHeartbeatResponse'))->invoke($connection);
+
+        self::assertCount(2, $transport->connectCalls);
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
+    public function testConsumeHeartbeatResponseDoesNotRecoverWithoutEof(): void
+    {
+        // An empty/no-PONG-yet read (not EOF) must be swallowed, never trigger a reconnect.
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 3, reconnectDelayMs: 1, reconnectJitterMs: 0), $transport);
+        $connection->connect()->await();
+
+        (new \ReflectionMethod($connection, 'consumeHeartbeatResponse'))->invoke($connection);
+
+        self::assertCount(1, $transport->connectCalls);
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
     /**
      * Verifies connect retries across rotated servers when earlier attempts fail.
      */

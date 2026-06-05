@@ -7,6 +7,7 @@ namespace IDCT\NATS\Tests\Support;
 use Amp\Cancellation;
 use Amp\DeferredFuture;
 use Amp\Future;
+use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
 
 use function Amp\async;
@@ -14,6 +15,9 @@ use function Amp\delay;
 
 final class FakeTransport implements TransportInterface
 {
+    /** Queue sentinel: a readLine() that dequeues this value throws TransportClosedException (EOF). */
+    public const EOF = '__EOF__';
+
     /** @var list<string> */
     public array $connectCalls = [];
 
@@ -76,7 +80,12 @@ final class FakeTransport implements TransportInterface
     {
         return async(function () use ($cancellation): string {
             if ($this->readQueue !== []) {
-                return (string) array_shift($this->readQueue);
+                $chunk = (string) array_shift($this->readQueue);
+                if ($chunk === self::EOF) {
+                    throw new TransportClosedException('Socket closed by peer (EOF)');
+                }
+
+                return $chunk;
             }
 
             if (!$this->blockWhenEmpty) {

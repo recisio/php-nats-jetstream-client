@@ -7,7 +7,11 @@ namespace IDCT\NATS\Tests\Unit;
 use Amp\Socket\ConnectContext;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Transport\AmpSocketTransport;
+use IDCT\NATS\Transport\TransportClosedException;
 use PHPUnit\Framework\TestCase;
+
+use function Amp\async;
+use function Amp\Socket\listen;
 
 final class AmpSocketTransportTest extends TestCase
 {
@@ -149,5 +153,44 @@ final class AmpSocketTransportTest extends TestCase
         $result = $method->invoke($transport, $dsn);
 
         return $result;
+    }
+
+    /**
+     * Verifies a real peer close (EOF) surfaces as TransportClosedException rather than being
+     * collapsed into '' — the root-cause regression test for read-path reconnect.
+     */
+    public function testReadLineThrowsTransportClosedOnPeerEof(): void
+    {
+        $server = listen('tcp://127.0.0.1:0');
+        $address = (string) $server->getAddress();
+
+        async(static function () use ($server): void {
+            $client = $server->accept();
+            if ($client !== null) {
+                $client->write("hello\r\n");
+                $client->close();
+            }
+        });
+
+        $transport = new AmpSocketTransport(new NatsOptions());
+        $transport->connect('tcp://' . $address, 1000)->await();
+
+        $collected = '';
+        $threw = false;
+
+        try {
+            // Read the bytes, then the next read must observe EOF and throw.
+            for ($i = 0; $i < 50; $i++) {
+                $collected .= $transport->readLine()->await();
+            }
+        } catch (TransportClosedException) {
+            $threw = true;
+        } finally {
+            $transport->close()->await();
+            $server->close();
+        }
+
+        self::assertStringContainsString('hello', $collected);
+        self::assertTrue($threw, 'readLine() must throw TransportClosedException on peer EOF');
     }
 }

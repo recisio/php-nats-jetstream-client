@@ -37,6 +37,13 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` A graceful peer close (socket EOF) now triggers reconnect from the read
+  path. `readLine()` previously collapsed the EOF `null` into an empty string, which
+  the connection treated as "no data this tick", so a server restart / idle-timeout /
+  load-balancer reap left the client believing it was connected to a dead socket
+  (never recovering when pings are disabled, recovering only after ~90s otherwise).
+  Transports now signal EOF via a `TransportClosedException`, which `processIncoming()`
+  and the heartbeat self-read escalate to `recoverConnection()`.
 - `[bugfix]` `SubscriptionQueue::fetch()`, `next()` (with no/zero/negative timeout),
   and `fetchAll()` (with no timeout) no longer block the calling fiber forever on an
   idle subject against a real socket. Each now bounds its single poll with a small

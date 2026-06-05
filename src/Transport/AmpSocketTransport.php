@@ -103,12 +103,26 @@ final class AmpSocketTransport implements TransportInterface
 
     /**
      * Reads the next available chunk from the active socket.
+     *
+     * Distinguishes three outcomes: a non-empty chunk of bytes; an empty string when there is no
+     * socket yet (so handshake/idle polling can continue); and a {@see TransportClosedException}
+     * when the peer closes a live socket (EOF), so the connection layer can reconnect from the read
+     * path. A read timeout surfaces as an Amp CancelledException from the underlying read, never as
+     * EOF, so a bounded read is not mistaken for a peer close.
      */
     public function readLine(?Cancellation $cancellation = null): Future
     {
         return async(function () use ($cancellation): string {
-            $chunk = $this->socket?->read($cancellation);
-            return $chunk ?? '';
+            if ($this->socket === null) {
+                return '';
+            }
+
+            $chunk = $this->socket->read($cancellation);
+            if ($chunk === null) {
+                throw new TransportClosedException('Socket closed by peer (EOF)');
+            }
+
+            return $chunk;
         });
     }
 

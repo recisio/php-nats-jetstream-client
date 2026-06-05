@@ -39,6 +39,13 @@ interface TransportInterface
     /**
      * Reads a raw chunk from the transport.
      *
+     * Implementations MUST signal a peer close (EOF) on a live socket by throwing
+     * {@see TransportClosedException}, so the connection layer can reconnect from the read path. An
+     * empty string MUST be reserved for "no bytes available without EOF" (e.g. no socket yet). A
+     * supplied non-null cancellation MUST be honored (a read timeout surfaces as an Amp
+     * CancelledException, never as EOF); with a null cancellation the read may suspend until data
+     * arrives or the peer closes.
+     *
      * @return Future<string>
      */
     public function readLine(?Cancellation $cancellation = null): Future;

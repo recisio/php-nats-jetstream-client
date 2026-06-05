@@ -24,6 +24,7 @@ use IDCT\NATS\Protocol\ProtocolCodec;
 use IDCT\NATS\Protocol\ProtocolFrame;
 use IDCT\NATS\Protocol\ProtocolParser;
 use IDCT\NATS\Protocol\ServerInfo;
+use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
 use Revolt\EventLoop;
 use SplQueue;
@@ -987,14 +988,30 @@ final class NatsConnection
 
         $this->readInProgress = true;
 
+        $closed = false;
         try {
             $chunk = $this->transport->readLine(new TimeoutCancellation($timeoutSeconds))->await();
+        } catch (TransportClosedException) {
+            // The peer closed the socket during the heartbeat read. Recover, but only after the
+            // finally clears readInProgress (recoverConnection -> connectOnce reads the socket).
+            $closed = true;
+            $chunk = '';
         } catch (\Throwable) {
             // No PONG within the window (or a transient read error); leave escalation to the next
             // tick or to the application's own processIncoming() loop.
             return;
         } finally {
             $this->readInProgress = false;
+        }
+
+        if ($closed) {
+            try {
+                $this->recoverConnection();
+            } catch (\Throwable) {
+                $this->state = ConnectionState::Closed;
+            }
+
+            return;
         }
 
         if ($chunk === '') {

@@ -6,6 +6,7 @@ namespace IDCT\NATS\Tests\Support;
 
 use Amp\Cancellation;
 use Amp\Future;
+use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
 use RuntimeException;
 
@@ -97,6 +98,10 @@ final class FlakyTransport implements TransportInterface
             $next = array_shift($this->readQueuesByConnection[$index]) ?? '';
             if ($next === '__THROW__') {
                 throw new RuntimeException('read failed');
+            }
+
+            if ($next === '__EOF__') {
+                throw new TransportClosedException('Socket closed by peer (EOF)');
             }
 
             return $next;
