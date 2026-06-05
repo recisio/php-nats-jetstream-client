@@ -1105,34 +1105,11 @@ final class JetStreamIntegrationTest extends TestCase
         $stored = $store->put($objectName, $payload, ['content-type' => 'text/plain'])->await();
         self::assertGreaterThan(1, $stored->chunks);
 
-        $metaVisible = false;
-        $metaDeadline = microtime(true) + 4.0;
-        while (microtime(true) < $metaDeadline) {
-            if ($store->info($objectName)->await() !== null) {
-                $metaVisible = true;
-                break;
-            }
+        // put() awaited the metadata and every chunk publish ack on this connection, so the object
+        // is durable and immediately readable - no propagation polling needed.
+        self::assertNotNull($store->info($objectName)->await());
 
-            usleep(100_000);
-        }
-        self::assertTrue($metaVisible);
-
-        $retrieved = null;
-        $deadline = microtime(true) + 4.0;
-        while (microtime(true) < $deadline) {
-            try {
-                $retrieved = $store->get($objectName)->await();
-                if ($retrieved !== null) {
-                    break;
-                }
-            } catch (JetStreamException $e) {
-                if (!str_contains($e->getMessage(), 'Object digest mismatch')) {
-                    throw $e;
-                }
-            }
-
-            usleep(100_000);
-        }
+        $retrieved = $store->get($objectName)->await();
 
         self::assertNotNull($retrieved);
         self::assertSame($payload, $retrieved->data);

@@ -252,8 +252,6 @@ final class ServiceTest extends TestCase
 
         $service = $client->service('echo', '1.0.0')
             ->addEndpoint('echo', 'svc.echo', static function (NatsMessage $message): string {
-                usleep(1000);
-
                 if ($message->payload === 'boom') {
                     throw new \RuntimeException('handler failed');
                 }
