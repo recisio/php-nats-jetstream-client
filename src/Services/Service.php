@@ -20,6 +20,9 @@ use function Amp\delay;
  */
 final class Service
 {
+    /** Default endpoint queue group per the NATS micro spec; instances load-balance requests. */
+    public const DEFAULT_QUEUE_GROUP = 'q';
+
     /** @var array<int, int> */
     private array $subscriptionSids = [];
 
@@ -64,9 +67,13 @@ final class Service
      * @param callable(NatsMessage):(string|array<string,mixed>|null)|ServiceEndpointHandlerInterface|class-string<ServiceEndpointHandlerInterface>|object $handler
      * @param array<string,mixed>|null $schema Optional JSON Schema for the endpoint.
      */
-    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = null, ?array $schema = null): self
+    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = self::DEFAULT_QUEUE_GROUP, ?array $schema = null): self
     {
-        $endpoint = new ServiceEndpoint($name, $subject, $queueGroup, $schema);
+        // Per the NATS micro spec endpoints share a queue group ("q" by default) so multiple
+        // service instances load-balance requests. Pass null or '' to opt out (fan-out: every
+        // instance receives every request).
+        $resolvedQueueGroup = ($queueGroup === null || $queueGroup === '') ? null : $queueGroup;
+        $endpoint = new ServiceEndpoint($name, $subject, $resolvedQueueGroup, $schema);
         $this->endpoints[$subject] = $endpoint;
         $this->handlers[$subject] = $this->resolveHandler($handler);
 

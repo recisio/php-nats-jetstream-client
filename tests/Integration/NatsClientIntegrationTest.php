@@ -7,6 +7,7 @@ namespace IDCT\NATS\Tests\Integration;
 use Amp\CancelledException;
 use Amp\DeferredCancellation;
 use Amp\Future;
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Auth\NkeySeedSigner;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Connection\NatsOptions;
@@ -60,7 +61,17 @@ final class NatsClientIntegrationTest extends TestCase
         })->await();
 
         $client->publish($subject, 'hello')->await();
-        $client->processIncoming()->await();
+
+        // processIncoming() blocks until data arrives or the cancellation fires, so this is
+        // event-driven, not a poll: no sleep, and bounded so a lost message fails fast.
+        $cancellation = new TimeoutCancellation(2.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+            // No message within the window; the assertion below reports it.
+        }
 
         self::assertInstanceOf(NatsMessage::class, $received);
         /** @var NatsMessage $message */
@@ -92,13 +103,27 @@ final class NatsClientIntegrationTest extends TestCase
             }
         })->await();
 
-        // Process one request on the server in parallel while requester waits for its reply.
-        $serverLoop = async(static function () use ($server): void {
-            $server->processIncoming()->await();
+        // Pump the server continuously while the requester waits; a single read is not enough
+        // because one socket read does not necessarily contain a whole frame. The read is
+        // cancellation-bound, so stopping the pump needs no sleep and any real error still surfaces.
+        $serverPumpCancel = new DeferredCancellation();
+        $serverPump = async(static function () use ($server, $serverPumpCancel): void {
+            $cancellation = $serverPumpCancel->getCancellation();
+            try {
+                while (!$cancellation->isRequested()) {
+                    $server->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+                // Stopped once the request completed.
+            }
         });
 
-        $reply = $client->request($subject, 'hello', 2000)->await();
-        $serverLoop->await();
+        try {
+            $reply = $client->request($subject, 'hello', 2000)->await();
+        } finally {
+            $serverPumpCancel->cancel();
+            $serverPump->await();
+        }
 
         self::assertTrue($handled);
         self::assertSame('world', $reply->payload);
@@ -172,12 +197,24 @@ final class NatsClientIntegrationTest extends TestCase
             }
         })->await();
 
-        $serverLoop = async(static function () use ($server): void {
-            $server->processIncoming()->await();
+        $serverPumpCancel = new DeferredCancellation();
+        $serverPump = async(static function () use ($server, $serverPumpCancel): void {
+            $cancellation = $serverPumpCancel->getCancellation();
+            try {
+                while (!$cancellation->isRequested()) {
+                    $server->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+                // Stopped once the request completed.
+            }
         });
 
-        $reply = $client->requestWithHeaders($subject, 'hello', ['X-Request-Id' => $requestId], 2000)->await();
-        $serverLoop->await();
+        try {
+            $reply = $client->requestWithHeaders($subject, 'hello', ['X-Request-Id' => $requestId], 2000)->await();
+        } finally {
+            $serverPumpCancel->cancel();
+            $serverPump->await();
+        }
 
         self::assertSame('ok', $reply->payload);
         self::assertSame($requestId, $seenRequestId);
@@ -1697,5 +1734,83 @@ final class NatsClientIntegrationTest extends TestCase
 
         $client->disconnect()->await();
         $server->disconnect()->await();
+    }
+
+    /**
+     * Verifies two instances of the same service load-balance requests via the default queue group:
+     * each request is handled by exactly one instance, so total handled equals the request count.
+     */
+    public function testServiceEndpointsLoadBalanceAcrossInstances(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'svc.lb.' . bin2hex(random_bytes(3));
+        $requests = 20;
+
+        $a = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $b = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $requester = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $a->connect()->await();
+        $b->connect()->await();
+        $requester->connect()->await();
+
+        // Identical service definitions; default queue group ("q") should load-balance.
+        $serviceA = $a->service('lbworker', '1.0.0')
+            ->addEndpoint('work', $subject, static fn (NatsMessage $message): string => 'a');
+        $serviceB = $b->service('lbworker', '1.0.0')
+            ->addEndpoint('work', $subject, static fn (NatsMessage $message): string => 'b');
+        $serviceA->start()->await();
+        $serviceB->start()->await();
+
+        $pumpCancel = new DeferredCancellation();
+        $pump = static function (NatsClient $client) use ($pumpCancel): void {
+            $cancellation = $pumpCancel->getCancellation();
+            try {
+                while (!$cancellation->isRequested()) {
+                    $client->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+                // Stopped once all requests completed.
+            }
+        };
+        $pumpA = async(static fn () => $pump($a));
+        $pumpB = async(static fn () => $pump($b));
+
+        try {
+            for ($i = 0; $i < $requests; $i++) {
+                for ($attempt = 0; $attempt < 10; $attempt++) {
+                    try {
+                        $requester->request($subject, "r{$i}", 2_000)->await();
+                        break;
+                    } catch (NatsException $e) {
+                        if ($attempt === 9 || !str_contains($e->getMessage(), 'No responders')) {
+                            throw $e;
+                        }
+                        delay(0.1);
+                    }
+                }
+            }
+        } finally {
+            $pumpCancel->cancel();
+            $pumpA->await();
+            $pumpB->await();
+        }
+
+        $handledA = (int) ($serviceA->statsSnapshot()['endpoints'][0]['num_requests'] ?? 0);
+        $handledB = (int) ($serviceB->statsSnapshot()['endpoints'][0]['num_requests'] ?? 0);
+
+        // Load is shared across both instances (not all to one), and each request is handled
+        // about once - decisively NOT fan-out, which would deliver every request to both
+        // instances for a total of 2x the request count.
+        self::assertGreaterThan(0, $handledA, 'instance A should handle part of the load');
+        self::assertGreaterThan(0, $handledB, 'instance B should handle part of the load');
+        self::assertGreaterThanOrEqual($requests, $handledA + $handledB);
+        self::assertLessThan($requests * 2, $handledA + $handledB, 'queue group load-balances, not fan-out');
+
+        $serviceA->stop()->await();
+        $serviceB->stop()->await();
+        $a->disconnect()->await();
+        $b->disconnect()->await();
+        $requester->disconnect()->await();
     }
 }

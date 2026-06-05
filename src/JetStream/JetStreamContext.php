@@ -223,15 +223,32 @@ final class JetStreamContext
             /** @var array<string,mixed> $msg */
             $msg = is_array($response['message'] ?? null) ? $response['message'] : [];
 
-            $payload = isset($msg['data']) && is_string($msg['data'])
-                ? base64_decode($msg['data'], true) ?: ''
-                : '';
+            // Use a strict false check rather than `?: ''` so a legitimate falsy body such as "0"
+            // is preserved instead of being replaced with an empty string.
+            $payload = '';
+            if (isset($msg['data']) && is_string($msg['data'])) {
+                $decoded = base64_decode($msg['data'], true);
+                if ($decoded !== false) {
+                    $payload = $decoded;
+                }
+            }
+
+            // Stored messages may carry a header block (base64 'hdrs'); preserve it on the message.
+            $rawHeaders = null;
+            $encodedHeaders = (string) ($msg['hdrs'] ?? '');
+            if ($encodedHeaders !== '') {
+                $decodedHeaders = base64_decode($encodedHeaders, true);
+                if ($decodedHeaders !== false) {
+                    $rawHeaders = $decodedHeaders;
+                }
+            }
 
             return new NatsMessage(
                 subject: (string) ($msg['subject'] ?? ''),
                 sid: 0,
                 replyTo: null,
                 payload: $payload,
+                rawHeaders: $rawHeaders,
             );
         });
     }

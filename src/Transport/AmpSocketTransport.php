@@ -52,7 +52,11 @@ final class AmpSocketTransport implements TransportInterface
             $this->lastConnectTimeoutMs = max(1, $timeoutMs);
             $this->tlsEstablished = false;
 
-            $context = (new ConnectContext())->withConnectTimeout($this->lastConnectTimeoutMs / 1000);
+            // Disable Nagle's algorithm: NATS is a small-message request/reply protocol, and Nagle
+            // combined with delayed ACKs adds ~40ms of latency per round trip otherwise.
+            $context = (new ConnectContext())
+                ->withConnectTimeout($this->lastConnectTimeoutMs / 1000)
+                ->withTcpNoDelay();
             $context = $this->withTlsContext($context, $dsn);
             $this->tlsContextConfigured = $context->getTlsContext() !== null;
 

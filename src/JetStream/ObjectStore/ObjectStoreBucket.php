@@ -23,6 +23,16 @@ final class ObjectStoreBucket
     private const DEFAULT_CHUNK_SIZE = 131072; // 128 KiB
 
     /**
+     * Number of chunks pulled per download batch. Bounds peak memory to roughly
+     * DOWNLOAD_BATCH_CHUNKS * chunkSize while replacing the previous one-request-per-chunk pattern,
+     * so large objects download in O(chunks / DOWNLOAD_BATCH_CHUNKS) round-trips instead of O(chunks).
+     */
+    private const DOWNLOAD_BATCH_CHUNKS = 64;
+
+    /** Per-batch pull expiry in milliseconds for chunk downloads. */
+    private const DOWNLOAD_BATCH_EXPIRES_MS = 10000;
+
+    /**
      * Creates an Object Store bucket context bound to a client and bucket name.
      *
      * @param NatsClient $client Connected client used for chunk publish and metadata retrieval operations.
@@ -190,11 +200,16 @@ final class ObjectStoreBucket
      * callback and computing the SHA-256 content digest incrementally. Returns the computed digest
      * string ("SHA-256=...") so callers can verify integrity without re-buffering the payload.
      *
+     * Chunks are pulled in bounded batches (DOWNLOAD_BATCH_CHUNKS at a time) rather than one pull
+     * request per chunk, so large objects download in far fewer round-trips while peak memory stays
+     * bounded (the whole object is never held in memory). JetStream delivers chunks of a single
+     * filtered consumer in stream order, preserving in-order assembly.
+     *
      * @param callable(string):void $onChunk
      */
     private function streamChunks(ObjectInfo $info, callable $onChunk): string
     {
-        $expectedChunks = max(1, $info->chunks);
+        $remaining = max(1, $info->chunks);
         $hashContext = hash_init('sha256');
 
         $consumerName = null;
@@ -206,23 +221,39 @@ final class ObjectStoreBucket
             )->await();
             $consumerName = $consumer->name;
 
-            for ($i = 0; $i < $expectedChunks; $i++) {
+            while ($remaining > 0) {
+                $batch = min(self::DOWNLOAD_BATCH_CHUNKS, $remaining);
+
                 try {
-                    $message = $this->jetStream->fetchNext($this->streamName(), $consumerName, 2_000)->await();
+                    $messages = $this->jetStream->fetchBatch(
+                        $this->streamName(),
+                        $consumerName,
+                        $batch,
+                        self::DOWNLOAD_BATCH_EXPIRES_MS,
+                    )->await();
                 } catch (JetStreamException $e) {
                     if ($e->getCode() === 408) {
+                        // No further chunks available; digest verification catches any shortfall.
                         break;
                     }
 
                     throw $e;
                 }
 
-                hash_update($hashContext, $message->payload);
-                $onChunk($message->payload);
+                foreach ($messages as $message) {
+                    hash_update($hashContext, $message->payload);
+                    $onChunk($message->payload);
 
-                if ($message->replyTo !== null && $message->replyTo !== '') {
-                    $this->jetStream->ack($message)->await();
+                    if ($message->replyTo !== null && $message->replyTo !== '') {
+                        $this->jetStream->ack($message)->await();
+                    }
                 }
+
+                // Decrement by what actually arrived and pull again for the rest. A short batch is
+                // not treated as "drained" here: fetchBatch() can return fewer than requested when
+                // its window expires mid-delivery on a slow link, so the next iteration keeps going.
+                // The empty case surfaces as a 408 above and breaks the loop.
+                $remaining -= count($messages);
             }
         } finally {
             if ($consumerName !== null && $consumerName !== '') {

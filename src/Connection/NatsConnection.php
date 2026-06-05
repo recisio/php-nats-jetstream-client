@@ -973,8 +973,9 @@ final class NatsConnection
 
     /**
      * Performs a short, bounded read to consume the heartbeat PONG (and any other control frames)
-     * without colliding with an in-flight user read. Message frames are buffered for the next
-     * processIncoming() call; control frames (PONG/PING/INFO) are handled immediately.
+     * without colliding with an in-flight user read. Any message frames captured during this read
+     * are delivered immediately via drainAllPending(); control frames (PONG/PING/INFO) are handled
+     * inline.
      */
     private function consumeHeartbeatResponse(): void
     {
@@ -1006,6 +1007,10 @@ final class NatsConnection
             }
 
             $this->outstandingPings = 0;
+
+            // Deliver any message frames captured during the heartbeat read instead of leaving
+            // them buffered until the next processIncoming(), mirroring processIncoming().
+            $this->drainAllPending();
         } catch (\Throwable) {
             // A fatal frame surfaced during the heartbeat read; let the next user read / tick
             // surface and act on it rather than throwing out of the event-loop timer.

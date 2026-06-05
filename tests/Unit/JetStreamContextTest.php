@@ -1289,4 +1289,84 @@ final class JetStreamContextTest extends TestCase
         self::assertTrue($method->invoke($js, $message)->await());
         self::assertStringContainsString('PUB $JS.FC.ORDERS.token 0' . "\r\n\r\n", implode('', $transport->writes));
     }
+
+    /**
+     * Verifies getStreamMessage() preserves a falsy body such as "0" instead of dropping it.
+     */
+    public function testGetStreamMessagePreservesZeroPayload(): void
+    {
+        $apiResponse = json_encode([
+            'message' => ['subject' => 'events.zero', 'seq' => 1, 'data' => base64_encode('0')],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($apiResponse), $apiResponse),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $message = $client->jetStream()->getStreamMessage('EVENTS', 1)->await();
+
+        self::assertSame('0', $message->payload);
+        self::assertSame('events.zero', $message->subject);
+        self::assertNull($message->rawHeaders);
+    }
+
+    /**
+     * Verifies getStreamMessage() decodes the stored header block onto rawHeaders.
+     */
+    public function testGetStreamMessageDecodesHeaders(): void
+    {
+        $headerBlock = "NATS/1.0\r\nX-Custom: present\r\n\r\n";
+        $apiResponse = json_encode([
+            'message' => [
+                'subject' => 'events.hdr',
+                'seq' => 2,
+                'data' => base64_encode('body'),
+                'hdrs' => base64_encode($headerBlock),
+            ],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($apiResponse), $apiResponse),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $message = $client->jetStream()->getStreamMessage('EVENTS', 2)->await();
+
+        self::assertSame('body', $message->payload);
+        self::assertSame($headerBlock, $message->rawHeaders);
+        self::assertSame('present', NatsHeaders::fromWireBlock($message->rawHeaders)['X-Custom'] ?? null);
+    }
+
+    /**
+     * Verifies getStreamMessage() leaves rawHeaders null when no header block is stored.
+     */
+    public function testGetStreamMessageWithoutHeadersReturnsNullRawHeaders(): void
+    {
+        $apiResponse = json_encode([
+            'message' => ['subject' => 'events.plain', 'seq' => 3, 'data' => base64_encode('hello')],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($apiResponse), $apiResponse),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $message = $client->jetStream()->getStreamMessage('EVENTS', 3)->await();
+
+        self::assertSame('hello', $message->payload);
+        self::assertNull($message->rawHeaders);
+    }
 }

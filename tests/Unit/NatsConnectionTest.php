@@ -1978,6 +1978,90 @@ final class NatsConnectionTest extends TestCase
         $connection->disconnect()->await();
     }
 
+    /**
+     * Verifies a message captured during the heartbeat self-read is delivered to its subscription
+     * immediately (via drainAllPending) rather than left buffered until the next processIncoming().
+     */
+    public function testHeartbeatResponseDeliversBufferedMessageImmediately(): void
+    {
+        $transport = new class () implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            /** @var list<string> */
+            private array $queue = [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            ];
+
+            public function connect(string $dsn, int $timeoutMs): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function write(string $bytes): \Amp\Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                    if ($bytes === "PING\r\n") {
+                        $this->queue[] = "PONG\r\n";
+                    }
+                });
+            }
+
+            public function upgradeTls(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
+            {
+                return async(function () use ($cancellation): string {
+                    if ($this->queue !== []) {
+                        return (string) array_shift($this->queue);
+                    }
+
+                    delay(30, cancellation: $cancellation ?? new \Amp\NullCancellation());
+
+                    return '';
+                });
+            }
+
+            public function close(): \Amp\Future
+            {
+                return async(static function (): void {
+                });
+            }
+
+            public function enqueue(string $chunk): void
+            {
+                $this->queue[] = $chunk;
+            }
+        };
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 30, maxPingsOut: 5, reconnectEnabled: false),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        $received = null;
+        $connection->subscribe('events', static function (NatsMessage $message) use (&$received): void {
+            $received = $message;
+        })->await();
+
+        // Stage a delivery that the heartbeat self-read will pick up, then run that read directly.
+        $transport->enqueue("MSG events 1 7\r\nupdated\r\n");
+        (new \ReflectionMethod($connection, 'consumeHeartbeatResponse'))->invoke($connection);
+
+        // Without drainAllPending() in consumeHeartbeatResponse() this would still be null.
+        self::assertInstanceOf(NatsMessage::class, $received);
+        self::assertSame('events', $received->subject);
+        self::assertSame('updated', $received->payload);
+
+        $connection->disconnect()->await();
+    }
+
     // ─── TLS upgrade ordering (P1-4) ────────────────────────────────────
 
     public function testStandardTlsUpgradeRunsAfterInfoWhenNotHandshakeFirst(): void

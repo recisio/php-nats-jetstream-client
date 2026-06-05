@@ -6,6 +6,7 @@ namespace IDCT\NATS\Tests\Integration;
 
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use PHPUnit\Framework\TestCase;
@@ -189,6 +190,38 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
+     * Verifies getStreamMessage preserves a falsy "0" body and any stored headers.
+     */
+    public function testJetStreamGetStreamMessagePreservesZeroAndHeaders(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.zh';
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subject])->await();
+
+        // Same connection, so these publishes are processed before the getStreamMessage request
+        // below; no manual pump needed (getStreamMessage uses its own request/reply).
+        $zeroAck = $js->publish($subject, '0')->await();
+        $client->publishWithHeaders($subject, 'body', ['X-Custom' => 'present'])->await();
+
+        $zero = $js->getStreamMessage($stream, $zeroAck->seq)->await();
+        self::assertSame('0', $zero->payload);
+
+        $withHeaders = $js->getStreamMessage($stream, $zeroAck->seq + 1)->await();
+        self::assertNotNull($withHeaders->rawHeaders);
+        self::assertSame('present', NatsHeaders::fromWireBlock($withHeaders->rawHeaders)['X-Custom'] ?? null);
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies stream list API includes newly created streams.
      */
     public function testJetStreamListStreams(): void
@@ -265,6 +298,43 @@ final class JetStreamIntegrationTest extends TestCase
 
         self::assertSame($stream, $ack->stream);
         self::assertGreaterThanOrEqual(1, $observedMessages);
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies scheduled publish with a per-message TTL works when the stream enables both
+     * allow_msg_schedules and allow_msg_ttl (the exact combination shown in the README example).
+     */
+    public function testJetStreamScheduledPublishWithPerMessageTtl(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $scheduleSubject = 'schedules.' . strtolower($stream) . '.ttl';
+        $targetSubject = 'events.' . strtolower($stream) . '.ttl';
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream(
+            $stream,
+            [$scheduleSubject, $targetSubject],
+            ['allow_msg_schedules' => true, 'allow_msg_ttl' => true],
+        )->await();
+
+        $ack = $js->publishScheduled(
+            $scheduleSubject,
+            $targetSubject,
+            '{"event":"scheduled-ttl"}',
+            '@at ' . gmdate('Y-m-d\TH:i:s\Z', time() + 2),
+            '5m',
+        )->await();
+
+        self::assertSame($stream, $ack->stream);
+        self::assertGreaterThanOrEqual(1, $ack->seq);
 
         $js->deleteStream($stream)->await();
         $client->disconnect()->await();
@@ -1063,6 +1133,39 @@ final class JetStreamIntegrationTest extends TestCase
 
             usleep(100_000);
         }
+
+        self::assertNotNull($retrieved);
+        self::assertSame($payload, $retrieved->data);
+        self::assertSame($stored->digest, $retrieved->info->digest);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies an object spanning more chunks than a single download batch (>64) is reassembled
+     * correctly, exercising the multi-window pull loop and per-window accounting.
+     */
+    public function testJetStreamObjectStoreDownloadCrossesBatchWindow(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'obj' . strtolower(bin2hex(random_bytes(3)));
+        $objectName = 'multiwin-' . bin2hex(random_bytes(2)) . '.bin';
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        // Default chunk size is 128 KiB; ~9 MiB yields ~72 chunks, crossing the 64-chunk window.
+        $payload = random_bytes(9 * 1024 * 1024);
+        $stored = $store->put($objectName, $payload)->await();
+        self::assertGreaterThan(64, $stored->chunks);
+
+        // put() awaited every chunk's publish ack on this connection, so the object is durable
+        // and immediately readable - no propagation polling needed.
+        $retrieved = $store->get($objectName)->await();
 
         self::assertNotNull($retrieved);
         self::assertSame($payload, $retrieved->data);

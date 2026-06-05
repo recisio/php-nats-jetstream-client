@@ -485,4 +485,51 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertSame(3, substr_count($writes, 'PUB $O.assets.C.' . $stored->nuid));
         self::assertStringContainsString('"chunks":3', $writes);
     }
+
+    /**
+     * Verifies a multi-chunk object is downloaded with a single batched pull (not one pull per
+     * chunk), reassembled in order, and digest-verified.
+     */
+    public function testGetDownloadsMultipleChunksInSingleBatch(): void
+    {
+        $nuid = 'nuidbatch01';
+        $chunks = ['abc', 'def', 'ghi'];
+        $assembled = implode('', $chunks);
+        $meta = $this->metaGetResponse('multi.bin', [
+            'nuid' => $nuid,
+            'size' => strlen($assembled),
+            'chunks' => count($chunks),
+            'digest' => $this->digestOf($assembled),
+        ]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHB","config":{"ack_policy":"explicit"}}';
+        $deleteConsumer = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                     // info()
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),             // create ephemeral consumer
+            // All three chunks arrive on the single fetch-batch inbox (sid 3), no per-chunk pull.
+            "MSG _INBOX.JS.FETCH.c 3 3\r\nabc\r\n",
+            "MSG _INBOX.JS.FETCH.c 3 3\r\ndef\r\n",
+            "MSG _INBOX.JS.FETCH.c 3 3\r\nghi\r\n",
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),  // delete consumer
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fetched = $client->jetStream()->objectStore('assets')->get('multi.bin')->await();
+
+        self::assertInstanceOf(ObjectData::class, $fetched);
+        self::assertSame($assembled, $fetched->data);
+        self::assertSame(count($chunks), $fetched->info->chunks);
+        self::assertSame($this->digestOf($assembled), $fetched->info->digest);
+
+        $writes = implode('||', $transport->writes);
+        // One batched pull request for all chunks (batch == chunk count), not three separate pulls.
+        self::assertStringContainsString('"filter_subject":"$O.assets.C.' . $nuid . '"', $writes);
+        self::assertSame(1, substr_count($writes, 'PUB $JS.API.CONSUMER.MSG.NEXT.OBJ_assets'));
+        self::assertStringContainsString('"batch":3', $writes);
+    }
 }

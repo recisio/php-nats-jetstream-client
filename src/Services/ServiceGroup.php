@@ -27,7 +27,7 @@ final class ServiceGroup
      * @param callable(NatsMessage):(string|array<string,mixed>|null)|ServiceEndpointHandlerInterface|class-string<ServiceEndpointHandlerInterface>|object $handler
      * @param array<string,mixed>|null $schema
      */
-    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = null, ?array $schema = null): self
+    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = Service::DEFAULT_QUEUE_GROUP, ?array $schema = null): self
     {
         $fullSubject = $this->joinSubject($this->prefix, $subject);
         $this->service->addEndpoint($name, $fullSubject, $handler, $queueGroup, $schema);

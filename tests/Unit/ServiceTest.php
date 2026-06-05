@@ -172,7 +172,7 @@ final class ServiceTest extends TestCase
         $client->processIncoming()->await();
 
         $writes = implode('', $transport->writes);
-        self::assertStringContainsString('SUB svc.v1.echo 13' . "\r\n", $writes);
+        self::assertStringContainsString('SUB svc.v1.echo q 13' . "\r\n", $writes);
         self::assertStringContainsString('PUB _INBOX.req', $writes);
         self::assertStringContainsString('v1:hello', $writes);
 
@@ -575,5 +575,72 @@ final class ServiceTest extends TestCase
         $writes = implode('', $transport->writes);
         self::assertStringContainsString("UNSUB 1\r\n", $writes);
         self::assertStringContainsString("UNSUB 13\r\n", $writes);
+    }
+
+    /**
+     * Verifies endpoints default to the NATS micro spec queue group "q" so instances load-balance.
+     */
+    public function testEndpointDefaultsToSpecQueueGroup(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+        $service->start()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('SUB svc.echo q 13' . "\r\n", $writes);
+        // Discovery subscriptions must stay non-queued so every instance answers discovery.
+        self::assertStringContainsString('SUB $SRV.PING 1' . "\r\n", $writes);
+    }
+
+    /**
+     * Verifies an empty-string queue group opts out (plain subscription, fan-out to all instances).
+     */
+    public function testEndpointEmptyStringQueueGroupOptsOut(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, '');
+        $service->start()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('SUB svc.echo 13' . "\r\n", $writes);
+        self::assertStringNotContainsString('SUB svc.echo q', $writes);
+    }
+
+    /**
+     * Verifies a null queue group also opts out of the default queue group.
+     */
+    public function testEndpointNullQueueGroupOptsOut(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, null);
+        $service->start()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('SUB svc.echo 13' . "\r\n", $writes);
+        self::assertStringNotContainsString('SUB svc.echo q', $writes);
     }
 }

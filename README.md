@@ -50,7 +50,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Fetch Batch](#fetch-batch)
 - [Stream Purge and List](#stream-purge-and-list)
 - [Consumer List](#consumer-list)
-- [Stream Message Direct Get](#stream-message-direct-get)
+- [Stream Message Get](#stream-message-get)
 - [Credentials File Authentication](#credentials-file-authentication)
 - [Typed Stream Configuration](#typed-stream-configuration)
 - [Pull Consumer Batching/Iteration](#pull-consumer-batchingiteration)
@@ -493,6 +493,8 @@ $client->disconnect()->await();
 
 ### Scheduled Publish Example (`@at`)
 
+Prerequisites: the backing stream must be created with `allow_msg_schedules: true`, and because this example sets `scheduleTtl`, also `allow_msg_ttl: true`. The stream's subject list must cover both the schedule subject and the target subject. Without these flags the server rejects the publish with `message schedules is disabled` or `per-message TTL is disabled`.
+
 ```php
 <?php
 
@@ -507,6 +509,17 @@ $client = new NatsClient(new NatsOptions(servers: ['nats://127.0.0.1:4222']));
 $client->connect()->await();
 
 $jetStream = $client->jetStream();
+
+// The backing stream must cover the schedule and target subjects and enable scheduling.
+// allow_msg_schedules is required for scheduled publish; allow_msg_ttl is required when
+// you pass scheduleTtl.
+$jetStream->createStream('ORDERS', [
+	'schedules.orders.one',
+	'events.orders',
+], [
+	'allow_msg_schedules' => true,
+	'allow_msg_ttl' => true,
+])->await();
 
 $jetStream->publishScheduled(
 	scheduleSubject: 'schedules.orders.one',
@@ -904,7 +917,11 @@ $js->deleteStream('ORDERS')->await();
 $client->disconnect()->await();
 ```
 
-### Stream Message Direct Get
+### Stream Message Get
+
+`getStreamMessage()` fetches a stored message by sequence using the standard JetStream
+`$JS.API.STREAM.MSG.GET` API. The returned `NatsMessage` preserves the stored subject, payload
+(including a body that is exactly `"0"`), and any stored headers on `rawHeaders`.
 
 ```php
 <?php
@@ -1126,7 +1143,7 @@ This repository tracks parity against the basis-company `nats.php` README exampl
 
 ### `processIncoming()`
 
-`processIncoming()` reads a single transport chunk, parses all complete frames from it, and dispatches them to subscription callbacks. It is **non-blocking** — if no data is available, it returns immediately with a frame count of `0`. Call it in a loop to process multiple messages:
+`processIncoming()` reads a single transport chunk, parses all complete frames from it, and dispatches them to subscription callbacks. It is **non-blocking** — if no data is available, it returns immediately with a frame count of `0`. Because one read returns only a single chunk (and TCP may coalesce several protocol messages into one chunk), call it in a loop to process all available messages:
 
 ```php
 // Process all available messages for up to 1 second.
@@ -1205,16 +1222,24 @@ The initial handshake is bounded by `connectTimeoutMs`, not by a fixed number of
 
 ## Performance Benchmark Recipe
 
-Quick local publish/request benchmark (single process):
+Quick local publish/request benchmark (single process).
+
+The responder is pumped by a single long-lived background loop rather than one
+`processIncoming()` call per request. `processIncoming()` consumes one transport chunk, and TCP
+can coalesce several protocol messages into one chunk, so a one-call-per-request responder
+desynchronizes and stalls. A continuous read loop (cancelled when the run finishes) avoids that:
 
 ```php
 <?php
 
 declare(strict_types=1);
 
+use Amp\CancelledException;
+use Amp\DeferredCancellation;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsMessage;
+use function Amp\async;
 
 $iterations = 5000;
 $subject = 'bench.echo';
@@ -1231,15 +1256,27 @@ $server->subscribe($subject, static function (NatsMessage $message) use ($server
 	}
 })->await();
 
+// Drive the responder from one continuous background read loop.
+$serverCancel = new DeferredCancellation();
+$serverLoop = async(static function () use ($server, $serverCancel): void {
+	$cancellation = $serverCancel->getCancellation();
+	while (!$cancellation->isRequested()) {
+		try {
+			$server->processIncoming($cancellation)->await();
+		} catch (CancelledException) {
+			break;
+		}
+	}
+});
+
 $start = hrtime(true);
 for ($i = 0; $i < $iterations; $i++) {
-	$loop = Amp\async(static function () use ($server): void {
-		$server->processIncoming()->await();
-	});
 	$client->request($subject, 'x', 2000)->await();
-	$loop->await();
 }
 $elapsedNs = hrtime(true) - $start;
+
+$serverCancel->cancel();
+$serverLoop->await();
 
 $totalMs = $elapsedNs / 1_000_000;
 $rps = $iterations / max(0.001, ($elapsedNs / 1_000_000_000));
