@@ -500,7 +500,12 @@ final class JetStreamContext
     ): Future {
         return async(function () use ($stream, $handler, $filterSubject): int {
             $deliver = Inbox::generate('_INBOX.JS.ORD');
-            $expectedSeq = null;
+            // Ordered delivery is tracked by the CONSUMER sequence, which increments by one per
+            // delivery even for a filtered consumer over a stream that also carries non-matching
+            // messages (whose STREAM sequence would be non-contiguous). The STREAM sequence is used
+            // only as the restart point when a push is missed.
+            $expectedConsumerSeq = 1;
+            $lastStreamSeq = 0;
 
             $consumerOptions = [
                 'flow_control' => true,
@@ -513,17 +518,30 @@ final class JetStreamContext
             $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
             $consumerName = $consumer->name;
 
-            return $this->client->subscribe($deliver, function (NatsMessage $message) use ($handler, &$expectedSeq, $stream, $deliver, $filterSubject, &$consumerOptions, &$consumerName): void {
+            return $this->client->subscribe($deliver, function (NatsMessage $message) use ($handler, &$expectedConsumerSeq, &$lastStreamSeq, $stream, $deliver, $filterSubject, &$consumerOptions, &$consumerName): void {
                 if ($this->handlePushControlMessage($message)->await()) {
                     return;
                 }
 
-                // Extract stream sequence from reply subject metadata.
-                $seq = $this->extractStreamSequence($message);
+                $consumerSeq = $this->extractConsumerSequence($message);
+                $streamSeq = $this->extractStreamSequence($message);
 
-                if ($seq !== null && $expectedSeq !== null && $seq !== $expectedSeq) {
-                    // Sequence gap: recreate the consumer starting from expected sequence.
-                    $consumerOptions['opt_start_seq'] = $expectedSeq;
+                if ($consumerSeq === null || $streamSeq === null) {
+                    // No JetStream ACK metadata to order on; deliver best-effort.
+                    $handler($message);
+
+                    return;
+                }
+
+                if ($consumerSeq !== $expectedConsumerSeq) {
+                    // A push was missed (the consumer delivery sequence skipped). Recreate the
+                    // consumer starting just after the last in-order message, DISCARD this
+                    // out-of-order message, and restart the consumer-sequence count. The recreated
+                    // consumer replays the missing range in order; if the restart point was pruned
+                    // it simply resumes from the next available message (whose consumer sequence is
+                    // 1), so there is no out-of-order/duplicate delivery and no recreate storm.
+                    $consumerOptions['deliver_policy'] = 'by_start_sequence';
+                    $consumerOptions['opt_start_seq'] = $lastStreamSeq + 1;
 
                     try {
                         $this->deleteConsumer($stream, $consumerName)->await();
@@ -533,19 +551,13 @@ final class JetStreamContext
 
                     $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
                     $consumerName = $consumer->name;
-
-                    // Advance past the gap to prevent infinite recreation loops
-                    // when the requested sequence has been pruned from the stream.
-                    $expectedSeq = $seq + 1;
-                    $handler($message);
+                    $expectedConsumerSeq = 1;
 
                     return;
                 }
 
-                if ($seq !== null) {
-                    $expectedSeq = $seq + 1;
-                }
-
+                $expectedConsumerSeq++;
+                $lastStreamSeq = $streamSeq;
                 $handler($message);
             })->await();
         });
@@ -972,6 +984,42 @@ final class JetStreamContext
         }
 
         $seq = filter_var($parts[$streamSeqIndex], FILTER_VALIDATE_INT);
+
+        return ($seq !== false) ? $seq : null;
+    }
+
+    /**
+     * Extracts the consumer (delivery) sequence number from a JetStream reply subject.
+     *
+     * Reply subjects follow the pattern: $JS.ACK.{stream}.{consumer}.{delivered}.{sseq}.{cseq}.{tm}.{pending}
+     * The consumer sequence increments by one per delivery (even when the stream sequence is
+     * non-contiguous for a filtered consumer), so it is the correct basis for ordered-delivery gap
+     * detection.
+     */
+    private function extractConsumerSequence(NatsMessage $message): ?int
+    {
+        if ($message->replyTo === null) {
+            return null;
+        }
+
+        $parts = explode('.', $message->replyTo);
+        if ($parts[0] !== '$JS' || ($parts[1] ?? null) !== 'ACK') {
+            return null;
+        }
+
+        // The consumer sequence sits at index 6 in the short (9-token) form and index 8 in the
+        // domain-qualified (12-token) form.
+        $consumerSeqIndex = match (count($parts)) {
+            9 => 6,
+            12 => 8,
+            default => null,
+        };
+
+        if ($consumerSeqIndex === null) {
+            return null;
+        }
+
+        $seq = filter_var($parts[$consumerSeqIndex], FILTER_VALIDATE_INT);
 
         return ($seq !== false) ? $seq : null;
     }

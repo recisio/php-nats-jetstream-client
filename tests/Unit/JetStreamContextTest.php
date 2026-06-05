@@ -1475,10 +1475,12 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
             // Initial ephemeral push consumer create (request sid 1).
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply('ORD1')), $createReply('ORD1')),
-            // Push delivery with stream sequence 1 on the ordered subscription (sid 2).
+            // In-order delivery: consumer seq 1 / stream seq 1 -> next expected consumer seq 2.
             "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
-            // Push delivery with stream sequence 3 -> a gap (expected 2).
-            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.3.2.0.0 4\r\nmsg2\r\n",
+            // A missed push: consumer seq jumps to 3 (expected 2). The consumer is recreated from the
+            // stream sequence after the last in-order message (1+1=2) and THIS message is DISCARDED.
+            // Reply tokens: num_delivered=3, stream_seq=4, consumer_seq=3.
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
             // Gap recovery deletes the old consumer (request sid 3) ...
             sprintf("MSG _INBOX.b 3 %d\r\n%s\r\n", strlen($deleteReply), $deleteReply),
             // ... and recreates it from the expected sequence (request sid 4).
@@ -1493,17 +1495,63 @@ final class JetStreamContextTest extends TestCase
             $received[] = $message->payload;
         }, 'events.>')->await();
 
-        $client->processIncoming()->await(); // delivers stream sequence 1
-        $client->processIncoming()->await(); // delivers stream sequence 3 -> triggers delete + recreate
+        for ($i = 0; $i < 6; $i++) {
+            $client->processIncoming()->await();
+        }
 
-        // Both messages reach the handler, including the one that exposed the gap.
-        self::assertSame(['msg1', 'msg2'], $received);
+        // The out-of-order message that exposed the gap (seq 3) is DISCARDED, never delivered out of
+        // order. (The in-order replay the server then produces from opt_start_seq is exercised
+        // end-to-end against a real server in JetStreamIntegrationTest, since FakeTransport cannot
+        // model server-side replay.)
+        self::assertSame(['msg1'], $received);
 
         $written = implode('', $transport->writes);
-        self::assertStringContainsString('$JS.API.CONSUMER.DELETE.EVENTS.ORD1', $written);
-        // Two creates: the initial consumer plus the recreate after the gap.
+        // Exactly one recreate: one DELETE of the original consumer ...
+        self::assertSame(1, substr_count($written, '$JS.API.CONSUMER.DELETE.EVENTS.ORD1'));
+        // ... and two CREATEs total (the initial consumer plus the single recreate) — no storm.
         self::assertSame(2, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
-        // The recreate resumes from the expected (skipped) sequence.
+        // The recreate resumes from the expected (first missing) sequence, not the out-of-order one.
         self::assertStringContainsString('"opt_start_seq":2', $written);
+    }
+
+    public function testSubscribeOrderedConsumerDeliversFilteredMessagesWithoutSpuriousRecreate(): void
+    {
+        $createReply = json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => 'ORD1',
+            'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+
+        // A filtered ordered consumer over a stream that also carries non-matching messages: the
+        // matching deliveries have CONSECUTIVE consumer sequences (1,2,3) but NON-contiguous stream
+        // sequences (2,4,6, because non-matching messages occupy 1,3,5). They must all be delivered
+        // in order with NO recreate — detecting gaps by stream sequence would wrongly recreate here.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.2.1.0.0 4\r\nmsg1\r\n", // cseq 1, sseq 2
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.2.4.2.0.0 4\r\nmsg2\r\n", // cseq 2, sseq 4
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.3.6.3.0.0 4\r\nmsg3\r\n", // cseq 3, sseq 6
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        }, 'events.>')->await();
+
+        for ($i = 0; $i < 5; $i++) {
+            $client->processIncoming()->await();
+        }
+
+        self::assertSame(['msg1', 'msg2', 'msg3'], $received);
+
+        $written = implode('', $transport->writes);
+        // No gap was detected, so the consumer is never deleted/recreated (one initial CREATE only).
+        self::assertSame(0, substr_count($written, '$JS.API.CONSUMER.DELETE.EVENTS'));
+        self::assertSame(1, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
     }
 }

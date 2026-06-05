@@ -28,6 +28,15 @@ were all verified working and are unchanged.
   small-message request/reply protocol, and Nagle combined with delayed ACKs added
   roughly 40 ms of latency per round trip; local request/reply throughput improved
   about 16x in a single-process benchmark (~22 to ~365 req/s) after this change.
+- `[bugfix]` Ordered consumers (`subscribeOrderedConsumer()`) now deliver in order,
+  gap-free, and without duplicates. Gap detection was based on the stream sequence,
+  which is non-contiguous for a filtered consumer, so every filtered delivery looked
+  like a gap; and on a gap the out-of-order message was forwarded and the expected
+  sequence advanced past it, causing duplicate/out-of-order delivery and a cascading
+  consumer delete+recreate storm. Detection now uses the JetStream consumer
+  (delivery) sequence, the out-of-order message is discarded, and the consumer is
+  recreated from the last in-order stream sequence (resuming from the next available
+  message if the restart point was pruned).
 - `[bugfix]` `getStreamMessage()` no longer returns an empty payload when the stored
   body is the single character `0`. The decoded body was passed through a falsy
   fallback, so a legitimate `"0"` payload was replaced with an empty string.

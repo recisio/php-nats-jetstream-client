@@ -784,17 +784,29 @@ final class JetStreamIntegrationTest extends TestCase
             $matchingSubject,
         )->await();
 
-        $js->publish($matchingSubject, '{"event":"ordered"}')->await();
+        // Publish several matching messages interleaved with non-matching ones, so the matching
+        // messages have CONSECUTIVE consumer sequences but NON-contiguous stream sequences. They must
+        // all arrive in order with no duplicates and without a recreate storm (the P0 regression
+        // guard: stream-sequence-based gap detection would spuriously recreate on every message).
+        $expected = [];
+        for ($i = 1; $i <= 5; $i++) {
+            $payload = sprintf('{"event":"ordered-%d"}', $i);
+            $expected[] = $payload;
+            $js->publish($matchingSubject, $payload)->await();
+            $js->publish($nonMatchingSubject, '{"event":"other"}')->await();
+        }
 
-        $cancellation = new TimeoutCancellation(4.0);
+        $cancellation = new TimeoutCancellation(8.0);
         try {
-            while ($received === []) {
+            while (count($received) < count($expected)) {
                 $client->processIncoming($cancellation)->await();
             }
         } catch (CancelledException) {
         }
 
-        self::assertSame(['{"event":"ordered"}'], $received);
+        // In order, complete, and de-duplicated.
+        self::assertSame($expected, $received);
+        self::assertSame($received, array_values(array_unique($received)));
 
         $client->unsubscribe($sid)->await();
         $js->deleteStream($stream)->await();
