@@ -253,6 +253,69 @@ final class JetStreamContext
     }
 
     /**
+     * Fetches a message from a stream by sequence number using the JetStream Direct Get API
+     * ($JS.API.DIRECT.GET), which requires the stream to be created with allow_direct enabled.
+     *
+     * Unlike getStreamMessage() (which uses the regular $JS.API.STREAM.MSG.GET request/response and
+     * is served only by the stream leader), Direct Get can be answered by any stream replica. The
+     * server returns the stored message directly: the payload is the message body and the
+     * stream/sequence/subject/timestamp travel as Nats-* headers, which are preserved on the
+     * returned message's rawHeaders.
+     *
+     * @return Future<NatsMessage>
+     */
+    public function directGetStreamMessage(string $stream, int $seq): Future
+    {
+        return $this->directGet($stream, ['seq' => $seq]);
+    }
+
+    /**
+     * Fetches the last message stored on a subject using the JetStream Direct Get API
+     * ($JS.API.DIRECT.GET). Requires the stream to be created with allow_direct enabled.
+     *
+     * @return Future<NatsMessage>
+     */
+    public function directGetLastMessageForSubject(string $stream, string $subject): Future
+    {
+        return $this->directGet($stream, ['last_by_subj' => $subject]);
+    }
+
+    /**
+     * Issues a Direct Get request and normalizes the direct response (raw body + Nats-* headers)
+     * into a NatsMessage, mapping a status header block (e.g. 404 Message Not Found) to a
+     * JetStreamException.
+     *
+     * @param array<string,mixed> $body
+     * @return Future<NatsMessage>
+     */
+    private function directGet(string $stream, array $body): Future
+    {
+        return async(function () use ($stream, $body): NatsMessage {
+            $json = json_encode($body, JSON_THROW_ON_ERROR);
+            $message = $this->client->request(JetStreamApi::STREAM_DIRECT_GET_PREFIX . $stream, $json)->await();
+
+            $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+
+            // A Direct Get miss (or error) comes back as a status header block with no message body.
+            $status = (int) ($headers['Status'] ?? 0);
+            if ($status >= 400) {
+                $description = (string) ($headers['Description'] ?? 'JetStream direct get error');
+                throw new JetStreamException($description, $status);
+            }
+
+            // The original stored subject travels in the Nats-Subject header; fall back to the reply
+            // message subject only if the server omitted it.
+            return new NatsMessage(
+                subject: $headers['Nats-Subject'] ?? $message->subject,
+                sid: 0,
+                replyTo: null,
+                payload: $message->payload,
+                rawHeaders: $message->rawHeaders,
+            );
+        });
+    }
+
+    /**
      * Creates or updates a durable consumer for a stream.
      *
      * @param array<string,mixed> $options Additional consumer config fields (max_deliver, ack_wait, etc.).

@@ -51,6 +51,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Stream Purge and List](#stream-purge-and-list)
 - [Consumer List](#consumer-list)
 - [Stream Message Get](#stream-message-get)
+- [JetStream Direct Get](#jetstream-direct-get)
 - [Credentials File Authentication](#credentials-file-authentication)
 - [Typed Stream Configuration](#typed-stream-configuration)
 - [Pull Consumer Batching/Iteration](#pull-consumer-batchingiteration)
@@ -83,7 +84,7 @@ Current functionality includes:
 - JetStream ordered consumers with automatic sequence tracking and gap recovery
 - JetStream consumer pause/resume
 - JetStream publish ACK
-- JetStream direct message get from stream
+- JetStream stream message get by sequence — both the regular `STREAM.MSG.GET` request and the Direct Get API (`directGetStreamMessage()` / `directGetLastMessageForSubject()`)
 - Scheduled publish (`@at` support)
 - KeyValue API (bucket lifecycle with history/TTL/storage options, put/get/update/delete/purge, watch, getAll/status)
 - ObjectStore API (bucket lifecycle, put/get/delete/list/watch, chunked uploads, SHA-256 digest verification)
@@ -124,6 +125,8 @@ Use `IDCT\\NATS\\JetStream\\Schedule::at(...)` or `Schedule::atTimestamp(...)` t
 ## Usage
 
 ### Authentication Options
+
+_Verified by: [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php), [NatsConnectionTest::testConnectIncludesJwtSignatureFromInfoNonce](tests/Unit/NatsConnectionTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testTokenAuthSuccessAndFailure`, `testUserPasswordAuthSuccessAndFailure`, `testJwtNonceAuthenticationFlow`, `testTlsHandshakeFirstConnection`); [features/auth/](features/auth/)._
 
 ```php
 <?php
@@ -172,6 +175,8 @@ $tlsClient = new NatsClient(new NatsOptions(
 
 ### Connect and Publish/Subscribe
 
+_Verified by: [NatsClientTest::testClientSubscribeAndProcessIncoming](tests/Unit/NatsClientTest.php); [features/core/connection.feature](features/core/connection.feature)._
+
 ```php
 <?php
 
@@ -198,6 +203,8 @@ $client->disconnect()->await();
 
 ### Request/Reply
 
+_Verified by: [NatsClientTest::testClientRequestReturnsReply](tests/Unit/NatsClientTest.php), [NatsConnectionTest::testRequestReturnsFirstReplyMessage](tests/Unit/NatsConnectionTest.php); [features/core/request_reply.feature](features/core/request_reply.feature)._
+
 ```php
 <?php
 
@@ -216,6 +223,8 @@ $client->disconnect()->await();
 ```
 
 ### Headers and Server Info
+
+_Verified by: [NatsClientTest::testClientPublishWithHeadersAndRequestWithHeaders](tests/Unit/NatsClientTest.php), [NatsConnectionTest::testProcessIncomingDispatchesHmsgWithRawHeaders](tests/Unit/NatsConnectionTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
 ```php
 <?php
@@ -245,6 +254,8 @@ $client->disconnect()->await();
 
 ### JetStream Stream and Durable Consumer
 
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testStreamCrud`, `testConsumerCrud`, `testPublishWithAck`, `testCreateConsumerDefaultsAckPolicyToExplicit`); [JetStreamIntegrationTest::testJetStreamConsumerAndPublishAck](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/stream_lifecycle.feature](features/jetstream-core/stream_lifecycle.feature)._
+
 ```php
 <?php
 
@@ -271,6 +282,8 @@ $client->disconnect()->await();
 ```
 
 ### JetStream Stream Update and Consumer Info
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testUpdateStream`, `testConsumerCrud`); [JetStreamIntegrationTest::testJetStreamUpdateStreamConfiguration](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/management.feature](features/jetstream-core/management.feature)._
 
 ```php
 <?php
@@ -302,6 +315,8 @@ $client->disconnect()->await();
 
 ### JetStream Pull Consumer (Fetch + ACK)
 
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testFetchNext`, `testFetchBatchThrowsTerminalStatusDescription`); [JetStreamIntegrationTest::testJetStreamPullFetchAndAck](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
+
 ```php
 <?php
 
@@ -327,6 +342,8 @@ $client->disconnect()->await();
 When a pull request ends with a terminal JetStream status frame and no user message is delivered, `fetchNext()` / `fetchBatch()` raise `JetStreamException` with the server status code and description, for example `JetStream pull request ended with status 404: No Messages`.
 
 ### JetStream Pull Consumer (NAK, Delayed NAK, TERM, In-Progress)
+
+_Verified by: [JetStreamContextTest::testAckHelpersPublishProtocolTokens](tests/Unit/JetStreamContextTest.php); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamPullNakWithDelayRedelivery`, `testJetStreamTermAndInProgressTokens`); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
 <?php
@@ -365,6 +382,8 @@ $client->disconnect()->await();
 
 ### Queue Group Subscribe
 
+_Verified by: [SubscriptionQueueTest::testSubscribeQueueWithQueueGroup](tests/Unit/SubscriptionQueueTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
+
 ```php
 <?php
 
@@ -390,6 +409,8 @@ $client->disconnect()->await();
 ```
 
 ### Polling Subscribe (SubscriptionQueue)
+
+_Verified by: [SubscriptionQueueTest](tests/Unit/SubscriptionQueueTest.php) (`fetch`/`next`/`fetchAll`/`setTimeout`); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
 ```php
 <?php
@@ -421,6 +442,8 @@ $client->disconnect()->await();
 ```
 
 ### JetStream Push Consumer (Durable)
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testSubscribePushConsumerHandlesFlowControl`, `testSubscribePushConsumerIgnoresHeartbeat`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamPushConsumerHelperDelivery`, `testJetStreamPushFlowControlAndHeartbeat`); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
 <?php
@@ -458,6 +481,8 @@ $client->disconnect()->await();
 
 ### JetStream Ephemeral Consumers
 
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testCreateEphemeralConsumer`, `testSubscribeEphemeralPushConsumer`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamEphemeralPullConsumerFetchAndAck`, `testJetStreamEphemeralPushConsumerDelivery`); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
+
 ```php
 <?php
 
@@ -492,6 +517,8 @@ $client->disconnect()->await();
 ```
 
 ### Scheduled Publish Example (`@at`)
+
+_Verified by: [ScheduleTest](tests/Unit/ScheduleTest.php), [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testPublishScheduled`, `testPublishScheduledOmitsTtlWhenNotProvided`, `testPublishScheduledRejectsUnsupportedPattern`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamScheduledPublish`, `testJetStreamScheduledPublishWithPerMessageTtl`, `testJetStreamScheduledPublishRejectsUnsupportedPatterns`); [features/jetstream-data/scheduled_publish.feature](features/jetstream-data/scheduled_publish.feature)._
 
 Prerequisites: the backing stream must be created with `allow_msg_schedules: true`, and because this example sets `scheduleTtl`, also `allow_msg_ttl: true`. The stream's subject list must cover both the schedule subject and the target subject. Without these flags the server rejects the publish with `message schedules is disabled` or `per-message TTL is disabled`.
 
@@ -533,6 +560,8 @@ $client->disconnect()->await();
 ```
 
 ### KeyValue Bucket
+
+_Verified by: [KeyValueBucketTest](tests/Unit/KeyValueBucketTest.php); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamKeyValueLifecycle`, `testJetStreamKeyValueAdvancedParityOperations`); [features/jetstream-data/key_value.feature](features/jetstream-data/key_value.feature)._
 
 ```php
 <?php
@@ -578,6 +607,8 @@ $client->disconnect()->await();
 
 ### Object Store Bucket
 
+_Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php); [JetStreamIntegrationTest::testJetStreamObjectStoreLifecycle](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
+
 ```php
 <?php
 
@@ -613,6 +644,8 @@ $client->disconnect()->await();
 
 ### Object Store Streaming to Callback
 
+_Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testGetToCallbackStreamsChunks`, `testGetToCallbackInvokesCallbackOncePerChunk`); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
+
 ```php
 <?php
 
@@ -643,6 +676,8 @@ $client->disconnect()->await();
 ```
 
 ### Services Framework
+
+_Verified by: [ServiceTest](tests/Unit/ServiceTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testServiceDiscoveryAndEndpoint`, `testServiceMultipleEndpoints`, `testServiceGroupedEndpointsHierarchy`, `testServiceEndpointsLoadBalanceAcrossInstances`); [features/services/](features/services/)._
 
 ```php
 <?php
@@ -690,6 +725,8 @@ $serviceClient->disconnect()->await();
 
 ### Services: SCHEMA Discovery
 
+_Verified by: [ServiceTest](tests/Unit/ServiceTest.php) (schema validation + lifecycle observers), [BasicJsonSchemaValidatorTest](tests/Unit/BasicJsonSchemaValidatorTest.php); [NatsClientIntegrationTest::testServiceStatsAndObserversWithHeaders](tests/Integration/NatsClientIntegrationTest.php); [features/services/service_discovery.feature](features/services/service_discovery.feature)._
+
 ```php
 <?php
 
@@ -734,6 +771,8 @@ $client->disconnect()->await();
 
 ### Graceful Drain
 
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testDrainUnsubscribesAllAndCloses`, `testDrainDeliversBufferedMessagesBeforeClosing`); [features/resilience/client_resilience.feature](features/resilience/client_resilience.feature)._
+
 ```php
 <?php
 
@@ -755,6 +794,8 @@ $client->drain()->await();
 ```
 
 ### Ordered Consumer
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testSubscribeOrderedConsumerSendsCorrectConfig`, `testSubscribeOrderedConsumerRecreatesOnSequenceGap`); [JetStreamIntegrationTest::testJetStreamOrderedConsumerWithFilteredSubjectAfterPriorMessages](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
 <?php
@@ -791,6 +832,8 @@ $client->disconnect()->await();
 
 ### Consumer Pause/Resume
 
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testPauseConsumerSendsCorrectPayload`, `testResumeConsumerSendsEmptyBody`); [JetStreamIntegrationTest::testJetStreamPauseAndResumeConsumer](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
+
 ```php
 <?php
 
@@ -818,6 +861,8 @@ $client->disconnect()->await();
 ```
 
 ### Fetch Batch
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testFetchBatch`, `testFetchBatchIgnoresTerminalStatusFrames`, `testFetchBatchThrowsWhenNoMessagesArrive`); [JetStreamIntegrationTest::testJetStreamFetchBatchHandlesStatusFrames](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
 <?php
@@ -855,6 +900,8 @@ Notes:
 
 ### Stream Purge and List
 
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testPurgeStream`, `testPurgeStreamWithSubjectFilter`, `testListStreams`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamPurgeStreamByFilter`, `testJetStreamListStreams`); [features/jetstream-core/management.feature](features/jetstream-core/management.feature)._
+
 ```php
 <?php
 
@@ -890,6 +937,8 @@ $client->disconnect()->await();
 
 ### Consumer List
 
+_Verified by: [JetStreamContextTest::testListConsumers](tests/Unit/JetStreamContextTest.php); [JetStreamIntegrationTest::testJetStreamListConsumers](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/management.feature](features/jetstream-core/management.feature)._
+
 ```php
 <?php
 
@@ -919,6 +968,8 @@ $client->disconnect()->await();
 
 ### Stream Message Get
 
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testGetStreamMessage`, `testGetStreamMessagePreservesZeroPayload`, `testGetStreamMessageDecodesHeaders`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamGetStreamMessage`, `testJetStreamGetStreamMessagePreservesZeroAndHeaders`)._
+
 `getStreamMessage()` fetches a stored message by sequence using the standard JetStream
 `$JS.API.STREAM.MSG.GET` API. The returned `NatsMessage` preserves the stored subject, payload
 (including a body that is exactly `"0"`), and any stored headers on `rawHeaders`.
@@ -946,7 +997,47 @@ $js->deleteStream('EVENTS')->await();
 $client->disconnect()->await();
 ```
 
+### JetStream Direct Get
+
+`directGetStreamMessage()` and `directGetLastMessageForSubject()` use the JetStream Direct Get API
+(`$JS.API.DIRECT.GET`), which requires the stream to be created with `allow_direct: true`. Unlike
+`getStreamMessage()` (regular `$JS.API.STREAM.MSG.GET`, served by the stream leader), Direct Get can
+be answered by any replica. The server returns the stored message directly: the payload is the raw
+body and the stream/sequence/subject/timestamp travel as `Nats-*` headers (preserved on `rawHeaders`).
+A miss is raised as a `JetStreamException` (for example `404 Message Not Found`).
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$js = $client->jetStream();
+$js->createStream('EVENTS', ['events.>'], ['allow_direct' => true])->await();
+$js->publish('events.order', '{"id":1}')->await();
+
+// Direct Get by stream sequence.
+$bySeq = $js->directGetStreamMessage('EVENTS', 1)->await();
+echo $bySeq->subject . ': ' . $bySeq->payload . PHP_EOL;
+
+// Direct Get the last message stored on a subject.
+$last = $js->directGetLastMessageForSubject('EVENTS', 'events.order')->await();
+echo $last->payload . PHP_EOL;
+
+$js->deleteStream('EVENTS')->await();
+$client->disconnect()->await();
+```
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testDirectGetStreamMessageReturnsRawBodyAndHeaders`, `testDirectGetLastMessageForSubjectRequestsLastBySubj`, `testDirectGetStreamMessageThrowsOnNotFound`); [JetStreamIntegrationTest::testJetStreamDirectGetStreamMessage](tests/Integration/JetStreamIntegrationTest.php)._
+
 ### Credentials File Authentication
+
+_Verified by: [CredentialsParserTest::testFromFileReadsValidCredsFile](tests/Unit/CredentialsParserTest.php), [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php); [features/auth/jwt_and_nkey_auth.feature](features/auth/jwt_and_nkey_auth.feature)._
 
 ```php
 <?php
@@ -971,6 +1062,8 @@ $client = new NatsClient(new NatsOptions(
 ```
 
 ### Typed Stream Configuration
+
+_Verified by: the [JetStream enums](src/JetStream/Enum/) are exercised end-to-end (all six via `->value`) in [features/jetstream-core/management.feature](features/jetstream-core/management.feature) and [JetStreamContextTest](tests/Unit/JetStreamContextTest.php)._
 
 Stream and consumer configuration supports typed enums for type-safe options:
 
@@ -1022,6 +1115,8 @@ $client->disconnect()->await();
 
 ### Pull Consumer Batching/Iteration
 
+_Verified by: [PullConsumerIteratorTest](tests/Unit/PullConsumerIteratorTest.php); [JetStreamIntegrationTest::testJetStreamPullIteratorBatching](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
+
 The fluent `PullConsumerIterator` wraps `fetchBatch()` with configurable batch size, iterations, and a handler callback:
 
 ```php
@@ -1056,6 +1151,8 @@ $client->disconnect()->await();
 
 ### Stream Mirroring and Sourcing
 
+_Verified by: [StreamSourceTest](tests/Unit/StreamSourceTest.php); [features/jetstream-core/config_helpers.feature](features/jetstream-core/config_helpers.feature) (live source filtering + mirror replication)._
+
 Use `StreamSource` to build mirror/source configuration arrays:
 
 ```php
@@ -1089,6 +1186,8 @@ $client->disconnect()->await();
 Use those arrays in `createStream()` or `updateStream()` options. Source configurations work with the current high-level API and are covered against the live fixture stack. Mirror-only stream configs also work through `createStream()` when you pass an empty `subjects` list together with the `mirror` configuration.
 
 ### Republish and Subject Transform
+
+_Verified by: [RepublishAndTransformTest](tests/Unit/RepublishAndTransformTest.php); [features/jetstream-core/config_helpers.feature](features/jetstream-core/config_helpers.feature) (live republish + subject transform)._
 
 Configure republish rules and subject transforms on streams:
 
@@ -1143,6 +1242,8 @@ This repository tracks parity against the basis-company `nats.php` README exampl
 
 ### `processIncoming()`
 
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testProcessIncomingDispatchesMsgToSubscriber`, `testProcessIncomingUpdatesServerInfoFromAsyncInfoFrame`)._
+
 `processIncoming()` reads a single transport chunk, parses all complete frames from it, and dispatches them to subscription callbacks. It is **non-blocking** — if no data is available, it returns immediately with a frame count of `0`. Because one read returns only a single chunk (and TCP may coalesce several protocol messages into one chunk), call it in a loop to process all available messages:
 
 ```php
@@ -1160,11 +1261,15 @@ The client also applies asynchronous `INFO` updates received after connect, so `
 
 ### Heartbeat and Request Timeouts
 
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testIdleConnectionStaysOpenViaHeartbeatSelfRead`, `testHeartbeatReadHandlesEmptyErrorAndFatalFrames`, `testRequestTimeoutCancelsReadAndAllowsSubsequentRequest`)._
+
 The heartbeat timer answers its own `PONG`: after sending a `PING` it performs a short, bounded read to consume the reply (unless an application `processIncoming()` read is already in flight). Liveness detection therefore does not depend on the application continuously calling `processIncoming()`, so an otherwise idle connection (for example a pure publisher) is not closed by spurious `maxPingsOut` detection. Any successful read also resets the outstanding-ping counter.
 
 Request and pull-fetch timeouts cancel the underlying socket read rather than leaving it pending. A timed-out `request()` (or `fetchBatch()`/`fetchNext()`) cleanly releases the read, so it cannot orphan an in-flight read or trigger a spurious reconnect on the next operation.
 
 ### Reconnect Behavior
+
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testBackoffDelayIsExponential`, `testConnectRotatesServersOnReconnectAttempts`, `testReconnectRetriesWhenResubscribeGetsFatalServerError`)._
 
 When a connection drops and `reconnectEnabled` is `true`:
 
@@ -1180,11 +1285,13 @@ The initial handshake is bounded by `connectTimeoutMs`, not by a fixed number of
 
 ### Ordered Consumer Gap Recovery
 
+_Verified by: [JetStreamContextTest::testSubscribeOrderedConsumerRecreatesOnSequenceGap](tests/Unit/JetStreamContextTest.php)._
+
 `subscribeOrderedConsumer()` automatically detects stream sequence gaps in delivered messages. When a gap is detected, the consumer is transparently deleted and recreated starting from the expected sequence, and the current message is still forwarded to the user callback before sequence tracking resumes.
 
 ## Configuration Option Mapping
 
-`NatsOptions` fields and defaults:
+`NatsOptions` fields and defaults (verified by [NatsOptionsTest](tests/Unit/NatsOptionsTest.php)):
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

@@ -828,6 +828,25 @@ final class JetStreamContextTest extends TestCase
         self::assertStringContainsString('"filter_subject":"orders.*"', $written);
     }
 
+    public function testCreateConsumerDefaultsAckPolicyToExplicit(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC","ack_policy":"explicit"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // No ack_policy passed: the durable createConsumer() path must default it to explicit.
+        $client->jetStream()->createConsumer('ORDERS', 'PROC', 'orders.created')->await();
+
+        self::assertStringContainsString('"ack_policy":"explicit"', $transport->writes[3]);
+    }
+
     public function testCreatePushConsumerAllowsAckPolicyOverride(): void
     {
         $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC","deliver_subject":"deliver.proc","ack_policy":"none"}}';
@@ -1367,5 +1386,124 @@ final class JetStreamContextTest extends TestCase
 
         self::assertSame('hello', $message->payload);
         self::assertNull($message->rawHeaders);
+    }
+
+    public function testDirectGetStreamMessageReturnsRawBodyAndHeaders(): void
+    {
+        $headerBlock = "NATS/1.0\r\nNats-Stream: EVENTS\r\nNats-Subject: events.order\r\nNats-Sequence: 2\r\nNats-Time-Stamp: 2024-01-01T00:00:00.000000000Z\r\n\r\n";
+        $body = '{"id":1}';
+        $hdrLen = strlen($headerBlock);
+        $totalLen = $hdrLen + strlen($body);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.any 1 %d %d\r\n%s%s\r\n", $hdrLen, $totalLen, $headerBlock, $body),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $message = $client->jetStream()->directGetStreamMessage('EVENTS', 2)->await();
+
+        // The original subject travels in Nats-Subject; the body is the raw payload.
+        self::assertSame('events.order', $message->subject);
+        self::assertSame($body, $message->payload);
+        self::assertSame('2', NatsHeaders::fromWireBlock($message->rawHeaders)['Nats-Sequence'] ?? null);
+
+        $written = implode('', $transport->writes);
+        self::assertStringContainsString('$JS.API.DIRECT.GET.EVENTS', $written);
+        self::assertStringContainsString('"seq":2', $written);
+    }
+
+    public function testDirectGetLastMessageForSubjectRequestsLastBySubj(): void
+    {
+        $headerBlock = "NATS/1.0\r\nNats-Stream: EVENTS\r\nNats-Subject: events.order\r\nNats-Sequence: 7\r\n\r\n";
+        $body = 'last';
+        $hdrLen = strlen($headerBlock);
+        $totalLen = $hdrLen + strlen($body);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.any 1 %d %d\r\n%s%s\r\n", $hdrLen, $totalLen, $headerBlock, $body),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $message = $client->jetStream()->directGetLastMessageForSubject('EVENTS', 'events.order')->await();
+
+        self::assertSame('events.order', $message->subject);
+        self::assertSame('last', $message->payload);
+
+        $written = implode('', $transport->writes);
+        self::assertStringContainsString('$JS.API.DIRECT.GET.EVENTS', $written);
+        self::assertStringContainsString('"last_by_subj":"events.order"', $written);
+    }
+
+    public function testDirectGetStreamMessageThrowsOnNotFound(): void
+    {
+        $statusBlock = "NATS/1.0 404 Message Not Found\r\n\r\n";
+        $len = strlen($statusBlock);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.any 1 %d %d\r\n%s\r\n", $len, $len, $statusBlock),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Message Not Found');
+        $client->jetStream()->directGetStreamMessage('EVENTS', 999)->await();
+    }
+
+    public function testSubscribeOrderedConsumerRecreatesOnSequenceGap(): void
+    {
+        $createReply = static fn (string $name): string => json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => $name,
+            'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+        $deleteReply = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // Initial ephemeral push consumer create (request sid 1).
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply('ORD1')), $createReply('ORD1')),
+            // Push delivery with stream sequence 1 on the ordered subscription (sid 2).
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
+            // Push delivery with stream sequence 3 -> a gap (expected 2).
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.3.2.0.0 4\r\nmsg2\r\n",
+            // Gap recovery deletes the old consumer (request sid 3) ...
+            sprintf("MSG _INBOX.b 3 %d\r\n%s\r\n", strlen($deleteReply), $deleteReply),
+            // ... and recreates it from the expected sequence (request sid 4).
+            sprintf("MSG _INBOX.c 4 %d\r\n%s\r\n", strlen($createReply('ORD2')), $createReply('ORD2')),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        }, 'events.>')->await();
+
+        $client->processIncoming()->await(); // delivers stream sequence 1
+        $client->processIncoming()->await(); // delivers stream sequence 3 -> triggers delete + recreate
+
+        // Both messages reach the handler, including the one that exposed the gap.
+        self::assertSame(['msg1', 'msg2'], $received);
+
+        $written = implode('', $transport->writes);
+        self::assertStringContainsString('$JS.API.CONSUMER.DELETE.EVENTS.ORD1', $written);
+        // Two creates: the initial consumer plus the recreate after the gap.
+        self::assertSame(2, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
+        // The recreate resumes from the expected (skipped) sequence.
+        self::assertStringContainsString('"opt_start_seq":2', $written);
     }
 }

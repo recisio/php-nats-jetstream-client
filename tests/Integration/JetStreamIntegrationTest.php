@@ -226,6 +226,46 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
+     * Verifies the Direct Get API ($JS.API.DIRECT.GET) on an allow_direct stream: fetch by sequence,
+     * fetch last-by-subject, and a missing-sequence error.
+     */
+    public function testJetStreamDirectGetStreamMessage(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.dg';
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subject], ['allow_direct' => true])->await();
+        $ack = $js->publish($subject, '{"event":"direct"}')->await();
+
+        // Direct Get by sequence returns the raw body and carries the original subject.
+        $bySeq = $js->directGetStreamMessage($stream, $ack->seq)->await();
+        self::assertSame($subject, $bySeq->subject);
+        self::assertSame('{"event":"direct"}', $bySeq->payload);
+
+        // Direct Get last-by-subject returns the most recent message on the subject.
+        $js->publish($subject, 'newest')->await();
+        $last = $js->directGetLastMessageForSubject($stream, $subject)->await();
+        self::assertSame('newest', $last->payload);
+
+        // A missing sequence is reported as a JetStreamException, not an empty message.
+        try {
+            $js->directGetStreamMessage($stream, 99_999)->await();
+            self::fail('Expected JetStreamException for a missing sequence');
+        } catch (JetStreamException $e) {
+            self::assertGreaterThanOrEqual(400, $e->getCode());
+        }
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies stream list API includes newly created streams.
      */
     public function testJetStreamListStreams(): void

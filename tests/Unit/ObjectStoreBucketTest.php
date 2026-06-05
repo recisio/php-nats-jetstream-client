@@ -263,6 +263,53 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
+     * Verifies getToCallback invokes the callback once per stored chunk (in order) for a multi-chunk
+     * object, rather than buffering the whole object and calling back once.
+     */
+    public function testGetToCallbackInvokesCallbackOncePerChunk(): void
+    {
+        $nuid = 'nuidcbmulti';
+        $chunks = ['abc', 'def', 'ghi'];
+        $assembled = implode('', $chunks);
+        $meta = $this->metaGetResponse('multi.txt', [
+            'nuid' => $nuid,
+            'size' => strlen($assembled),
+            'chunks' => count($chunks),
+            'digest' => $this->digestOf($assembled),
+        ]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHCBM","config":{"ack_policy":"explicit"}}';
+        $deleteConsumer = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
+            "MSG _INBOX.JS.FETCH.c 3 3\r\nabc\r\n",
+            "MSG _INBOX.JS.FETCH.c 3 3\r\ndef\r\n",
+            "MSG _INBOX.JS.FETCH.c 3 3\r\nghi\r\n",
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $captured = [];
+        $info = $client->jetStream()->objectStore('assets')->getToCallback(
+            'multi.txt',
+            static function (string $chunk) use (&$captured): void {
+                $captured[] = $chunk;
+            },
+        )->await();
+
+        // One invocation per stored chunk, in order — the whole object is never assembled.
+        self::assertSame(['abc', 'def', 'ghi'], $captured);
+        self::assertNotNull($info);
+        self::assertSame('multi.txt', $info->name);
+        self::assertSame(3, $info->chunks);
+    }
+
+    /**
      * Verifies getToCallback skips streaming for deleted objects.
      */
     public function testGetToCallbackSkipsDeletedObjects(): void
