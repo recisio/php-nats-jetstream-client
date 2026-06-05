@@ -34,6 +34,5 @@ final class ProtocolFrame
         public readonly ?string $infoPayload = null,
         public readonly ?int $headerBytes = null,
         public readonly ?int $totalBytes = null,
-    ) {
-    }
+    ) {}
 }

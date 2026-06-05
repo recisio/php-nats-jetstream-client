@@ -13,14 +13,14 @@ final class CredentialsParserTest extends TestCase
     public function testParseExtractsJwtAndNkeySeed(): void
     {
         $contents = <<<'CREDS'
------BEGIN NATS USER JWT-----
-eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ.test.signature
------END NATS USER JWT-----
+            -----BEGIN NATS USER JWT-----
+            eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ.test.signature
+            -----END NATS USER JWT-----
 
------BEGIN USER NKEY SEED-----
-SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM
------END USER NKEY SEED-----
-CREDS;
+            -----BEGIN USER NKEY SEED-----
+            SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM
+            -----END USER NKEY SEED-----
+            CREDS;
 
         $result = CredentialsParser::parse($contents);
 
@@ -31,10 +31,10 @@ CREDS;
     public function testParseRejectsMissingJwtBlock(): void
     {
         $contents = <<<'CREDS'
------BEGIN USER NKEY SEED-----
-SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM
------END USER NKEY SEED-----
-CREDS;
+            -----BEGIN USER NKEY SEED-----
+            SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM
+            -----END USER NKEY SEED-----
+            CREDS;
 
         $this->expectException(NatsException::class);
         $this->expectExceptionMessage('NATS USER JWT block');
@@ -45,10 +45,10 @@ CREDS;
     public function testParseRejectsMissingNkeySeedBlock(): void
     {
         $contents = <<<'CREDS'
------BEGIN NATS USER JWT-----
-eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ.test.signature
------END NATS USER JWT-----
-CREDS;
+            -----BEGIN NATS USER JWT-----
+            eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ.test.signature
+            -----END NATS USER JWT-----
+            CREDS;
 
         $this->expectException(NatsException::class);
         $this->expectExceptionMessage('USER NKEY SEED block');
@@ -67,14 +67,14 @@ CREDS;
     public function testFromFileReadsValidCredsFile(): void
     {
         $contents = <<<'CREDS'
------BEGIN NATS USER JWT-----
-jwt-token-here
------END NATS USER JWT-----
+            -----BEGIN NATS USER JWT-----
+            jwt-token-here
+            -----END NATS USER JWT-----
 
------BEGIN USER NKEY SEED-----
-seed-here
------END USER NKEY SEED-----
-CREDS;
+            -----BEGIN USER NKEY SEED-----
+            seed-here
+            -----END USER NKEY SEED-----
+            CREDS;
 
         $tmpFile = tempnam(sys_get_temp_dir(), 'nats_creds_');
         self::assertNotFalse($tmpFile);

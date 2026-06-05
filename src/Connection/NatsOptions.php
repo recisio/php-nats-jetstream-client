@@ -81,8 +81,7 @@ final class NatsOptions
         public readonly ?NonceSignerInterface $nonceSigner = null,
         public readonly int $maxPendingMessagesPerSubscription = 1_024,
         public readonly SlowConsumerPolicy $slowConsumerPolicy = SlowConsumerPolicy::DropOldest,
-    ) {
-    }
+    ) {}
 
     /**
      * Returns the preferred server endpoint used for initial connection attempts.

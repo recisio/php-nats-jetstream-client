@@ -8,6 +8,7 @@ use Amp\Future;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamContext;
+
 use function Amp\async;
 
 /**
@@ -37,8 +38,7 @@ final class PullConsumerIterator
         private readonly JetStreamContext $context,
         private readonly string $stream,
         private readonly string $consumer,
-    ) {
-    }
+    ) {}
 
     /**
      * Sets the number of messages to fetch per pull request.

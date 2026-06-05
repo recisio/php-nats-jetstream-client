@@ -15,13 +15,14 @@ use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Exception\NatsException;
 use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Exception\TimeoutException;
-use IDCT\NATS\Tests\Support\FlakyTransport;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FixedNonceSigner;
+use IDCT\NATS\Tests\Support\FlakyTransport;
 use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
-use function Amp\delay;
+
 use function Amp\async;
+use function Amp\delay;
 
 final class NatsConnectionTest extends TestCase
 {
@@ -203,8 +204,7 @@ final class NatsConnectionTest extends TestCase
         $connection = new NatsConnection(new NatsOptions(), $transport);
         $connection->connect()->await();
 
-        $sid = $connection->subscribe('orders.created', static function (NatsMessage $message): void {
-        })->await();
+        $sid = $connection->subscribe('orders.created', static function (NatsMessage $message): void {})->await();
 
         $connection->unsubscribe($sid)->await();
 
@@ -369,8 +369,7 @@ final class NatsConnectionTest extends TestCase
 
         $connection = new NatsConnection($options, $transport);
         $connection->connect()->await();
-        $connection->subscribe('updates', static function (NatsMessage $message): void {
-        })->await();
+        $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Subscription queue overflow');
@@ -932,7 +931,7 @@ final class NatsConnectionTest extends TestCase
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Subject must not contain whitespace');
-        $connection->publish("foo bar", 'data')->await();
+        $connection->publish('foo bar', 'data')->await();
     }
 
     public function testPublishRejectsWildcardSubject(): void
@@ -1002,10 +1001,10 @@ final class NatsConnectionTest extends TestCase
         );
         $connection->connect()->await();
 
-        $sid = $connection->subscribe('foo.*', function () {})->await();
+        $sid = $connection->subscribe('foo.*', function (): void {})->await();
         self::assertSame(1, $sid);
 
-        $sid2 = $connection->subscribe('bar.>', function () {})->await();
+        $sid2 = $connection->subscribe('bar.>', function (): void {})->await();
         self::assertSame(2, $sid2);
     }
 
@@ -1024,7 +1023,7 @@ final class NatsConnectionTest extends TestCase
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Wildcard ">" must be the last token');
-        $connection->subscribe('>.foo', function () {})->await();
+        $connection->subscribe('>.foo', function (): void {})->await();
     }
 
     public function testSubscribeRejectsPartialWildcardToken(): void
@@ -1042,7 +1041,7 @@ final class NatsConnectionTest extends TestCase
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Wildcards must occupy an entire token');
-        $connection->subscribe('foo.ba*', function () {})->await();
+        $connection->subscribe('foo.ba*', function (): void {})->await();
     }
 
     // ─── Drain ──────────────────────────────────────────────────────────
@@ -1061,8 +1060,8 @@ final class NatsConnectionTest extends TestCase
         );
         $connection->connect()->await();
 
-        $connection->subscribe('foo', function () {})->await();
-        $connection->subscribe('bar', function () {})->await();
+        $connection->subscribe('foo', function (): void {})->await();
+        $connection->subscribe('bar', function (): void {})->await();
 
         $connection->drain()->await();
 
@@ -1145,8 +1144,7 @@ final class NatsConnectionTest extends TestCase
             $transport,
         );
         $connection->connect()->await();
-        $connection->subscribe('updates', static function (NatsMessage $message): void {
-        })->await();
+        $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Malformed HMSG frame');
@@ -1266,13 +1264,12 @@ final class NatsConnectionTest extends TestCase
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Wildcards must occupy an entire token');
-        $connection->subscribe('orders.a*', static function (NatsMessage $message): void {
-        })->await();
+        $connection->subscribe('orders.a*', static function (NatsMessage $message): void {})->await();
     }
 
     public function testPublishRecoversAndRetriesAfterWriteFailure(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $connectCalls = [];
             /** @var list<string> */
@@ -1314,8 +1311,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -1329,8 +1325,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1354,7 +1349,7 @@ final class NatsConnectionTest extends TestCase
 
     public function testPublishWithHeadersRecoversAndRetriesAfterWriteFailure(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $connectCalls = [];
             /** @var list<string> */
@@ -1396,8 +1391,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -1411,8 +1405,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1436,7 +1429,7 @@ final class NatsConnectionTest extends TestCase
 
     public function testPingTimerReconnectsWhenMaxOutstandingPingsExceeded(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $connectCalls = [];
             /** @var list<string> */
@@ -1472,8 +1465,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -1487,8 +1479,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1564,7 +1555,7 @@ final class NatsConnectionTest extends TestCase
 
         $subWrites = array_values(array_filter(
             $transport->writes,
-            static fn (string $write): bool => str_starts_with($write, 'SUB updates 1')
+            static fn(string $write): bool => str_starts_with($write, 'SUB updates 1'),
         ));
         self::assertCount(3, $subWrites);
         self::assertSame('S3', $connection->serverInfo()?->serverId);
@@ -1572,7 +1563,7 @@ final class NatsConnectionTest extends TestCase
 
     public function testPingTimerWriteFailureReconnectsWhenEnabled(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $connectCalls = [];
 
@@ -1610,8 +1601,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -1625,8 +1615,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1789,8 +1778,7 @@ final class NatsConnectionTest extends TestCase
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Queue group must not contain whitespace');
-        $connection->subscribe('tasks.process', static function (NatsMessage $message): void {
-        }, "workers\r\nSUB hack 99")->await();
+        $connection->subscribe('tasks.process', static function (NatsMessage $message): void {}, "workers\r\nSUB hack 99")->await();
     }
 
     public function testSubscribeRejectsEmptyQueueGroup(): void
@@ -1805,15 +1793,14 @@ final class NatsConnectionTest extends TestCase
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Queue group must not be empty');
-        $connection->subscribe('tasks.process', static function (NatsMessage $message): void {
-        }, '')->await();
+        $connection->subscribe('tasks.process', static function (NatsMessage $message): void {}, '')->await();
     }
 
     // ─── Cancellable reads / no orphaned read on timeout (P0-1) ─────────
 
     public function testRequestTimeoutCancelsReadAndAllowsSubsequentRequest(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $writes = [];
             public int $maxConcurrentReads = 0;
@@ -1827,8 +1814,7 @@ final class NatsConnectionTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function write(string $bytes): \Amp\Future
@@ -1840,8 +1826,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -1871,8 +1856,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function pushReply(string $chunk): void
@@ -1911,7 +1895,7 @@ final class NatsConnectionTest extends TestCase
         // Live-server fake: every PING write produces a PONG on the next read. The application
         // never calls processIncoming(), so without the heartbeat self-read the outstanding-ping
         // counter would exceed maxPingsOut and (with reconnect disabled) close the connection.
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $writes = [];
             public int $pings = 0;
@@ -1922,8 +1906,7 @@ final class NatsConnectionTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function write(string $bytes): \Amp\Future
@@ -1939,8 +1922,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -1958,8 +1940,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1984,7 +1965,7 @@ final class NatsConnectionTest extends TestCase
      */
     public function testHeartbeatResponseDeliversBufferedMessageImmediately(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $writes = [];
             /** @var list<string> */
@@ -1994,8 +1975,7 @@ final class NatsConnectionTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function write(string $bytes): \Amp\Future
@@ -2010,8 +1990,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -2029,8 +2008,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function enqueue(string $chunk): void

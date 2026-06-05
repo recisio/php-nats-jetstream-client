@@ -4,14 +4,15 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Services;
 
-use Amp\Future;
 use Amp\Cancellation;
 use Amp\CancelledException;
 use Amp\CompositeCancellation;
+use Amp\Future;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
+
 use function Amp\async;
 use function Amp\delay;
 
@@ -110,7 +111,7 @@ final class Service
     public function withSchemaValidator(ServiceSchemaValidatorInterface $validator): self
     {
         return $this->withRequestValidator(
-            static fn (NatsMessage $message, array $schema): ?string => $validator->validate($message, $schema),
+            static fn(NatsMessage $message, array $schema): ?string => $validator->validate($message, $schema),
         );
     }
 
@@ -518,11 +519,11 @@ final class Service
                 ));
             }
 
-            return static fn (NatsMessage $message): string|array|null => $instance->handle($message);
+            return static fn(NatsMessage $message): string|array|null => $instance->handle($message);
         }
 
         if ($handler instanceof ServiceEndpointHandlerInterface) {
-            return static fn (NatsMessage $message): string|array|null => $handler->handle($message);
+            return static fn(NatsMessage $message): string|array|null => $handler->handle($message);
         }
 
         if (is_callable($handler)) {

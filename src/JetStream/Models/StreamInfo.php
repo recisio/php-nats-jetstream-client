@@ -22,8 +22,7 @@ final class StreamInfo
         public readonly array $subjects,
         /** @var array<string,mixed> */
         public readonly array $raw,
-    ) {
-    }
+    ) {}
 
     /**
      * Hydrates stream information from JetStream API JSON.
@@ -37,7 +36,7 @@ final class StreamInfo
         /** @var list<string> $subjects */
         $subjects = array_values(array_filter(
             is_array($config['subjects'] ?? null) ? $config['subjects'] : [],
-            static fn (mixed $value): bool => is_string($value),
+            static fn(mixed $value): bool => is_string($value),
         ));
 
         return new self(

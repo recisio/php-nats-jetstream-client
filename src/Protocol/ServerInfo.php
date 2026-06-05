@@ -32,8 +32,7 @@ final class ServerInfo
         public readonly ?string $nonce = null,
         public readonly bool $tlsRequired = false,
         public readonly bool $tlsAvailable = false,
-    ) {
-    }
+    ) {}
 
     /**
      * Creates a typed ServerInfo object from raw INFO JSON data.

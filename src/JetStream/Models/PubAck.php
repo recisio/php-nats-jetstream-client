@@ -23,8 +23,7 @@ final class PubAck
         public readonly bool $duplicate,
         /** @var array<string,mixed> */
         public readonly array $raw,
-    ) {
-    }
+    ) {}
 
     /**
      * Hydrates publish acknowledgment from JetStream API JSON.

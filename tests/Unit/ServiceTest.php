@@ -12,6 +12,7 @@ use IDCT\NATS\Services\BasicJsonSchemaValidator;
 use IDCT\NATS\Services\ServiceEndpointHandlerInterface;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
+
 use function Amp\async;
 use function Amp\delay;
 
@@ -31,9 +32,7 @@ final class ServiceTestClassHandler implements ServiceEndpointHandlerInterface
     }
 }
 
-final class ServiceTestInvalidClassHandler
-{
-}
+final class ServiceTestInvalidClassHandler {}
 
 final class ServiceTest extends TestCase
 {
@@ -53,7 +52,7 @@ final class ServiceTest extends TestCase
         $service = $client->service('echo', '1.0.0')->addEndpoint(
             'echo',
             'svc.echo',
-            static fn (NatsMessage $message): string => $message->payload,
+            static fn(NatsMessage $message): string => $message->payload,
             'q.echo',
         );
 
@@ -83,7 +82,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0', 'Echo service')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -114,7 +113,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): array => ['echo' => $message->payload]);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): array => ['echo' => $message->payload]);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -138,7 +137,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
         $service->start()->await();
         $service->stop()->await();
 
@@ -165,7 +164,7 @@ final class ServiceTest extends TestCase
         $service->addGroup('svc')->addGroup('v1')->addEndpoint(
             'echo-v1',
             'echo',
-            static fn (NatsMessage $message): string => 'v1:' . $message->payload,
+            static fn(NatsMessage $message): string => 'v1:' . $message->payload,
         );
 
         $service->start()->await();
@@ -194,11 +193,11 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0');
-        $service->addGroup('')->addEndpoint('root', 'echo', static fn (NatsMessage $message): string => $message->payload);
-        $service->addGroup('svc')->addEndpoint('svc-root', '', static fn (NatsMessage $message): string => $message->payload);
+        $service->addGroup('')->addEndpoint('root', 'echo', static fn(NatsMessage $message): string => $message->payload);
+        $service->addGroup('svc')->addEndpoint('svc-root', '', static fn(NatsMessage $message): string => $message->payload);
 
         $subjects = array_map(
-            static fn (array $endpoint): string => (string) ($endpoint['subject'] ?? ''),
+            static fn(array $endpoint): string => (string) ($endpoint['subject'] ?? ''),
             $service->statsSnapshot()['endpoints'] ?? [],
         );
 
@@ -223,7 +222,7 @@ final class ServiceTest extends TestCase
         $schema = ['type' => 'object', 'properties' => ['msg' => ['type' => 'string']]];
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, schema: $schema);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, schema: $schema);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -291,7 +290,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -323,7 +322,7 @@ final class ServiceTest extends TestCase
 
         $handled = false;
         $service = $client->service('echo', '1.0.0')
-            ->withRequestValidator(static fn (NatsMessage $message, array $schema): ?string => $schema === [] ? null : 'payload does not match schema')
+            ->withRequestValidator(static fn(NatsMessage $message, array $schema): ?string => $schema === [] ? null : 'payload does not match schema')
             ->addEndpoint('echo', 'svc.echo', static function (NatsMessage $message) use (&$handled): string {
                 $handled = true;
 
@@ -375,7 +374,7 @@ final class ServiceTest extends TestCase
                     'subject' => $message->subject,
                 ];
             })
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -402,7 +401,7 @@ final class ServiceTest extends TestCase
 
         $service = $client->service('echo', '1.0.0')
             ->withSchemaValidator(new BasicJsonSchemaValidator())
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, schema: [
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, schema: [
                 'type' => 'object',
                 'required' => ['id'],
                 'properties' => [
@@ -535,7 +534,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => 'run:' . $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => 'run:' . $message->payload);
 
         $service->run(0.03)->await();
 
@@ -559,7 +558,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
 
         $cancellation = new DeferredCancellation();
         $runner = async(static function () use ($service, $cancellation): void {
@@ -589,7 +588,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
         $service->start()->await();
 
         $writes = implode('', $transport->writes);
@@ -612,7 +611,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, '');
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, '');
         $service->start()->await();
 
         $writes = implode('', $transport->writes);
@@ -634,7 +633,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, null);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, null);
         $service->start()->await();
 
         $writes = implode('', $transport->writes);

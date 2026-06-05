@@ -7,6 +7,4 @@ namespace IDCT\NATS\Exception;
 /**
  * Thrown when invalid or unexpected NATS protocol frames are encountered.
  */
-final class ProtocolException extends NatsException
-{
-}
+final class ProtocolException extends NatsException {}

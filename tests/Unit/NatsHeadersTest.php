@@ -29,20 +29,20 @@ final class NatsHeadersTest extends TestCase
         self::assertSame([], NatsHeaders::fromWireBlock(null));
         self::assertSame([], NatsHeaders::fromWireBlock(''));
 
-        $raw = "NATS/1.0\r\n" .
-            "NoSeparator\r\n" .
-            ":missing-name\r\n" .
-            "Valid: value\r\n" .
-            "\r\n";
+        $raw = "NATS/1.0\r\n"
+            . "NoSeparator\r\n"
+            . ":missing-name\r\n"
+            . "Valid: value\r\n"
+            . "\r\n";
 
         self::assertSame(['Valid' => 'value'], NatsHeaders::fromWireBlock($raw));
     }
 
     public function testFromWireBlockParsesStatusLine(): void
     {
-        $raw = "NATS/1.0 100 Idle Heartbeat\r\n" .
-            "Nats-Consumer-Stalled: _INBOX.123\r\n" .
-            "\r\n";
+        $raw = "NATS/1.0 100 Idle Heartbeat\r\n"
+            . "Nats-Consumer-Stalled: _INBOX.123\r\n"
+            . "\r\n";
 
         self::assertSame([
             'Status' => '100',

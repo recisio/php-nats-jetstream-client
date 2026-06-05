@@ -6,12 +6,13 @@ namespace IDCT\NATS\Transport;
 
 use Amp\Cancellation;
 use Amp\Future;
-use Amp\TimeoutCancellation;
 use Amp\Socket\Certificate;
 use Amp\Socket\ClientTlsContext;
 use Amp\Socket\ConnectContext;
 use Amp\Socket\Socket;
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsOptions;
+
 use function Amp\async;
 use function Amp\Socket\connect;
 
@@ -34,9 +35,7 @@ final class AmpSocketTransport implements TransportInterface
     /**
      * @param NatsOptions $options Client connection options controlling TLS and socket behavior.
      */
-    public function __construct(private readonly NatsOptions $options = new NatsOptions())
-    {
-    }
+    public function __construct(private readonly NatsOptions $options = new NatsOptions()) {}
 
     /**
      * Connects to a server DSN using Amp socket transport.

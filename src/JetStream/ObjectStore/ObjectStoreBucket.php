@@ -11,6 +11,7 @@ use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamApi;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\Models\StreamInfo;
+
 use function Amp\async;
 
 /**
@@ -45,8 +46,7 @@ final class ObjectStoreBucket
         private readonly JetStreamContext $jetStream,
         private readonly string $bucket,
         private readonly int $chunkSize = self::DEFAULT_CHUNK_SIZE,
-    ) {
-    }
+    ) {}
 
     /**
      * Creates or updates the underlying Object Store stream.

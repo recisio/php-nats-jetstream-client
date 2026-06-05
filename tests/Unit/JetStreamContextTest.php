@@ -12,10 +12,10 @@ use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\Configuration\StreamSource;
-use IDCT\NATS\JetStream\Schedule;
-use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
+use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
+use IDCT\NATS\JetStream\Schedule;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
 
@@ -1042,8 +1042,7 @@ final class JetStreamContextTest extends TestCase
         $client = new NatsClient(new NatsOptions(), $transport);
         $client->connect()->await();
 
-        $client->jetStream()->subscribeOrderedConsumer('ORDERS', function (NatsMessage $msg): void {
-        })->await();
+        $client->jetStream()->subscribeOrderedConsumer('ORDERS', function (NatsMessage $msg): void {})->await();
 
         $written = implode('', $transport->writes);
         self::assertStringContainsString('$JS.API.CONSUMER.CREATE.ORDERS', $written);

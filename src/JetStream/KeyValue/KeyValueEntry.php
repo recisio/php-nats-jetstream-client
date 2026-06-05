@@ -24,6 +24,5 @@ final class KeyValueEntry
         public readonly ?string $value,
         public readonly string $operation,
         public readonly ?int $revision = null,
-    ) {
-    }
+    ) {}
 }

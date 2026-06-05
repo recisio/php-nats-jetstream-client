@@ -11,9 +11,7 @@ final class FixedNonceSigner implements NonceSignerInterface
     /**
      * Creates a deterministic nonce signer used by unit tests.
      */
-    public function __construct(private readonly string $prefix = 'signed:')
-    {
-    }
+    public function __construct(private readonly string $prefix = 'signed:') {}
 
     /**
      * Returns a predictable signature for assertions.

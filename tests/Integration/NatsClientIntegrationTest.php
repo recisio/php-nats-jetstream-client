@@ -23,6 +23,7 @@ use IDCT\NATS\Services\BasicJsonSchemaValidator;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FlakyTransport;
 use PHPUnit\Framework\TestCase;
+
 use function Amp\async;
 use function Amp\delay;
 
@@ -301,7 +302,7 @@ final class NatsClientIntegrationTest extends TestCase
         $requester->connect()->await();
 
         $service = $serviceClient->service('echo', '1.0.0', 'Echo demo')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => 'reply:' . $message->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => 'reply:' . $message->payload);
         $service->start()->await();
 
         $servicePumpCancellation = new DeferredCancellation();
@@ -375,7 +376,7 @@ final class NatsClientIntegrationTest extends TestCase
                     'subject' => $message->subject,
                 ];
             })
-            ->addEndpoint('echo', $subject, static fn (NatsMessage $message): string => 'reply:' . $message->payload, schema: [
+            ->addEndpoint('echo', $subject, static fn(NatsMessage $message): string => 'reply:' . $message->payload, schema: [
                 'type' => 'object',
                 'required' => ['id'],
                 'properties' => [
@@ -448,13 +449,13 @@ final class NatsClientIntegrationTest extends TestCase
         self::assertGreaterThanOrEqual(0, (int) ($endpoint['processing_time'] ?? -1));
         self::assertGreaterThanOrEqual(0, (int) ($endpoint['average_processing_time'] ?? -1));
 
-        $eventNames = array_map(static fn (array $event): string => (string) $event['event'], $events);
+        $eventNames = array_map(static fn(array $event): string => (string) $event['event'], $events);
         self::assertContains('request_start', $eventNames);
         self::assertContains('request_error', $eventNames);
         self::assertContains('request_end', $eventNames);
 
         $correlationIds = array_values(array_filter(array_map(
-            static fn (array $event): ?string => is_string($event['correlation_id'] ?? null) ? $event['correlation_id'] : null,
+            static fn(array $event): ?string => is_string($event['correlation_id'] ?? null) ? $event['correlation_id'] : null,
             $events,
         )));
         self::assertContains('it-invalid-' . $suffix, $correlationIds);
@@ -484,14 +485,14 @@ final class NatsClientIntegrationTest extends TestCase
         $requester->connect()->await();
 
         $service = $serviceClient->service($serviceName, '1.2.3', 'Discovery contract')
-            ->addEndpoint('schema-endpoint', $subjectWithSchema, static fn (NatsMessage $message): string => 'ok:' . $message->payload, schema: [
+            ->addEndpoint('schema-endpoint', $subjectWithSchema, static fn(NatsMessage $message): string => 'ok:' . $message->payload, schema: [
                 'type' => 'object',
                 'required' => ['id'],
                 'properties' => [
                     'id' => ['type' => 'integer'],
                 ],
             ])
-            ->addEndpoint('plain-endpoint', $subjectWithoutSchema, static fn (NatsMessage $message): string => 'ok:' . $message->payload);
+            ->addEndpoint('plain-endpoint', $subjectWithoutSchema, static fn(NatsMessage $message): string => 'ok:' . $message->payload);
         $service->start()->await();
 
         $servicePumpCancellation = new DeferredCancellation();
@@ -608,8 +609,8 @@ final class NatsClientIntegrationTest extends TestCase
         $requester->connect()->await();
 
         $service = $serviceClient->service('multi-' . $suffix, '1.0.0', 'Multi endpoint')
-            ->addEndpoint('alpha', $subjectAlpha, static fn (NatsMessage $message): string => 'alpha:' . $message->payload)
-            ->addEndpoint('beta', $subjectBeta, static fn (NatsMessage $message): string => 'beta:' . $message->payload);
+            ->addEndpoint('alpha', $subjectAlpha, static fn(NatsMessage $message): string => 'alpha:' . $message->payload)
+            ->addEndpoint('beta', $subjectBeta, static fn(NatsMessage $message): string => 'beta:' . $message->payload);
         $service->start()->await();
 
         $servicePumpCancellation = new DeferredCancellation();
@@ -678,8 +679,8 @@ final class NatsClientIntegrationTest extends TestCase
 
         $service = $serviceClient->service('grouped-' . $suffix, '1.0.0', 'Grouped endpoints');
         $root = $service->addGroup('svc.' . $suffix);
-        $root->addGroup('v1')->addEndpoint('echo-v1', 'echo', static fn (NatsMessage $message): string => 'v1:' . $message->payload);
-        $root->addGroup('v2')->addEndpoint('echo-v2', 'echo', static fn (NatsMessage $message): string => 'v2:' . $message->payload);
+        $root->addGroup('v1')->addEndpoint('echo-v1', 'echo', static fn(NatsMessage $message): string => 'v1:' . $message->payload);
+        $root->addGroup('v2')->addEndpoint('echo-v2', 'echo', static fn(NatsMessage $message): string => 'v2:' . $message->payload);
         $service->start()->await();
 
         $servicePumpCancellation = new DeferredCancellation();
@@ -722,7 +723,7 @@ final class NatsClientIntegrationTest extends TestCase
         self::assertSame('v2:hello', $replyV2->payload);
 
         $subjects = array_map(
-            static fn (array $endpoint): string => (string) ($endpoint['subject'] ?? ''),
+            static fn(array $endpoint): string => (string) ($endpoint['subject'] ?? ''),
             $service->statsSnapshot()['endpoints'] ?? [],
         );
         self::assertContains($subjectV1, $subjects);
@@ -785,7 +786,7 @@ final class NatsClientIntegrationTest extends TestCase
                 });
             }
 
-            $results = array_map(static fn ($future): string => $future->await(), $futures);
+            $results = array_map(static fn($future): string => $future->await(), $futures);
         } finally {
             foreach ($requesters as $requester) {
                 $requester->disconnect()->await();
@@ -1218,7 +1219,7 @@ final class NatsClientIntegrationTest extends TestCase
 
         $subWrites = array_values(array_filter(
             $transport->writes,
-            static fn (string $write): bool => str_starts_with($write, 'SUB ' . $subject . ' '),
+            static fn(string $write): bool => str_starts_with($write, 'SUB ' . $subject . ' '),
         ));
         self::assertCount(2, $subWrites);
 
@@ -1277,7 +1278,7 @@ final class NatsClientIntegrationTest extends TestCase
     {
         $this->requireIntegrationEnabled();
 
-        $transport = new class () implements \IDCT\NATS\Transport\TransportInterface {
+        $transport = new class implements \IDCT\NATS\Transport\TransportInterface {
             public int $connectAttempts = 0;
 
             /** @var list<string> */
@@ -1298,14 +1299,12 @@ final class NatsClientIntegrationTest extends TestCase
 
             public function write(string $bytes): Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function upgradeTls(): Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): Future
@@ -1321,8 +1320,7 @@ final class NatsClientIntegrationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1363,7 +1361,7 @@ final class NatsClientIntegrationTest extends TestCase
     {
         $this->requireIntegrationEnabled();
 
-        $transport = new class () implements \IDCT\NATS\Transport\TransportInterface {
+        $transport = new class implements \IDCT\NATS\Transport\TransportInterface {
             public int $connectAttempts = 0;
 
             /** @var array<int, list<string>> */
@@ -1397,14 +1395,12 @@ final class NatsClientIntegrationTest extends TestCase
 
             public function write(string $bytes): Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function upgradeTls(): Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): Future
@@ -1430,8 +1426,7 @@ final class NatsClientIntegrationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -1782,9 +1777,9 @@ final class NatsClientIntegrationTest extends TestCase
 
         // Identical service definitions; default queue group ("q") should load-balance.
         $serviceA = $a->service('lbworker', '1.0.0')
-            ->addEndpoint('work', $subject, static fn (NatsMessage $message): string => 'a');
+            ->addEndpoint('work', $subject, static fn(NatsMessage $message): string => 'a');
         $serviceB = $b->service('lbworker', '1.0.0')
-            ->addEndpoint('work', $subject, static fn (NatsMessage $message): string => 'b');
+            ->addEndpoint('work', $subject, static fn(NatsMessage $message): string => 'b');
         $serviceA->start()->await();
         $serviceB->start()->await();
 
@@ -1799,8 +1794,8 @@ final class NatsClientIntegrationTest extends TestCase
                 // Stopped once all requests completed.
             }
         };
-        $pumpA = async(static fn () => $pump($a));
-        $pumpB = async(static fn () => $pump($b));
+        $pumpA = async(static fn() => $pump($a));
+        $pumpB = async(static fn() => $pump($b));
 
         try {
             for ($i = 0; $i < $requests; $i++) {

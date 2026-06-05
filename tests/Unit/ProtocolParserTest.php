@@ -85,7 +85,7 @@ final class ProtocolParserTest extends TestCase
     {
         $parser = new ProtocolParser();
 
-        $framesA = $parser->push("PIN");
+        $framesA = $parser->push('PIN');
         $framesB = $parser->push("G\r\n");
 
         self::assertSame([], $framesA);

@@ -13,6 +13,7 @@ use IDCT\NATS\JetStream\JetStreamApi;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
+
 use function Amp\async;
 
 /**
@@ -31,8 +32,7 @@ final class KeyValueBucket
         private readonly NatsClient $client,
         private readonly JetStreamContext $jetStream,
         private readonly string $bucket,
-    ) {
-    }
+    ) {}
 
     /**
      * Creates or updates the underlying KV stream for this bucket.

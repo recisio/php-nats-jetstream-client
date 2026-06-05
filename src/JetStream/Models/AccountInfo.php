@@ -25,8 +25,7 @@ final class AccountInfo
         public readonly int $consumers,
         /** @var array<string,mixed> */
         public readonly array $raw,
-    ) {
-    }
+    ) {}
 
     /**
      * Hydrates account info from JetStream API JSON.

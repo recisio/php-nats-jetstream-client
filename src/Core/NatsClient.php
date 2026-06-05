@@ -13,6 +13,7 @@ use IDCT\NATS\Protocol\ServerInfo;
 use IDCT\NATS\Services\Service;
 use IDCT\NATS\Transport\AmpSocketTransport;
 use IDCT\NATS\Transport\TransportInterface;
+
 use function Amp\async;
 
 /**
@@ -160,8 +161,7 @@ final class NatsClient
         string $payload,
         ?int $timeoutMs = null,
         ?Cancellation $cancellation = null,
-    ): Future
-    {
+    ): Future {
         return $this->connection->request($subject, $payload, $timeoutMs, $cancellation);
     }
 

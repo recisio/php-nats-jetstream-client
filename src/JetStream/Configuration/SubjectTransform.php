@@ -21,8 +21,7 @@ final class SubjectTransform
     private function __construct(
         private readonly string $src,
         private readonly string $dest,
-    ) {
-    }
+    ) {}
 
     /**
      * Creates a subject transform mapping a source pattern to a destination pattern.

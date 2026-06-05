@@ -13,10 +13,11 @@ use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Protocol\Enum\ProtocolFrameType;
 use IDCT\NATS\Protocol\ProtocolFrame;
 use IDCT\NATS\Protocol\ServerInfo;
-use IDCT\NATS\Transport\TransportInterface;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FlakyTransport;
+use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
+
 use function Amp\async;
 use function Amp\delay;
 
@@ -107,8 +108,7 @@ final class NatsConnectionInternalsTest extends TestCase
         $sid = 99;
         $this->setPrivate($connection, 'state', ConnectionState::Closed);
         $this->setPrivate($connection, 'subscriptions', [
-            $sid => static function (NatsMessage $message): void {
-            },
+            $sid => static function (NatsMessage $message): void {},
         ]);
         $this->setPrivate($connection, 'subscriptionMeta', [
             $sid => ['subject' => '_INBOX.x', 'queue' => null],
@@ -410,11 +410,10 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testCleanupRequestSubscriptionFallsBackWhenUnsubscribeThrows(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function write(string $bytes): \Amp\Future
@@ -428,21 +427,17 @@ final class NatsConnectionInternalsTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
             {
-                return async(static function (): string {
-                    return '';
-                });
+                return async(static fn(): string => '');
             }
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -451,8 +446,7 @@ final class NatsConnectionInternalsTest extends TestCase
         $sid = 77;
         $this->setPrivate($connection, 'state', ConnectionState::Open);
         $this->setPrivate($connection, 'subscriptions', [
-            $sid => static function (NatsMessage $message): void {
-            },
+            $sid => static function (NatsMessage $message): void {},
         ]);
         $this->setPrivate($connection, 'subscriptionMeta', [
             $sid => ['subject' => '_INBOX.req', 'queue' => null],
@@ -496,11 +490,10 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testStartPingTimerWriteFailureClosesWhenReconnectDisabled(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function write(string $bytes): \Amp\Future
@@ -514,21 +507,17 @@ final class NatsConnectionInternalsTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
             {
-                return async(static function (): string {
-                    return '';
-                });
+                return async(static fn(): string => '');
             }
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 
@@ -555,8 +544,7 @@ final class NatsConnectionInternalsTest extends TestCase
         $sid = 5;
 
         $this->setPrivate($connection, 'subscriptions', [
-            $sid => static function (NatsMessage $message): void {
-            },
+            $sid => static function (NatsMessage $message): void {},
         ]);
         $this->setPrivate($connection, 'subscriptionMeta', [
             $sid => ['subject' => 'events', 'queue' => null],

@@ -7,6 +7,4 @@ namespace IDCT\NATS\Exception;
 /**
  * Thrown when JetStream API responses indicate an application-level failure.
  */
-final class JetStreamException extends NatsException
-{
-}
+final class JetStreamException extends NatsException {}

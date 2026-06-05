@@ -23,8 +23,7 @@ final class Republish
     private function __construct(
         private readonly string $src,
         private readonly string $dest,
-    ) {
-    }
+    ) {}
 
     /**
      * Creates a republish rule mapping a source subject filter to a destination subject.

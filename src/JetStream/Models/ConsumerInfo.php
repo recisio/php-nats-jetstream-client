@@ -23,8 +23,7 @@ final class ConsumerInfo
         public readonly bool $push,
         /** @var array<string,mixed> */
         public readonly array $raw,
-    ) {
-    }
+    ) {}
 
     /**
      * Hydrates consumer info from JetStream API JSON.

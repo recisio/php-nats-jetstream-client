@@ -145,8 +145,7 @@ final class NatsClientTest extends TestCase
         $service = $clientA->service('orders', '1.0.0', 'Order API', ['team' => 'core']);
         self::assertInstanceOf(Service::class, $service);
 
-        $sid = $clientA->subscribe('events', static function (NatsMessage $message): void {
-        })->await();
+        $sid = $clientA->subscribe('events', static function (NatsMessage $message): void {})->await();
         self::assertSame(1, $sid);
 
         $clientA->drain()->await();

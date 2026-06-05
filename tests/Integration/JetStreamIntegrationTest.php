@@ -4,15 +4,16 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Integration;
 
+use Amp\CancelledException;
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
-use Amp\CancelledException;
-use Amp\TimeoutCancellation;
-use function Amp\delay;
 use IDCT\NATS\Exception\JetStreamException;
 use PHPUnit\Framework\TestCase;
+
+use function Amp\delay;
 
 final class JetStreamIntegrationTest extends TestCase
 {
@@ -97,7 +98,7 @@ final class JetStreamIntegrationTest extends TestCase
         $js->createConsumer($stream, $consumerB, $subject)->await();
 
         $consumers = $js->listConsumers($stream)->await();
-        $names = array_map(static fn ($consumer): string => $consumer->name, $consumers);
+        $names = array_map(static fn($consumer): string => $consumer->name, $consumers);
 
         self::assertContains($consumerA, $names);
         self::assertContains($consumerB, $names);
@@ -244,7 +245,7 @@ final class JetStreamIntegrationTest extends TestCase
         $js->createStream($streamB, [$subjectB])->await();
 
         $streams = $js->listStreams()->await();
-        $names = array_map(static fn ($stream): string => $stream->name, $streams);
+        $names = array_map(static fn($stream): string => $stream->name, $streams);
 
         self::assertContains($streamA, $names);
         self::assertContains($streamB, $names);
@@ -1266,7 +1267,7 @@ final class JetStreamIntegrationTest extends TestCase
         }
 
         // Heartbeat/control traffic may surface as empty payloads but should not surface user data.
-        $nonEmptyPayloads = array_values(array_filter($receivedPayloads, static fn (string $payload): bool => $payload !== ''));
+        $nonEmptyPayloads = array_values(array_filter($receivedPayloads, static fn(string $payload): bool => $payload !== ''));
         self::assertCount(0, $nonEmptyPayloads);
         self::assertGreaterThanOrEqual(1, $framesProcessed);
 
@@ -1311,7 +1312,7 @@ final class JetStreamIntegrationTest extends TestCase
 
         $batch = $js->fetchBatch($stream, $consumer, 3, 700)->await();
 
-        $payloads = array_map(static fn (NatsMessage $message): string => $message->payload, $batch);
+        $payloads = array_map(static fn(NatsMessage $message): string => $message->payload, $batch);
         self::assertContains('{"n":1}', $payloads);
         self::assertContains('{"n":2}', $payloads);
         self::assertGreaterThanOrEqual(2, count($batch));

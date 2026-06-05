@@ -24,6 +24,5 @@ final class NatsMessage
         public readonly ?string $replyTo,
         public readonly string $payload,
         public readonly ?string $rawHeaders = null,
-    ) {
-    }
+    ) {}
 }

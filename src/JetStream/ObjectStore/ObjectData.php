@@ -18,6 +18,5 @@ final class ObjectData
     public function __construct(
         public readonly ObjectInfo $info,
         public readonly ?string $data,
-    ) {
-    }
+    ) {}
 }

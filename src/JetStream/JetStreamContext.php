@@ -19,6 +19,7 @@ use IDCT\NATS\JetStream\Models\ConsumerInfo;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
+
 use function Amp\async;
 use function Amp\delay;
 
@@ -37,9 +38,7 @@ final class JetStreamContext
       *
       * @param NatsClient $client Connected NATS client used to issue JetStream API request/reply calls.
      */
-    public function __construct(private readonly NatsClient $client)
-    {
-    }
+    public function __construct(private readonly NatsClient $client) {}
 
     /**
      * Returns a fluent pull-consumer iterator builder.
@@ -187,7 +186,7 @@ final class JetStreamContext
             /** @var list<array<string,mixed>> $streams */
             $streams = is_array($response['streams'] ?? null) ? $response['streams'] : [];
 
-            return array_map(static fn (array $s): StreamInfo => StreamInfo::fromArray($s), $streams);
+            return array_map(static fn(array $s): StreamInfo => StreamInfo::fromArray($s), $streams);
         });
     }
 
@@ -203,7 +202,7 @@ final class JetStreamContext
             /** @var list<array<string,mixed>> $consumers */
             $consumers = is_array($response['consumers'] ?? null) ? $response['consumers'] : [];
 
-            return array_map(static fn (array $c): ConsumerInfo => ConsumerInfo::fromArray($c), $consumers);
+            return array_map(static fn(array $c): ConsumerInfo => ConsumerInfo::fromArray($c), $consumers);
         });
     }
 
@@ -525,12 +524,10 @@ final class JetStreamContext
      */
     public function pauseConsumer(string $stream, string $consumer, string $pauseUntil): Future
     {
-        return async(function () use ($stream, $consumer, $pauseUntil): array {
-            return $this->requestJson(
-                JetStreamApi::CONSUMER_PAUSE_PREFIX . $stream . '.' . $consumer,
-                ['pause_until' => $pauseUntil],
-            );
-        });
+        return async(fn(): array => $this->requestJson(
+            JetStreamApi::CONSUMER_PAUSE_PREFIX . $stream . '.' . $consumer,
+            ['pause_until' => $pauseUntil],
+        ));
     }
 
     /**
@@ -540,12 +537,10 @@ final class JetStreamContext
      */
     public function resumeConsumer(string $stream, string $consumer): Future
     {
-        return async(function () use ($stream, $consumer): array {
-            return $this->requestJson(
-                JetStreamApi::CONSUMER_PAUSE_PREFIX . $stream . '.' . $consumer,
-                [],
-            );
-        });
+        return async(fn(): array => $this->requestJson(
+            JetStreamApi::CONSUMER_PAUSE_PREFIX . $stream . '.' . $consumer,
+            [],
+        ));
     }
 
     /**

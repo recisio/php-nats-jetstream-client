@@ -7,6 +7,7 @@ namespace IDCT\NATS\Core;
 use Amp\CancelledException;
 use Amp\TimeoutCancellation;
 use SplQueue;
+
 use function Amp\delay;
 
 /**

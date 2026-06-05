@@ -20,8 +20,7 @@ final class ServiceGroup
     public function __construct(
         private readonly Service $service,
         private readonly string $prefix,
-    ) {
-    }
+    ) {}
 
     /**
      * @param callable(NatsMessage):(string|array<string,mixed>|null)|ServiceEndpointHandlerInterface|class-string<ServiceEndpointHandlerInterface>|object $handler

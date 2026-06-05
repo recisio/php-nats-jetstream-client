@@ -32,8 +32,7 @@ final class ObjectInfo
         public readonly bool $deleted,
         public readonly string $nuid,
         public readonly array $metadata = [],
-    ) {
-    }
+    ) {}
 
     /**
      * @param array<string,mixed> $data

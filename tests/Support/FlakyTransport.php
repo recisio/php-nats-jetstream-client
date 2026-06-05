@@ -8,6 +8,7 @@ use Amp\Cancellation;
 use Amp\Future;
 use IDCT\NATS\Transport\TransportInterface;
 use RuntimeException;
+
 use function Amp\async;
 
 final class FlakyTransport implements TransportInterface
@@ -64,8 +65,7 @@ final class FlakyTransport implements TransportInterface
      */
     public function upgradeTls(): Future
     {
-        return async(function (): void {
-        });
+        return async(function (): void {});
     }
 
     /**
@@ -108,7 +108,6 @@ final class FlakyTransport implements TransportInterface
      */
     public function close(): Future
     {
-        return async(function (): void {
-        });
+        return async(function (): void {});
     }
 }

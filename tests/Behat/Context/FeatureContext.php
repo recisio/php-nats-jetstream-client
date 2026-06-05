@@ -17,10 +17,10 @@ use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Core\SubscriptionQueue;
 use IDCT\NATS\Exception\ConnectionException;
+use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\Exception\NatsException;
 use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Exception\TimeoutException;
-use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\Configuration\Republish;
 use IDCT\NATS\JetStream\Configuration\StreamSource;
 use IDCT\NATS\JetStream\Configuration\SubjectTransform;
@@ -29,14 +29,15 @@ use IDCT\NATS\JetStream\Enum\DeliverPolicy;
 use IDCT\NATS\JetStream\Enum\DiscardPolicy;
 use IDCT\NATS\JetStream\Enum\ReplayPolicy;
 use IDCT\NATS\JetStream\Enum\RetentionPolicy;
-use IDCT\NATS\JetStream\Schedule;
 use IDCT\NATS\JetStream\Enum\StorageBackend;
+use IDCT\NATS\JetStream\Schedule;
 use IDCT\NATS\Services\BasicJsonSchemaValidator;
 use IDCT\NATS\Services\Service;
 use IDCT\NATS\Tests\Behat\Support\ScenarioState;
 use IDCT\NATS\Tests\Integration\IntegrationTestBootstrap;
 use RuntimeException;
 use Throwable;
+
 use function Amp\async;
 use function Amp\delay;
 
@@ -70,8 +71,7 @@ final class FeatureContext implements Context
 
     public function __construct(
         private readonly ScenarioState $state = new ScenarioState(),
-    ) {
-    }
+    ) {}
 
     /**
      * @BeforeScenario
@@ -440,7 +440,7 @@ final class FeatureContext implements Context
         $this->state->jetStreamStreamDeleted = true;
         $this->createdStreams = array_values(array_filter(
             $this->createdStreams,
-            static fn (string $item): bool => $item !== $stream,
+            static fn(string $item): bool => $item !== $stream,
         ));
     }
 
@@ -754,7 +754,7 @@ final class FeatureContext implements Context
     {
         $stream = $this->requireValue($this->state->stream, 'stream');
         $consumers = $this->client('primary')->jetStream()->listConsumers($stream)->await();
-        $this->state->lastListedConsumers = array_map(static fn ($consumer): string => $consumer->name, $consumers);
+        $this->state->lastListedConsumers = array_map(static fn($consumer): string => $consumer->name, $consumers);
     }
 
     /**
@@ -763,7 +763,7 @@ final class FeatureContext implements Context
     public function iListStreams(): void
     {
         $streams = $this->client('primary')->jetStream()->listStreams()->await();
-        $this->state->lastListedStreams = array_map(static fn ($stream): string => $stream->name, $streams);
+        $this->state->lastListedStreams = array_map(static fn($stream): string => $stream->name, $streams);
     }
 
     /**
@@ -1895,7 +1895,7 @@ final class FeatureContext implements Context
         $subject = $this->requireServiceSubject('echo');
 
         $service = $this->client('service')->service($serviceName, $version, 'Echo demo')
-            ->addEndpoint('echo', $subject, static fn (NatsMessage $message): string => 'reply:' . $message->payload);
+            ->addEndpoint('echo', $subject, static fn(NatsMessage $message): string => 'reply:' . $message->payload);
 
         $this->startManagedService('service', $service);
     }
@@ -1930,14 +1930,14 @@ final class FeatureContext implements Context
         $plainSubject = $this->requireServiceSubject('plain');
 
         $service = $this->client('service')->service($serviceName, $version, 'Discovery contract')
-            ->addEndpoint('schema-endpoint', $schemaSubject, static fn (NatsMessage $message): string => 'ok:' . $message->payload, schema: [
+            ->addEndpoint('schema-endpoint', $schemaSubject, static fn(NatsMessage $message): string => 'ok:' . $message->payload, schema: [
                 'type' => 'object',
                 'required' => ['id'],
                 'properties' => [
                     'id' => ['type' => 'integer'],
                 ],
             ])
-            ->addEndpoint('plain-endpoint', $plainSubject, static fn (NatsMessage $message): string => 'ok:' . $message->payload);
+            ->addEndpoint('plain-endpoint', $plainSubject, static fn(NatsMessage $message): string => 'ok:' . $message->payload);
 
         $this->startManagedService('service', $service);
     }
@@ -2076,7 +2076,7 @@ final class FeatureContext implements Context
                     'subject' => $message->subject,
                 ];
             })
-            ->addEndpoint('echo', $subject, static fn (NatsMessage $message): string => 'reply:' . $message->payload, schema: [
+            ->addEndpoint('echo', $subject, static fn(NatsMessage $message): string => 'reply:' . $message->payload, schema: [
                 'type' => 'object',
                 'required' => ['id'],
                 'properties' => [
@@ -2168,13 +2168,13 @@ final class FeatureContext implements Context
     public function theServiceObserversShouldCaptureBothCorrelationIds(): void
     {
         $events = $this->state->serviceObserverEvents;
-        $eventNames = array_map(static fn (array $event): string => (string) ($event['event'] ?? ''), $events);
+        $eventNames = array_map(static fn(array $event): string => (string) ($event['event'] ?? ''), $events);
         if (!in_array('request_start', $eventNames, true) || !in_array('request_error', $eventNames, true) || !in_array('request_end', $eventNames, true)) {
             throw new RuntimeException('Expected service observers to capture start, error, and end events.');
         }
 
         $correlationIds = array_values(array_filter(array_map(
-            static fn (array $event): ?string => is_string($event['correlation_id'] ?? null) ? $event['correlation_id'] : null,
+            static fn(array $event): ?string => is_string($event['correlation_id'] ?? null) ? $event['correlation_id'] : null,
             $events,
         )));
 
@@ -2196,8 +2196,8 @@ final class FeatureContext implements Context
 
         $service = $this->client('service')->service($serviceName, $version, 'Grouped endpoints');
         $root = $service->addGroup($rootSubject);
-        $root->addGroup('v1')->addEndpoint('echo-v1', 'echo', static fn (NatsMessage $message): string => 'v1:' . $message->payload);
-        $root->addGroup('v2')->addEndpoint('echo-v2', 'echo', static fn (NatsMessage $message): string => 'v2:' . $message->payload);
+        $root->addGroup('v1')->addEndpoint('echo-v1', 'echo', static fn(NatsMessage $message): string => 'v1:' . $message->payload);
+        $root->addGroup('v2')->addEndpoint('echo-v2', 'echo', static fn(NatsMessage $message): string => 'v2:' . $message->payload);
 
         $this->startManagedService('service', $service);
     }
@@ -2232,7 +2232,7 @@ final class FeatureContext implements Context
     {
         $stats = $this->state->lastServiceStats;
         $subjects = array_map(
-            static fn (array $endpoint): string => (string) ($endpoint['subject'] ?? ''),
+            static fn(array $endpoint): string => (string) ($endpoint['subject'] ?? ''),
             is_array($stats['endpoints'] ?? null) ? $stats['endpoints'] : [],
         );
 
@@ -2659,18 +2659,18 @@ final class FeatureContext implements Context
         }
 
         $contents = <<<CREDS
------BEGIN NATS USER JWT-----
-{$jwt}
-    -----END NATS USER JWT-----
+            -----BEGIN NATS USER JWT-----
+            {$jwt}
+                -----END NATS USER JWT-----
 
-************************* IMPORTANT *************************
-NKEY Seed printed below can be used to sign and prove identity.
-NKEYs are sensitive and should be treated as secrets.
+            ************************* IMPORTANT *************************
+            NKEY Seed printed below can be used to sign and prove identity.
+            NKEYs are sensitive and should be treated as secrets.
 
------BEGIN USER NKEY SEED-----
-{$seed}
-    -----END USER NKEY SEED-----
-CREDS;
+            -----BEGIN USER NKEY SEED-----
+            {$seed}
+                -----END USER NKEY SEED-----
+            CREDS;
         file_put_contents($tempFile, $contents);
         $this->state->tempCredentialsFile = $tempFile;
 

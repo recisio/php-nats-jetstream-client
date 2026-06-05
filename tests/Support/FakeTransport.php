@@ -7,6 +7,7 @@ namespace IDCT\NATS\Tests\Support;
 use Amp\Cancellation;
 use Amp\Future;
 use IDCT\NATS\Transport\TransportInterface;
+
 use function Amp\async;
 
 final class FakeTransport implements TransportInterface
@@ -26,9 +27,7 @@ final class FakeTransport implements TransportInterface
      *
      * @param list<string> $readQueue
      */
-    public function __construct(private array $readQueue = [])
-    {
-    }
+    public function __construct(private array $readQueue = []) {}
 
     /**
      * Records connect calls for assertions.
@@ -65,9 +64,7 @@ final class FakeTransport implements TransportInterface
      */
     public function readLine(?Cancellation $cancellation = null): Future
     {
-        return async(function (): string {
-            return array_shift($this->readQueue) ?? '';
-        });
+        return async(fn(): string => array_shift($this->readQueue) ?? '');
     }
 
     /**

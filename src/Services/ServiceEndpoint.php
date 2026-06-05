@@ -31,6 +31,5 @@ final class ServiceEndpoint
         public int $errors = 0,
         public ?string $lastError = null,
         public int $processingTimeNs = 0,
-    ) {
-    }
+    ) {}
 }

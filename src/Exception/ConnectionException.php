@@ -7,6 +7,4 @@ namespace IDCT\NATS\Exception;
 /**
  * Thrown when connection establishment or transport state becomes invalid.
  */
-final class ConnectionException extends NatsException
-{
-}
+final class ConnectionException extends NatsException {}

@@ -32,8 +32,7 @@ final class StreamSource
      */
     private function __construct(
         private readonly string $name,
-    ) {
-    }
+    ) {}
 
     /**
      * Creates a mirror source reference.
