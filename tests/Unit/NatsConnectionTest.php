@@ -2305,6 +2305,8 @@ final class NatsConnectionTest extends TestCase
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
             "PONG\r\n",
         ]);
+        // The transport has TLS materials, so upgradeTls() actually establishes TLS.
+        $transport->canUpgrade = true;
 
         $connection = new NatsConnection(
             new NatsOptions(tlsRequired: true, tlsHandshakeFirst: false, pingIntervalSeconds: 0),
@@ -2313,8 +2315,59 @@ final class NatsConnectionTest extends TestCase
         $connection->connect()->await();
 
         self::assertSame(ConnectionState::Open, $connection->state());
-        // Post-INFO upgrade path performs exactly one explicit TLS upgrade.
+        // Post-INFO upgrade path performs exactly one explicit TLS upgrade and TLS is now active.
         self::assertSame(1, $transport->upgradeTlsCalls);
+        self::assertTrue($transport->tlsActive());
+    }
+
+    public function testServerRequiresTlsButNoMaterialsFailsBeforeWritingConnect(): void
+    {
+        // Server advertises tls_required; the client did NOT configure TLS (tlsRequired:false). The
+        // client must fail fast and must NOT write CONNECT/PING (credentials) over a plaintext socket.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->canUpgrade = false; // no TLS materials -> upgradeTls cannot establish TLS
+
+        $connection = new NatsConnection(
+            new NatsOptions(tlsRequired: false, tlsHandshakeFirst: false, reconnectEnabled: false, pingIntervalSeconds: 0),
+            $transport,
+        );
+
+        try {
+            $connection->connect()->await();
+            self::fail('Expected a TLS ConnectionException');
+        } catch (ConnectionException $e) {
+            self::assertStringContainsStringIgnoringCase('tls', $e->getMessage());
+        }
+
+        $writes = implode('', $transport->writes);
+        self::assertStringNotContainsString('CONNECT ', $writes);
+        self::assertStringNotContainsString('PING', $writes);
+        self::assertSame(ConnectionState::Closed, $connection->state());
+    }
+
+    public function testServerRequiresTlsUpgradesThenSendsConnect(): void
+    {
+        // Server advertises tls_required and the transport has TLS materials: it upgrades, then the
+        // CONNECT is written only after TLS is active.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->canUpgrade = true;
+
+        $connection = new NatsConnection(
+            new NatsOptions(tlsRequired: false, tlsHandshakeFirst: false, reconnectEnabled: false, pingIntervalSeconds: 0),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertSame(1, $transport->upgradeTlsCalls);
+        self::assertTrue($transport->tlsActive());
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertStringContainsString('CONNECT ', implode('', $transport->writes));
     }
 
     public function testHandshakeFirstDoesNotCallExplicitUpgrade(): void

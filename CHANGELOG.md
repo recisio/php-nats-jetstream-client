@@ -37,6 +37,12 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` The client no longer transmits credentials in plaintext to a TLS-required
+  server. When the server advertises `tls_required` (or the option/`tls://` scheme
+  requires TLS) but no TLS materials were configured at connect time, the previous
+  code performed a no-op "upgrade" and then wrote CONNECT (token/user/pass/JWT/sig)
+  over the still-plaintext socket, hanging until the handshake deadline. The client
+  now fails fast with a clear error and never writes CONNECT before TLS is active.
 - `[bugfix]` A graceful peer close (socket EOF) now triggers reconnect from the read
   path. `readLine()` previously collapsed the EOF `null` into an empty string, which
   the connection treated as "no data this tick", so a server restart / idle-timeout /

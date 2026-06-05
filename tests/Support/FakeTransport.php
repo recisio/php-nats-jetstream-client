@@ -7,16 +7,22 @@ namespace IDCT\NATS\Tests\Support;
 use Amp\Cancellation;
 use Amp\DeferredFuture;
 use Amp\Future;
+use IDCT\NATS\Transport\TlsAwareTransportInterface;
 use IDCT\NATS\Transport\TransportClosedException;
-use IDCT\NATS\Transport\TransportInterface;
 
 use function Amp\async;
 use function Amp\delay;
 
-final class FakeTransport implements TransportInterface
+final class FakeTransport implements TlsAwareTransportInterface
 {
     /** Queue sentinel: a readLine() that dequeues this value throws TransportClosedException (EOF). */
     public const EOF = '__EOF__';
+
+    /** When true, upgradeTls() marks TLS active (models a transport with TLS materials configured). */
+    public bool $canUpgrade = false;
+
+    /** Whether a TLS handshake has "completed" (set by upgradeTls() when $canUpgrade). */
+    public bool $tlsActive = false;
 
     /** @var list<string> */
     public array $connectCalls = [];
@@ -60,7 +66,13 @@ final class FakeTransport implements TransportInterface
     {
         return async(function (): void {
             $this->upgradeTlsCalls++;
+            $this->tlsActive = $this->canUpgrade;
         });
+    }
+
+    public function tlsActive(): bool
+    {
+        return $this->tlsActive;
     }
 
     /**

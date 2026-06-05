@@ -19,7 +19,7 @@ use function Amp\Socket\connect;
 /**
  * Amp-based socket transport implementation for NATS connections.
  */
-final class AmpSocketTransport implements TransportInterface
+final class AmpSocketTransport implements TlsAwareTransportInterface
 {
     private ?Socket $socket = null;
 
@@ -79,12 +79,32 @@ final class AmpSocketTransport implements TransportInterface
     }
 
     /**
+     * Reports whether a TLS handshake has completed on the current socket.
+     */
+    public function tlsActive(): bool
+    {
+        return $this->tlsEstablished;
+    }
+
+    /**
      * Runs the TLS handshake on the current socket exactly once.
      */
     private function establishTls(): void
     {
-        if ($this->socket === null || !$this->tlsContextConfigured || $this->tlsEstablished) {
+        // No socket (standalone pre-connect call) or already negotiated: nothing to do.
+        if ($this->socket === null || $this->tlsEstablished) {
             return;
+        }
+
+        if (!$this->tlsContextConfigured) {
+            // The connection layer asked to upgrade (the server/options require TLS) but no TLS
+            // materials were configured at connect time. Fail fast instead of leaving the socket
+            // plaintext — otherwise the subsequent CONNECT would send credentials in the clear.
+            throw new TlsRequiredException(
+                'TLS upgrade requested but no TLS context was configured at connect time; '
+                . 'set NatsOptions tlsRequired (or use a tls:// server and provide CA/cert materials) '
+                . 'when the server requires TLS',
+            );
         }
 
         $this->socket->setupTls(new TimeoutCancellation($this->lastConnectTimeoutMs / 1000));
