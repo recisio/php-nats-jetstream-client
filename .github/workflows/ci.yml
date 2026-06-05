@@ -32,8 +32,15 @@ jobs:
         run: composer test:unit
       - name: End-to-End Tests
         run: composer test:e2e
+        env:
+          KEEP_NATS_SERVICES: "1"
       - name: Generate Coverage Report
-        run: composer coverage:clover
+        # Combined unit + integration coverage (against the stack kept up above) so that
+        # integration-only code (TLS upgrade, Object Store download, etc.) is counted.
+        run: composer coverage:clover:all
+      - name: Stop NATS services
+        if: always()
+        run: docker compose down
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:

@@ -194,4 +194,76 @@ final class SubscriptionQueueTest extends TestCase
         $result = $queue->setTimeout(5.0);
         self::assertSame($queue, $result);
     }
+
+    public function testFetchReturnsAlreadyBufferedMessage(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            "MSG data 1 2\r\nhi\r\n",
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('data')->await();
+
+        // Buffer the message first so fetch() returns it directly without another read.
+        $client->processIncoming()->await();
+
+        $msg = $queue->fetch();
+        self::assertNotNull($msg);
+        self::assertSame('hi', $msg->payload);
+    }
+
+    public function testNextWithTimeoutReturnsMessageArrivingDuringWait(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            "MSG data 1 3\r\nabc\r\n",
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('data')->await();
+        $queue->setTimeout(0.2);
+
+        // Not pre-buffered: next() enters the bounded wait loop and breaks as soon as the message
+        // is read, rather than running to the timeout.
+        $msg = $queue->next();
+        self::assertNotNull($msg);
+        self::assertSame('abc', $msg->payload);
+    }
+
+    public function testFetchAllWithoutTimeoutCollectsBufferedMessages(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            "MSG items 1 1\r\na\r\n",
+            "MSG items 1 1\r\nb\r\n",
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('items')->await();
+
+        // No timeout configured exercises the unbounded (null cancellation) collection path.
+        $messages = $queue->fetchAll();
+        self::assertCount(2, $messages);
+        self::assertSame('a', $messages[0]->payload);
+        self::assertSame('b', $messages[1]->payload);
+    }
+
+    public function testFetchAllReturnsEarlyWhenBufferedMeetsLimit(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            "MSG items 1 1\r\na\r\n",
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('items')->await();
+
+        // Pre-buffer one message, then request a limit of one: the buffered drain alone satisfies it.
+        $client->processIncoming()->await();
+
+        $messages = $queue->fetchAll(1);
+        self::assertCount(1, $messages);
+        self::assertSame('a', $messages[0]->payload);
+    }
 }

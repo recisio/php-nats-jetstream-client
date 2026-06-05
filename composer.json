@@ -42,6 +42,7 @@
     "fixture:jwt:check": "bash scripts/check-jwt-fixture.sh",
     "coverage": "XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-text --only-summary-for-coverage-text --colors=never",
     "coverage:clover": "XDEBUG_MODE=coverage vendor/bin/phpunit --testsuite unit --coverage-clover coverage.xml --colors=never",
+    "coverage:clover:all": "XDEBUG_MODE=coverage RUN_INTEGRATION=1 vendor/bin/phpunit --coverage-clover coverage.xml --colors=never",
     "coverage:html": "XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-html coverage-report --coverage-text --only-summary-for-coverage-text --colors=never",
     "coverage:check": "bash scripts/check-coverage.sh 90",
     "stan": "phpstan analyse",

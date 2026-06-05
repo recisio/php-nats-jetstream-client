@@ -2,4 +2,7 @@
 /.phpunit.cache/
 /.idea/
 /.vscode/
+/.php-cs-fixer.cache
+/coverage.xml
+/coverage-report/
 build/
