@@ -215,6 +215,22 @@ final class JetStreamContextTest extends TestCase
         self::assertStringStartsWith('PUB orders.created _INBOX.', $transport->writes[3]);
     }
 
+    public function testPublishWrapsMalformedAckAsJetStreamException(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG _INBOX.a 1 7\r\nnotjson\r\n", // a non-JSON publish ack
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Malformed JetStream publish ack');
+        $client->jetStream()->publish('orders.created', '{"id":1}')->await();
+    }
+
     /**
      * Verifies JetStream publish maps API errors to JetStreamException.
      */

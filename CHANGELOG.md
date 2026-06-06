@@ -37,6 +37,12 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` `publish()` and `publishScheduled()` now wrap a malformed (non-JSON)
+  acknowledgment in a `JetStreamException` instead of leaking a raw `JsonException`,
+  consistent with the other JetStream API calls.
+- `[bugfix]` Direct Get now rejects an unrecognized response (no status line and no
+  `Nats-Stream`/`Nats-Sequence` headers) with a `JetStreamException` instead of
+  returning a garbage body, guarding against a non-conformant server/proxy.
 - `[bugfix]` KeyValue `watch()` now delivers updates through a JetStream push consumer
   (`deliver_policy=new`, ack-free) so each entry carries its `revision` (the stream
   sequence). Previously it used a plain core subscription and always reported

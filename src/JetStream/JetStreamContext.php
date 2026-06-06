@@ -260,7 +260,7 @@ final class JetStreamContext
 
             // Stored messages may carry a header block (base64 'hdrs'); preserve it on the message.
             $rawHeaders = null;
-            $encodedHeaders = (string) ($msg['hdrs'] ?? '');
+            $encodedHeaders = (isset($msg['hdrs']) && is_string($msg['hdrs'])) ? $msg['hdrs'] : '';
             if ($encodedHeaders !== '') {
                 $decodedHeaders = base64_decode($encodedHeaders, true);
                 if ($decodedHeaders !== false) {
@@ -327,6 +327,13 @@ final class JetStreamContext
             if ($status >= 400) {
                 $description = (string) ($headers['Description'] ?? 'JetStream direct get error');
                 throw new JetStreamException($description, $status);
+            }
+
+            // A valid Direct Get hit always carries the message metadata as Nats-* headers. If
+            // neither a status nor those headers are present, the reply is not a usable message
+            // (e.g. a non-conformant server/proxy); reject it rather than returning a garbage body.
+            if (!isset($headers['Nats-Stream']) && !isset($headers['Nats-Sequence'])) {
+                throw new JetStreamException('JetStream direct get returned an unrecognized response');
             }
 
             // The original stored subject travels in the Nats-Subject header; fall back to the reply
@@ -654,8 +661,12 @@ final class JetStreamContext
         return async(function () use ($subject, $payload): PubAck {
             $message = $this->client->request($subject, $payload)->await();
 
-            /** @var array<string,mixed> $data */
-            $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+            try {
+                /** @var array<string,mixed> $data */
+                $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new JetStreamException('Malformed JetStream publish ack: ' . $e->getMessage(), 0, $e);
+            }
 
             /** @var array<string,mixed>|null $error */
             $error = is_array($data['error'] ?? null) ? $data['error'] : null;
@@ -695,8 +706,12 @@ final class JetStreamContext
 
             $message = $this->client->requestWithHeaders($scheduleSubject, $payload, $headers)->await();
 
-            /** @var array<string,mixed> $data */
-            $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+            try {
+                /** @var array<string,mixed> $data */
+                $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new JetStreamException('Malformed JetStream publish ack: ' . $e->getMessage(), 0, $e);
+            }
 
             /** @var array<string,mixed>|null $error */
             $error = is_array($data['error'] ?? null) ? $data['error'] : null;
