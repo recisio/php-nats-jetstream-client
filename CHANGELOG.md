@@ -24,6 +24,15 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` `drain()` no longer busy-spins (100% CPU) or hangs when the server never
+  sends the flush PONG. The flush loop now yields between empty reads so its deadline can
+  fire; previously a synchronous 0-frame read starved the event loop, so the
+  `TimeoutCancellation` could never fire and `drain()` never returned.
+- `[bugfix]` `drain()` no longer resurrects the connection on a read failure mid-flush. A
+  peer close during drain previously triggered `recoverConnection()` — reconnecting and
+  re-SUBscribing the very subscriptions `drain()` had just removed (and possibly
+  re-delivering messages). `processIncoming()` now skips recovery while the connection is
+  `Draining` and treats the read failure as end-of-flush.
 - `[bugfix]` `CredentialsParser` now parses real `nsc`-generated `.creds` files. The
   marker regex required exactly five dashes on both the BEGIN and END lines, but the
   NATS toolchain emits five dashes on BEGIN and **six** on END, so

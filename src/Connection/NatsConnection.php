@@ -165,11 +165,18 @@ final class NatsConnection
             $flushCancellation = new TimeoutCancellation(max(0.1, $this->options->requestTimeoutMs / 1000));
             try {
                 while (!$flushCancellation->isRequested()) {
-                    $this->processIncoming($flushCancellation)->await();
+                    $frames = $this->processIncoming($flushCancellation)->await();
 
                     if (!$this->drainFlushPending) {
                         // The server's PONG arrived (handleFrame cleared the flag): flush complete.
                         break;
+                    }
+
+                    if ($frames === 0) {
+                        // No complete frame this read. Yield so the event loop advances and the
+                        // deadline can fire — processIncoming() returns 0 synchronously on an empty
+                        // read, so without this the loop would busy-spin and starve the timer forever.
+                        delay(0.001, cancellation: $flushCancellation);
                     }
                 }
             } catch (CancelledException) {
@@ -325,7 +332,12 @@ final class NatsConnection
             } catch (CancelledException $cancelledException) {
                 throw $cancelledException;
             } catch (\Throwable) {
-                $this->recoverConnection();
+                // During drain() a read failure means the flush is finished, not a fault to recover
+                // from: recovering would reconnect and re-SUBscribe the very subscriptions drain()
+                // just UNSUBbed (and could re-deliver). Treat it as end-of-flush instead.
+                if ($this->state !== ConnectionState::Draining) {
+                    $this->recoverConnection();
+                }
 
                 return 0;
             } finally {

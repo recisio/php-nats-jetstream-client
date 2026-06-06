@@ -1221,6 +1221,55 @@ final class NatsConnectionTest extends TestCase
         self::assertStringContainsString("PING\r\n", $writes);
     }
 
+    public function testDrainDoesNotResurrectConnectionOnReadFailure(): void
+    {
+        // Connect, then the flush read FAILS (peer close / EOF) instead of returning the drain PONG.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            FakeTransport::EOF,
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 200, reconnectEnabled: true),
+            $transport,
+        );
+        $connection->connect()->await();
+        $connection->subscribe('events', function (): void {})->await();
+
+        $connection->drain()->await();
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+
+        // A resurrection would reconnect (a second CONNECT) and re-SUBscribe the just-UNSUBbed sid.
+        $writes = implode('', $transport->writes);
+        self::assertSame(1, substr_count($writes, 'CONNECT '), 'drain must not reconnect on a read failure while draining');
+        self::assertSame(1, substr_count($writes, 'SUB events '), 'drain must not re-subscribe while draining');
+        self::assertStringContainsString("UNSUB 1\r\n", $writes);
+    }
+
+    public function testDrainTerminatesViaDeadlineWhenNoFlushPongArrives(): void
+    {
+        // The queue empties with NO drain PONG: readLine returns '' synchronously. drain() must end
+        // via its flush deadline rather than busy-spin (a synchronous 0-frame loop would starve the
+        // event loop so the TimeoutCancellation could never fire). The fix yields between empty reads.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 150),
+            $transport,
+        );
+        $connection->connect()->await();
+        $connection->subscribe('events', function (): void {})->await();
+
+        $connection->drain()->await();
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+    }
+
     public function testDrainRequiresOpenConnection(): void
     {
         $transport = new FakeTransport();
