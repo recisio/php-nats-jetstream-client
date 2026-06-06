@@ -183,4 +183,42 @@ final class PullConsumerIteratorTest extends TestCase
         self::assertSame(1, $total);
         self::assertSame(['order-1'], $processed);
     }
+
+    public function testHandleInfiniteModeContinuesPastTransient409(): void
+    {
+        // A 409 can be transient (backpressure/failover/shutdown) or terminal (Consumer Deleted).
+        // The status-line reason flows into the exception message via NatsHeaders::fromWireBlock.
+        $maxAck = "NATS/1.0 409 Exceeded MaxAckPending\r\nStatus: 409\r\n\r\n"; // transient -> keep polling
+        $deleted = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\n\r\n";      // terminal  -> stop
+        $hMax = strlen($maxAck);
+        $hDel = strlen($deleted);
+        $body = 'job-7';
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // iter 1 (sid 1): transient 409 (backpressure) — infinite mode must keep polling.
+            sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $hMax, $hMax, $maxAck),
+            // iter 2 (sid 2): a message arrives once backpressure clears.
+            sprintf("MSG _INBOX.JS.FETCH.any 2 \$JS.ACK.ORDERS.PROC.1.1.1.123.0 %d\r\n%s\r\n", strlen($body), $body),
+            // iter 3 (sid 3): a terminal 409 (consumer deleted) stops the loop.
+            sprintf("HMSG _INBOX.JS.FETCH.any 3 %d %d\r\n%s\r\n", $hDel, $hDel, $deleted),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $processed = [];
+        $total = $client->jetStream()
+            ->pullConsumer('ORDERS', 'PROC')
+            ->setBatching(1)
+            ->setExpiresMs(100)
+            ->setIterations(null) // infinite
+            ->handle(function (NatsMessage $msg, JetStreamContext $js) use (&$processed): void {
+                $processed[] = $msg->payload;
+            })->await();
+
+        // Old code treated the transient 409 as terminal and stopped before the message.
+        self::assertSame(1, $total);
+        self::assertSame(['job-7'], $processed);
+    }
 }

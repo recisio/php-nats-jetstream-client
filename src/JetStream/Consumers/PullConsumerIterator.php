@@ -132,14 +132,20 @@ final class PullConsumerIterator
                         $this->expiresMs,
                     )->await();
                 } catch (JetStreamException $e) {
-                    // 404 (no messages) and 408 (request timeout) are routine empty-window results.
-                    // In infinite mode keep polling so a long-running worker is not killed by the
-                    // first idle gap; in finite mode preserve the existing stop-on-empty behavior.
-                    if ($this->iterations === null && in_array($e->getCode(), [404, 408], true)) {
-                        continue;
+                    // In infinite mode keep polling through routine/transient conditions so a
+                    // long-running worker is not killed by a quiet period, backpressure, or a
+                    // failover: 404 (no messages) and 408 (request timeout) are routine empty
+                    // windows, and a 409 may be transient (MaxAckPending exceeded / leadership
+                    // change / server shutdown / max-waiting) rather than terminal (Consumer
+                    // Deleted). Finite mode keeps the existing stop-on-any-error behavior.
+                    if ($this->iterations === null) {
+                        $code = $e->getCode();
+                        if (in_array($code, [404, 408], true) || ($code === 409 && self::isTransientPullStatus($e->getMessage()))) {
+                            continue;
+                        }
                     }
 
-                    // Finite mode, or a terminal error (e.g. 409 consumer deleted): stop iterating.
+                    // Finite mode, or a terminal error (e.g. 409 Consumer Deleted): stop iterating.
                     break;
                 }
 
@@ -151,5 +157,20 @@ final class PullConsumerIterator
 
             return $totalProcessed;
         });
+    }
+
+    /**
+     * Whether a 409 pull status describes a transient, self-clearing condition that an infinite
+     * worker should keep polling through (as opposed to a terminal one such as "Consumer Deleted").
+     */
+    private static function isTransientPullStatus(string $message): bool
+    {
+        foreach (['MaxAckPending', 'Leadership Change', 'Server Shutdown', 'Exceeded MaxWaiting'] as $needle) {
+            if (stripos($message, $needle) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

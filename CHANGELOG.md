@@ -24,6 +24,11 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` `PullConsumerIterator` infinite mode (`setIterations(null)`) now survives a
+  transient `409` (`Exceeded MaxAckPending`, `Leadership Change`, `Server Shutdown`,
+  `Exceeded MaxWaiting`) and keeps polling, instead of treating every non-404/408 status
+  as terminal and silently exiting forever. A terminal `409 Consumer Deleted` still stops
+  the loop, and finite mode is unchanged.
 - `[bugfix]` `drain()` no longer busy-spins (100% CPU) or hangs when the server never
   sends the flush PONG. The flush loop now yields between empty reads so its deadline can
   fire; previously a synchronous 0-frame read starved the event loop, so the
