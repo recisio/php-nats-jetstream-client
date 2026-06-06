@@ -980,6 +980,16 @@ final class JetStreamContext
     }
 
     /**
+     * Returns the stream sequence carried by a JetStream-delivered message (from its $JS.ACK reply
+     * subject), or null if the message was not delivered by a JetStream consumer. Useful to recover
+     * the stream sequence (e.g. a KeyValue revision) from a push/ordered-consumer delivery.
+     */
+    public function streamSequenceOf(NatsMessage $message): ?int
+    {
+        return $this->extractStreamSequence($message);
+    }
+
+    /**
      * Extracts the stream sequence number from a JetStream reply subject.
      *
      * Reply subjects follow the pattern: $JS.ACK.{stream}.{consumer}.{delivered}.{sseq}.{cseq}.{tm}.{pending}

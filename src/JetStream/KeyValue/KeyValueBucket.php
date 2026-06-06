@@ -191,25 +191,35 @@ final class KeyValueBucket
     public function watch(callable $handler, string $pattern = '>'): Future
     {
         return async(function () use ($handler, $pattern): int {
-            $subject = $this->subjectPrefix() . $pattern;
+            $filter = $this->subjectPrefix() . $pattern;
 
-            return $this->client->subscribe($subject, function (NatsMessage $message) use ($handler): void {
-                $key = $this->keyFromSubject($message->subject);
-                if ($key === null) {
-                    return;
-                }
+            // Deliver via a JetStream push consumer (not a plain core subscription) so each update
+            // carries its stream sequence — i.e. the KV revision — which a watcher needs to feed back
+            // into update()/CAS. deliver_policy=new keeps the live-updates-only semantics; the read
+            // is ack-free.
+            return $this->jetStream->subscribeEphemeralPushConsumer(
+                $this->streamName(),
+                function (NatsMessage $message) use ($handler): void {
+                    $key = $this->keyFromSubject($message->subject);
+                    if ($key === null) {
+                        return;
+                    }
 
-                $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
-                $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+                    $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+                    $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+                    $revision = $this->jetStream->streamSequenceOf($message);
 
-                $handler(new KeyValueEntry(
-                    bucket: $this->bucket,
-                    key: $key,
-                    value: $operation === 'DEL' || $operation === 'PURGE' ? null : $message->payload,
-                    operation: $operation,
-                    revision: null,
-                ));
-            })->await();
+                    $handler(new KeyValueEntry(
+                        bucket: $this->bucket,
+                        key: $key,
+                        value: $operation === 'DEL' || $operation === 'PURGE' ? null : $message->payload,
+                        operation: $operation,
+                        revision: $revision,
+                    ));
+                },
+                filterSubject: $filter,
+                consumerOptions: ['deliver_policy' => 'new', 'ack_policy' => 'none'],
+            )->await();
         });
     }
 

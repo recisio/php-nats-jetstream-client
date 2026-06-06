@@ -305,10 +305,16 @@ final class KeyValueBucketTest extends TestCase
      */
     public function testWatchDispatchesEntries(): void
     {
+        // watch() now runs over a JetStream push consumer: create the consumer (request sid 1), then
+        // the update is delivered on the deliver inbox (sid 2) carrying its stream sequence in the
+        // $JS.ACK reply, which becomes the entry revision.
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            "MSG \$KV.cfg.theme 1 4\r\nblue\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            "MSG \$KV.cfg.theme 2 \$JS.ACK.KV_cfg.KVWATCH.1.7.1.0.0 4\r\nblue\r\n",
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -319,13 +325,19 @@ final class KeyValueBucketTest extends TestCase
             $seen = $entry;
         })->await();
 
-        self::assertSame(1, $sid);
+        self::assertSame(2, $sid);
         self::assertSame(1, $client->processIncoming()->await());
         self::assertInstanceOf(KeyValueEntry::class, $seen);
         /** @var KeyValueEntry $seenEntry */
         $seenEntry = $seen;
         self::assertSame('theme', $seenEntry->key);
         self::assertSame('blue', $seenEntry->value);
+        // The revision is now populated from the delivery's stream sequence (was always null before).
+        self::assertSame(7, $seenEntry->revision);
+
+        $createRequest = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"new"', $createRequest);
+        self::assertStringContainsString('"ack_policy":"none"', $createRequest);
     }
 
     /**
