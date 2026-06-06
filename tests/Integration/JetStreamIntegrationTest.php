@@ -12,6 +12,7 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
+use IDCT\NATS\JetStream\ObjectStore\ObjectData;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
 use PHPUnit\Framework\TestCase;
 
@@ -1031,10 +1032,41 @@ final class JetStreamIntegrationTest extends TestCase
         $deleted = $store->delete('logo.txt')->await();
         self::assertTrue($deleted->deleted);
 
+        // A deleted object reads as null (like a missing one); the tombstone stays visible via info().
         $afterDelete = $store->get('logo.txt')->await();
-        self::assertNotNull($afterDelete);
-        self::assertTrue($afterDelete->info->deleted);
-        self::assertNull($afterDelete->data);
+        self::assertNull($afterDelete);
+
+        $afterInfo = $store->info('logo.txt')->await();
+        self::assertNotNull($afterInfo);
+        self::assertTrue($afterInfo->deleted);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies a 0-byte object stores zero chunks and reads back promptly (no chunk-pull hang).
+     */
+    public function testJetStreamObjectStoreEmptyObjectRoundTrip(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'eo' . strtolower(bin2hex(random_bytes(2)));
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $info = $store->put('empty.bin', '')->await();
+        self::assertSame(0, $info->size);
+        self::assertSame(0, $info->chunks);
+
+        // The outer 5s bound fails the test if get() blocks pulling a chunk that will never arrive.
+        $data = Future\await([async(static fn (): ?ObjectData => $store->get('empty.bin')->await())], new TimeoutCancellation(5.0))[0];
+        self::assertNotNull($data);
+        self::assertSame('', $data->data);
 
         $store->deleteBucket()->await();
         $client->disconnect()->await();

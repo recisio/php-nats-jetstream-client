@@ -149,6 +149,34 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
+     * Verifies an empty object stores zero chunks and publishes no chunk message (only meta).
+     */
+    public function testPutStoresEmptyObjectWithZeroChunks(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // 1) existing-object lookup -> not found
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
+            // 2) meta publish ack (no chunk publish happens for a 0-byte object)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $stored = $client->jetStream()->objectStore('assets')->put('empty.txt', '')->await();
+
+        self::assertSame(0, $stored->size);
+        self::assertSame(0, $stored->chunks);
+
+        $writes = implode('||', $transport->writes);
+        // No chunk was published for the empty object; only the meta record.
+        self::assertStringNotContainsString('PUB $O.assets.C.', $writes);
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('empty.txt') . ' ', $writes);
+    }
+
+    /**
      * Verifies an overwrite purges the previous revision's chunk subject.
      */
     public function testPutOverwritePurgesPreviousChunks(): void
@@ -339,9 +367,9 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
-     * Verifies getToCallback skips streaming for deleted objects.
+     * Verifies getToCallback returns null for a deleted object without invoking the callback.
      */
-    public function testGetToCallbackSkipsDeletedObjects(): void
+    public function testGetToCallbackReturnsNullForDeletedObjects(): void
     {
         $meta = $this->metaGetResponse('gone.txt', ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true]);
 
@@ -363,8 +391,8 @@ final class ObjectStoreBucketTest extends TestCase
         )->await();
 
         self::assertFalse($called);
-        self::assertNotNull($info);
-        self::assertTrue($info->deleted);
+        // A deleted object reads as not-available; the tombstone stays visible via info().
+        self::assertNull($info);
     }
 
     /**

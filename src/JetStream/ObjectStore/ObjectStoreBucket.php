@@ -106,7 +106,11 @@ final class ObjectStoreBucket
             $totalSize = strlen($data);
             $chunks = 0;
 
-            if ($totalSize <= $this->chunkSize) {
+            if ($totalSize === 0) {
+                // An empty object stores no chunks (matches the official Object Store layout, where a
+                // 0-byte object has chunks=0). Previously it published one empty chunk and set chunks=1.
+                $chunks = 0;
+            } elseif ($totalSize <= $this->chunkSize) {
                 $this->jetStream->publish($chunkSubject, $data)->await();
                 $chunks = 1;
             } else {
@@ -172,7 +176,10 @@ final class ObjectStoreBucket
             }
 
             if ($info->deleted) {
-                return new ObjectData($info, null);
+                // A deleted (tombstoned) object has no content; reading it returns null, consistent
+                // with a missing object and with the official client's not-found semantics. The
+                // tombstone metadata remains observable via info().
+                return null;
             }
 
             $assembled = '';
@@ -205,7 +212,10 @@ final class ObjectStoreBucket
             }
 
             if ($info->deleted) {
-                return $info;
+                // A deleted (tombstoned) object has no content to stream; return null (the callback is
+                // not invoked), consistent with get() and a missing object. info() still reveals the
+                // tombstone.
+                return null;
             }
 
             $actualDigest = $this->streamChunks($info, $chunkHandler);
@@ -230,9 +240,17 @@ final class ObjectStoreBucket
     private function streamChunks(ObjectInfo $info, callable $onChunk): string
     {
         $expected = $info->chunks;
-        $remaining = max(1, $expected);
-        $received = 0;
         $hashContext = hash_init('sha256');
+
+        // An empty object stores no chunks: there is nothing to pull and the digest is over zero
+        // bytes. Pulling anyway would block until the batch expiry (no chunk ever arrives), so
+        // short-circuit to the empty-content digest (in the same SHA-256=base64url format as below).
+        if ($expected <= 0) {
+            return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
+        }
+
+        $remaining = $expected;
+        $received = 0;
 
         $consumerName = null;
         try {
@@ -288,7 +306,8 @@ final class ObjectStoreBucket
 
         // Digest-independent completeness gate: a truncated download must fail even when the
         // metadata carries no digest to verify against (e.g. an object written by another client).
-        if ($expected > 0 && $received < $expected) {
+        // ($expected is > 0 here; the empty-object case returned early above.)
+        if ($received < $expected) {
             throw new JetStreamException(sprintf(
                 'Incomplete object download: expected %d chunks, received %d',
                 $expected,

@@ -24,6 +24,22 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Object Store now stores a 0-byte object with `chunks=0` and publishes no
+  chunk message, matching the official Object Store layout; previously it wrote one
+  empty chunk and recorded `chunks=1`. `get()` of an empty object also returns
+  immediately instead of blocking until the download batch expiry waiting for a chunk
+  that never arrives.
+- `[bugfix]` Object Store `get()` and `getToCallback()` now return `null` for a deleted
+  (tombstoned) object, consistent with a missing object and the official not-found
+  semantics; the tombstone metadata remains observable via `info()`. Previously `get()`
+  returned an `ObjectData` with `null` data and `getToCallback()` returned the
+  `ObjectInfo`.
+- `[bugfix]` Microservice handler errors no longer leak the raw exception message to the
+  requester: the reply carries a generic `Internal server error` under the
+  `HANDLER_ERROR` code, while the full detail stays server-side (endpoint `lastError`,
+  `$SRV.STATS`, and the `request_error` observer event).
+- `[bugfix]` Service `$SRV.STATS` no longer emits the non-spec `requests`/`errors`
+  aliases; only the spec-compliant `num_requests`/`num_errors` remain.
 - `[bugfix]` Connections now disable Nagle's algorithm (`TCP_NODELAY`). NATS is a
   small-message request/reply protocol, and Nagle combined with delayed ACKs added
   roughly 40 ms of latency per round trip; local request/reply throughput improved
