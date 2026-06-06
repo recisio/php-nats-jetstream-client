@@ -198,18 +198,21 @@ final class KeyValueBucketTest extends TestCase
     public function testGetAll(): void
     {
         $streamInfo = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":4,"bytes":256,"subjects":{"$KV.cfg.username":2,"$KV.cfg.email":2}}}';
-        $purgeHeaders = base64_encode("NATS/1.0\r\nKV-Operation:PURGE\r\n\r\n");
-        // last_by_subj for username → purged
-        $mUsername = sprintf('{"message":{"subject":"$KV.cfg.username","seq":3,"data":"","hdrs":"%s"}}', $purgeHeaders);
-        // last_by_subj for email → latest value
-        $mEmail = sprintf('{"message":{"subject":"$KV.cfg.email","seq":4,"data":"%s"}}', base64_encode('b@example.com'));
+        // getAll() reads each key concurrently via Direct Get: subjects enumerate as [username, email]
+        // (sids 2, 3). Direct Get returns the raw value as the body with Nats-* + KV-Operation headers.
+        $usernameHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.username\r\nNats-Sequence: 3\r\nKV-Operation: PURGE\r\n\r\n";
+        $emailHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.email\r\nNats-Sequence: 4\r\n\r\n";
+        $emailBody = 'b@example.com';
+        $uh = strlen($usernameHdrs);
+        $eh = strlen($emailHdrs);
+        $et = $eh + strlen($emailBody);
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($mUsername), $mUsername),
-            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($mEmail), $mEmail),
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),       // STREAM.INFO subjects
+            sprintf("HMSG _INBOX.b 2 %d %d\r\n%s\r\n", $uh, $uh, $usernameHdrs),            // username -> PURGE (skipped)
+            sprintf("HMSG _INBOX.c 3 %d %d\r\n%s%s\r\n", $eh, $et, $emailHdrs, $emailBody), // email -> value
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -218,6 +221,7 @@ final class KeyValueBucketTest extends TestCase
         $all = $client->jetStream()->keyValue('cfg')->getAll()->await();
 
         self::assertSame(['email' => 'b@example.com'], $all);
+        self::assertStringContainsString('$JS.API.DIRECT.GET.KV_cfg', implode('', $transport->writes));
     }
 
     // ─── Key Validation ─────────────────────────────────────────────
@@ -439,25 +443,31 @@ final class KeyValueBucketTest extends TestCase
         $client->jetStream()->keyValue('cfg')->get('theme')->await();
     }
 
-    public function testGetAllRejectsMalformedBase64Payload(): void
+    public function testGetAllSkipsKeysThatReturnNotFound(): void
     {
-        $streamInfo = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":1,"bytes":64,"subjects":{"$KV.cfg.theme":1}}}';
-        $message = '{"message":{"subject":"$KV.cfg.theme","seq":6,"data":"%%%not-base64%%%"}}';
+        // A key whose Direct Get races a deletion/expiry returns 404; getAll must skip it, not fail.
+        $streamInfo = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":2,"bytes":64,"subjects":{"$KV.cfg.gone":1,"$KV.cfg.theme":1}}}';
+        $notFound = "NATS/1.0 404 Message Not Found\r\nStatus: 404\r\n\r\n";
+        $themeHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.theme\r\nNats-Sequence: 7\r\n\r\n";
+        $themeBody = 'dark';
+        $nf = strlen($notFound);
+        $th = strlen($themeHdrs);
+        $tt = $th + strlen($themeBody);
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($message), $message),
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),       // STREAM.INFO subjects
+            sprintf("HMSG _INBOX.b 2 %d %d\r\n%s\r\n", $nf, $nf, $notFound),                // gone -> 404 (skipped)
+            sprintf("HMSG _INBOX.c 3 %d %d\r\n%s%s\r\n", $th, $tt, $themeHdrs, $themeBody), // theme -> value
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
         $client->connect()->await();
 
-        $this->expectException(JetStreamException::class);
-        $this->expectExceptionMessage('Malformed KV payload for key theme');
+        $all = $client->jetStream()->keyValue('cfg')->getAll()->await();
 
-        $client->jetStream()->keyValue('cfg')->getAll()->await();
+        self::assertSame(['theme' => 'dark'], $all);
     }
 
     public function testGetStatusFallsBackLastSequenceToMessagesWhenMissing(): void

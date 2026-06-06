@@ -37,6 +37,12 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` KeyValue `getAll()` and Object Store `list()` now read the latest record
+  per key/object via the Direct Get API issued concurrently, instead of N+1 sequential
+  leader-only `STREAM.MSG.GET` reads. For large buckets this stops hammering the stream
+  leader and collapses O(keys) serial round-trips into roughly one round-trip of
+  wall-clock. (Concurrent request/reply on a single connection is covered by a new
+  integration test.)
 - `[bugfix]` `publish()` and `publishScheduled()` now wrap a malformed (non-JSON)
   acknowledgment in a `JetStreamException` instead of leaking a raw `JsonException`,
   consistent with the other JetStream API calls.

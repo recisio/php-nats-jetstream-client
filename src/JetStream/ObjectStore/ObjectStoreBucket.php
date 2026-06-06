@@ -395,32 +395,45 @@ final class ObjectStoreBucket
     public function list(bool $includeDeleted = false): Future
     {
         return async(function () use ($includeDeleted): array {
-            $result = [];
+            $subjects = $this->metaSubjects();
+            if ($subjects === []) {
+                return [];
+            }
 
-            foreach ($this->metaSubjects() as $subject) {
-                try {
-                    $response = $this->requestStreamMessage($subject);
-                } catch (JetStreamException $e) {
-                    if ($e->getCode() === 404) {
-                        continue;
+            // Read the latest meta record per object CONCURRENTLY via the Direct Get API (served by
+            // any replica; the round-trips overlap) instead of N+1 serial leader reads.
+            $lookups = [];
+            foreach ($subjects as $subject) {
+                $lookups[] = async(function () use ($subject): ?ObjectInfo {
+                    try {
+                        $message = $this->jetStream->directGetLastMessageForSubject($this->streamName(), $subject)->await();
+                    } catch (JetStreamException $e) {
+                        if ($e->getCode() === 404) {
+                            return null;
+                        }
+
+                        throw $e;
                     }
 
-                    throw $e;
-                }
+                    // The Direct Get body is the raw meta JSON (not the base64 STREAM.MSG.GET envelope).
+                    /** @var array<string,mixed>|null $metadata */
+                    $metadata = json_decode($message->payload, true);
+                    if (!is_array($metadata)) {
+                        return null;
+                    }
 
-                /** @var array<string,mixed>|null $message */
-                $message = is_array($response['message'] ?? null) ? $response['message'] : null;
-                if ($message === null) {
-                    continue;
-                }
+                    $info = ObjectInfo::fromArray($this->bucket, $metadata);
 
-                $metadata = $this->decodeMetadataFromApiMessage($message);
-                if ($metadata === null) {
-                    continue;
-                }
+                    return $info->name === '' ? null : $info;
+                });
+            }
 
-                $info = ObjectInfo::fromArray($this->bucket, $metadata);
-                if ($info->name === '') {
+            /** @var list<?ObjectInfo> $infos */
+            $infos = Future\await($lookups);
+
+            $result = [];
+            foreach ($infos as $info) {
+                if ($info === null) {
                     continue;
                 }
 

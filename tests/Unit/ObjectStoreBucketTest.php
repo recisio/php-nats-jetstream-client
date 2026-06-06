@@ -50,6 +50,35 @@ final class ObjectStoreBucketTest extends TestCase
         return '{"error":{"code":404,"description":"message not found"}}';
     }
 
+    /**
+     * Builds a Direct Get reply (HMSG) whose body is the raw meta JSON, as list() now reads it.
+     *
+     * @param array<string,mixed> $extra
+     */
+    private function directMetaReply(string $name, array $extra, int $sid): string
+    {
+        $meta = array_merge([
+            'name' => $name,
+            'bucket' => 'assets',
+            'mtime' => '2030-01-01T00:00:00Z',
+            'deleted' => false,
+        ], $extra);
+        $body = (string) json_encode($meta, JSON_THROW_ON_ERROR);
+        $hdrs = "NATS/1.0\r\nNats-Stream: OBJ_assets\r\nNats-Subject: \$O.assets.M." . $this->encodeName($name) . "\r\nNats-Sequence: 2\r\n\r\n";
+        $h = strlen($hdrs);
+
+        return sprintf("HMSG _INBOX.x %d %d %d\r\n%s%s\r\n", $sid, $h, $h + strlen($body), $hdrs, $body);
+    }
+
+    /** Builds a Direct Get status-only reply (HMSG) such as a 404 miss or a non-404 error. */
+    private function directStatusReply(int $sid, int $code, string $description): string
+    {
+        $hdrs = "NATS/1.0 {$code} {$description}\r\nStatus: {$code}\r\nDescription: {$description}\r\n\r\n";
+        $h = strlen($hdrs);
+
+        return sprintf("HMSG _INBOX.x %d %d %d\r\n%s\r\n", $sid, $h, $h, $hdrs);
+    }
+
     private function pubAck(int $seq): string
     {
         return sprintf('{"stream":"OBJ_assets","seq":%d,"duplicate":false}', $seq);
@@ -388,20 +417,21 @@ final class ObjectStoreBucketTest extends TestCase
             ],
         ], JSON_THROW_ON_ERROR);
 
-        $logoMeta = $this->metaGetResponse('logo.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
-        $oldMeta = $this->metaGetResponse('old.txt', ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true]);
+        $logoExtra = ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')];
+        $oldExtra = ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true];
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            // list(): subjects enumeration, then last_by_subj per meta subject
+            // list(): subjects enumeration (sid 1), then a concurrent Direct Get per meta subject
+            // (logo -> sid 2, old -> sid 3).
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($logoMeta), $logoMeta),
-            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($oldMeta), $oldMeta),
-            // list(includeDeleted: true): same again
+            $this->directMetaReply('logo.txt', $logoExtra, 2),
+            $this->directMetaReply('old.txt', $oldExtra, 3),
+            // list(includeDeleted: true): same enumeration (sid 4) then Direct Gets (sid 5, 6).
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
-            sprintf("MSG _INBOX.e 5 %d\r\n%s\r\n", strlen($logoMeta), $logoMeta),
-            sprintf("MSG _INBOX.f 6 %d\r\n%s\r\n", strlen($oldMeta), $oldMeta),
+            $this->directMetaReply('logo.txt', $logoExtra, 5),
+            $this->directMetaReply('old.txt', $oldExtra, 6),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -415,7 +445,9 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertSame('logo.txt', $active[0]->name);
         self::assertCount(2, $all);
 
-        self::assertStringContainsString('"subjects_filter":"$O.assets.M.>"', $transport->writes[3]);
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('"subjects_filter":"$O.assets.M.>"', $writes);
+        self::assertStringContainsString('$JS.API.DIRECT.GET.OBJ_assets', $writes);
     }
 
     /**
@@ -624,13 +656,12 @@ final class ObjectStoreBucketTest extends TestCase
         $streamInfo = (string) json_encode([
             'state' => ['subjects' => ['$O.assets.M.' . $this->encodeName('doc.txt') => 1]],
         ], JSON_THROW_ON_ERROR);
-        $error = '{"error":{"code":500,"description":"boom"}}';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),  // metaSubjects()
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($error), $error),            // last_by_subj -> error
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),  // metaSubjects() (sid 1)
+            $this->directStatusReply(2, 500, 'boom'),                                 // Direct Get -> non-404 error
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -697,14 +728,12 @@ final class ObjectStoreBucketTest extends TestCase
                 '$O.assets.M.' . $this->encodeName('logo.txt') => 1,
             ]],
         ], JSON_THROW_ON_ERROR);
-        $logoMeta = $this->metaGetResponse('logo.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),               // metaSubjects()
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),   // first subject -> 404 (skipped)
-            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($logoMeta), $logoMeta),                   // second subject -> present
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo), // metaSubjects() (sid 1)
+            $this->directStatusReply(2, 404, 'message not found'),                    // gone.txt -> 404 (skipped)
+            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 3), // logo.txt -> present
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);

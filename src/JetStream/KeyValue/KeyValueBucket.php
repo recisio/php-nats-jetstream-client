@@ -240,42 +240,47 @@ final class KeyValueBucket
                 return [];
             }
 
-            $latest = [];
-
-            // Use direct API `last_by_subj` per known subject for O(keys) lookups.
+            // Look up the latest record per key CONCURRENTLY via the Direct Get API (last_by_subj).
+            // Direct Get is served by any replica (not just the leader) and the round-trips overlap,
+            // turning O(keys) serial reads into roughly one round-trip of wall-clock.
+            $lookups = [];
             foreach (array_keys($subjects) as $subject) {
                 $key = $this->keyFromSubject((string) $subject);
                 if ($key === null || $key === '') {
                     continue;
                 }
 
-                try {
-                    $response = $this->requestKvMessage($key);
-                } catch (JetStreamException $e) {
-                    if ($e->getCode() === 404) {
-                        continue;
+                $lookups[$key] = async(function () use ($key): ?string {
+                    try {
+                        $message = $this->jetStream
+                            ->directGetLastMessageForSubject($this->streamName(), $this->subjectForKey($key))
+                            ->await();
+                    } catch (JetStreamException $e) {
+                        if ($e->getCode() === 404) {
+                            return null;
+                        }
+
+                        throw $e;
                     }
 
-                    throw $e;
+                    $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+                    $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+                    if ($operation === 'DEL' || $operation === 'PURGE') {
+                        return null;
+                    }
+
+                    return $message->payload;
+                });
+            }
+
+            /** @var array<string,?string> $results */
+            $results = Future\await($lookups);
+
+            $latest = [];
+            foreach ($results as $key => $value) {
+                if ($value !== null) {
+                    $latest[$key] = $value;
                 }
-
-                /** @var array<string,mixed>|null $message */
-                $message = is_array($response['message'] ?? null) ? $response['message'] : null;
-                if ($message === null) {
-                    continue;
-                }
-
-                $headers = $this->decodeHeadersFromApiMessage($message);
-                $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
-
-                if ($operation === 'DEL' || $operation === 'PURGE') {
-                    continue;
-                }
-
-                $encoded = (string) ($message['data'] ?? '');
-                $decoded = $this->decodeApiMessageData($encoded, $key);
-
-                $latest[$key] = $decoded;
             }
 
             return $latest;

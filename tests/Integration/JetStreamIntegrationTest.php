@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Integration;
 
 use Amp\CancelledException;
+use Amp\Future;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
@@ -13,6 +14,7 @@ use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use PHPUnit\Framework\TestCase;
 
+use function Amp\async;
 use function Amp\delay;
 
 final class JetStreamIntegrationTest extends TestCase
@@ -262,6 +264,34 @@ final class JetStreamIntegrationTest extends TestCase
         }
 
         $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies that many request()/reply round-trips issued concurrently on one connection all
+     * resolve independently and quickly — the contract KV getAll() / ObjectStore list() rely on when
+     * they fan out Direct Get lookups. Guards against a regression in the self-pumping read machinery.
+     */
+    public function testConcurrentRequestsAllResolve(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $futures = [];
+        for ($i = 0; $i < 12; $i++) {
+            $futures[] = async(static fn (): NatsMessage => $client->request('$JS.API.INFO', '')->await());
+        }
+
+        /** @var list<NatsMessage> $results */
+        $results = Future\await($futures, new TimeoutCancellation(5.0));
+
+        self::assertCount(12, $results);
+        foreach ($results as $reply) {
+            self::assertNotSame('', $reply->payload);
+        }
+
         $client->disconnect()->await();
     }
 
