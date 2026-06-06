@@ -49,7 +49,7 @@
     "fix": "php-cs-fixer fix"
   },
   "scripts-descriptions": {
-    "test:everything": "Full verification of code health: PHPStan level 8, then the compose-backed e2e flow (Docker stack up, unit + integration + Behat, stack down). Skips the JWT fixture-sync check; run 'composer fixture:jwt:check' separately for that."
+    "test:everything": "Full verification of code health: PHPStan level 8, then the compose-backed e2e flow (Docker stack up, unit + integration + Behat, stack down). Skips the JWT fixture validity check; run 'composer fixture:jwt:check' separately for that."
   },
   "minimum-stability": "stable",
   "prefer-stable": true
