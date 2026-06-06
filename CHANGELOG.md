@@ -37,6 +37,15 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` `NatsOptions` now rejects genuinely-invalid configuration at construction
+  (non-positive `connectTimeoutMs`/`requestTimeoutMs`, `maxPendingMessagesPerSubscription`
+  below 1, and negative reconnect/`maxPingsOut` values) with an `InvalidArgumentException`,
+  instead of misbehaving later. Legitimate edge values stay valid: `pingIntervalSeconds`
+  `<= 0` disables the heartbeat, `maxPingsOut` 0 is allowed, and an empty `servers` list
+  falls back to the default — so this is input validation, not a breaking change.
+- `[bugfix]` KeyValue keys with a leading, trailing, or consecutive dot (which produce a
+  malformed `$KV.<bucket>.<key>` subject) are now rejected up front; dots, colons and
+  slashes elsewhere in a key remain valid.
 - `[bugfix]` Object Store `put()` now pipelines chunk publishes in bounded in-flight
   windows instead of awaiting one PubAck round-trip per chunk, so large-object uploads
   are no longer strictly round-trip-bound. PUB frames are written to the single

@@ -84,7 +84,34 @@ final class NatsOptions
         public readonly ?NonceSignerInterface $nonceSigner = null,
         public readonly int $maxPendingMessagesPerSubscription = 1_024,
         public readonly SlowConsumerPolicy $slowConsumerPolicy = SlowConsumerPolicy::DropOldest,
-    ) {}
+    ) {
+        // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
+        // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to
+        // the default server) are intentionally allowed.
+        if ($connectTimeoutMs <= 0) {
+            throw new \InvalidArgumentException('connectTimeoutMs must be greater than zero');
+        }
+
+        if ($requestTimeoutMs <= 0) {
+            throw new \InvalidArgumentException('requestTimeoutMs must be greater than zero');
+        }
+
+        if ($maxPendingMessagesPerSubscription < 1) {
+            throw new \InvalidArgumentException('maxPendingMessagesPerSubscription must be at least 1');
+        }
+
+        foreach ([
+            'maxReconnectAttempts' => $maxReconnectAttempts,
+            'reconnectDelayMs' => $reconnectDelayMs,
+            'reconnectMaxDelayMs' => $reconnectMaxDelayMs,
+            'reconnectJitterMs' => $reconnectJitterMs,
+            'maxPingsOut' => $maxPingsOut,
+        ] as $field => $value) {
+            if ($value < 0) {
+                throw new \InvalidArgumentException(sprintf('%s must not be negative', $field));
+            }
+        }
+    }
 
     /**
      * Returns the preferred server endpoint used for initial connection attempts.

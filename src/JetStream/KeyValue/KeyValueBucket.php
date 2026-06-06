@@ -484,5 +484,11 @@ final class KeyValueBucket
         if ($key === '' || preg_match('/[\s*>]/', $key)) {
             throw new JetStreamException('Invalid KV key');
         }
+
+        // Leading, trailing, or consecutive dots produce empty subject tokens, i.e. a malformed
+        // $KV.<bucket>.<key> subject. Reject them up front with a clear KV error.
+        if (str_starts_with($key, '.') || str_ends_with($key, '.') || str_contains($key, '..')) {
+            throw new JetStreamException('Invalid KV key');
+        }
     }
 }

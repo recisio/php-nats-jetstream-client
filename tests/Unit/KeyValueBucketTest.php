@@ -258,6 +258,29 @@ final class KeyValueBucketTest extends TestCase
         $client->jetStream()->keyValue('cfg')->put('foo*bar', 'data')->await();
     }
 
+    public function testPutRejectsKeyWithLeadingTrailingOrConsecutiveDots(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+        $kv = $client->jetStream()->keyValue('cfg');
+
+        // Leading/trailing/consecutive dots make an empty subject token; all must be rejected.
+        // (Dots, colons and slashes elsewhere remain valid — see testPutAcceptsKeyWithDotsColonsSlashes.)
+        foreach (['.theme', 'theme.', 'a..b'] as $key) {
+            try {
+                $kv->put($key, 'data')->await();
+                self::fail("Expected rejection for malformed key: {$key}");
+            } catch (JetStreamException $e) {
+                self::assertStringContainsString('Invalid KV key', $e->getMessage());
+            }
+        }
+    }
+
     public function testPutRejectsKeyWithTab(): void
     {
         $transport = new FakeTransport([
