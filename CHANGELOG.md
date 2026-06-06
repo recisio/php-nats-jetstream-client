@@ -37,6 +37,16 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` Object Store downloads now use a no-ack (`ack_policy=none`) consumer. The
+  read-only download previously used an explicit-ack consumer and acked each chunk; on
+  a slow link an ack stalling past `ack_wait` triggered redelivery, which re-hashed a
+  chunk and produced a spurious digest mismatch.
+- `[bugfix]` Object Store downloads now fail on a truncated transfer (fewer chunks than
+  the metadata declares) via a digest-independent completeness check, instead of
+  silently returning a partial object when the metadata carries no digest.
+- `[bugfix]` Object Store `watch()` now tolerates a malformed metadata payload (skips
+  it) instead of throwing out of the dispatch loop, which would abort delivery of
+  buffered frames for other subscriptions.
 - `[bugfix]` `listStreams()` and `listConsumers()` now paginate through the JetStream
   LIST API (`offset`/`total`). Previously they read only the first page, silently
   truncating accounts with more than the server page size (256) of streams, or a

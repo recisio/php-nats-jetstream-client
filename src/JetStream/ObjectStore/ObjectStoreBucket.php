@@ -209,15 +209,19 @@ final class ObjectStoreBucket
      */
     private function streamChunks(ObjectInfo $info, callable $onChunk): string
     {
-        $remaining = max(1, $info->chunks);
+        $expected = $info->chunks;
+        $remaining = max(1, $expected);
+        $received = 0;
         $hashContext = hash_init('sha256');
 
         $consumerName = null;
         try {
+            // A read-only download uses ack_policy=none: there is nothing to ack, and an explicit
+            // policy risks ack_wait redelivery on a slow link re-hashing a chunk into a digest mismatch.
             $consumer = $this->jetStream->createEphemeralConsumer(
                 $this->streamName(),
                 $this->chunkSubjectForNuid($info->nuid),
-                ['deliver_policy' => 'all'],
+                ['deliver_policy' => 'all', 'ack_policy' => 'none'],
             )->await();
             $consumerName = $consumer->name;
 
@@ -233,7 +237,7 @@ final class ObjectStoreBucket
                     )->await();
                 } catch (JetStreamException $e) {
                     if ($e->getCode() === 408) {
-                        // No further chunks available; digest verification catches any shortfall.
+                        // No further chunks available; the completeness check below catches a shortfall.
                         break;
                     }
 
@@ -243,10 +247,7 @@ final class ObjectStoreBucket
                 foreach ($messages as $message) {
                     hash_update($hashContext, $message->payload);
                     $onChunk($message->payload);
-
-                    if ($message->replyTo !== null && $message->replyTo !== '') {
-                        $this->jetStream->ack($message)->await();
-                    }
+                    ++$received;
                 }
 
                 // Decrement by what actually arrived and pull again for the rest. A short batch is
@@ -263,6 +264,16 @@ final class ObjectStoreBucket
                     // Best-effort ephemeral consumer cleanup.
                 }
             }
+        }
+
+        // Digest-independent completeness gate: a truncated download must fail even when the
+        // metadata carries no digest to verify against (e.g. an object written by another client).
+        if ($expected > 0 && $received < $expected) {
+            throw new JetStreamException(sprintf(
+                'Incomplete object download: expected %d chunks, received %d',
+                $expected,
+                $received,
+            ));
         }
 
         return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
@@ -360,8 +371,14 @@ final class ObjectStoreBucket
     {
         return async(function () use ($handler, $pattern): int {
             return $this->client->subscribe($this->metaPrefix() . $pattern, function (NatsMessage $message) use ($handler): void {
+                $metadata = json_decode($message->payload, true);
+                if (!is_array($metadata)) {
+                    // Tolerate a malformed meta delivery instead of throwing out of the dispatch loop,
+                    // which would abort delivery of buffered frames for other subscriptions too.
+                    return;
+                }
+
                 /** @var array<string,mixed> $metadata */
-                $metadata = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
                 $handler(ObjectInfo::fromArray($this->bucket, $metadata));
             })->await();
         });

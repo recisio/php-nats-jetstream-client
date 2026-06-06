@@ -475,6 +475,42 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertSame('wnuid1', $seenInfo->nuid);
     }
 
+    public function testWatchToleratesMalformedMetadataAndKeepsDispatching(): void
+    {
+        $enc = $this->encodeName('logo.txt');
+        $valid = json_encode([
+            'name' => 'logo.txt',
+            'bucket' => 'assets',
+            'nuid' => 'wnuid2',
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // A malformed (non-JSON) meta delivery must be skipped, not throw out of the dispatch loop.
+            sprintf("MSG \$O.assets.M.%s 1 %d\r\n%s\r\n", $enc, strlen('not-json'), 'not-json'),
+            // A subsequent valid meta on the same subscription is still delivered.
+            sprintf("MSG \$O.assets.M.%s 1 %d\r\n%s\r\n", $enc, strlen((string) $valid), (string) $valid),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $seen = [];
+        $client->jetStream()->objectStore('assets')->watch(static function (ObjectInfo $info) use (&$seen): void {
+            $seen[] = $info->nuid;
+        })->await();
+
+        // Both frames are processed; the malformed one is silently skipped, the valid one delivered.
+        $client->processIncoming()->await();
+        $client->processIncoming()->await();
+
+        self::assertSame(['wnuid2'], $seen);
+    }
+
     public function testBucketSubjectHelpers(): void
     {
         $transport = new FakeTransport([
@@ -725,13 +761,13 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
-     * Verifies a pull timeout (408) during download stops the loop, so the short read is caught by
-     * the digest check rather than hanging.
+     * Verifies a pull timeout (408) during download stops the loop and fails the completeness gate
+     * (fewer chunks received than the metadata declares), rather than returning a truncated object.
      */
-    public function testGetStopsOnPullTimeoutAndFailsDigest(): void
+    public function testGetStopsOnPullTimeoutAndFailsCompleteness(): void
     {
         $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuidto01', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
-        $consumer = '{"stream_name":"OBJ_assets","name":"EPHTO","config":{"ack_policy":"explicit"}}';
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHTO","config":{"ack_policy":"none"}}';
         $deleteConsumer = '{"success":true}';
         $status = "NATS/1.0 408 Request Timeout\r\nStatus: 408\r\nDescription: Request Timeout\r\n\r\n";
         $hb = strlen($status);
@@ -749,7 +785,38 @@ final class ObjectStoreBucketTest extends TestCase
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
-        $this->expectExceptionMessage('Object digest mismatch');
+        $this->expectExceptionMessage('Incomplete object download');
+        $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+    }
+
+    /**
+     * Verifies the completeness gate is digest-independent: a truncated download of an object whose
+     * metadata has no digest (e.g. written by another client) still fails instead of returning a
+     * partial payload.
+     */
+    public function testGetFailsTruncatedDownloadEvenWithoutDigest(): void
+    {
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuidnd01', 'size' => 6, 'chunks' => 2, 'digest' => '']);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHND","config":{"ack_policy":"none"}}';
+        $deleteConsumer = '{"success":true}';
+        $status = "NATS/1.0 408 Request Timeout\r\nStatus: 408\r\nDescription: Request Timeout\r\n\r\n";
+        $hb = strlen($status);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                          // info() (chunks=2, no digest)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),                  // create consumer (sid 2)
+            sprintf("HMSG _INBOX.JS.FETCH.c 3 %d %d\r\n%s\r\n", $hb, $hb, $status),                 // pull -> 408, 0 of 2 chunks
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),       // delete consumer (sid 4)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // No digest to verify against, but the chunk-count gate still rejects the short read.
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Incomplete object download');
         $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
     }
 
