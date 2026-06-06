@@ -1278,8 +1278,12 @@ final class NatsConnectionTest extends TestCase
         self::assertSame("UNSUB 1\r\n", $transport->writes[4]);
     }
 
-    public function testMalformedHmsgRejectsInvalidHeaderBoundary(): void
+    public function testMalformedHmsgTriggersRecoveryInsteadOfEscaping(): void
     {
+        // headerBytes (20) > totalBytes (10): a corrupt frame. The parser rejects it, and
+        // processIncoming treats an unparseable stream as a transport failure (recovery) rather
+        // than letting the ProtocolException escape the caller's loop. With reconnect disabled that
+        // surfaces as a ConnectionException and closes the connection.
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
@@ -1287,16 +1291,20 @@ final class NatsConnectionTest extends TestCase
         ]);
 
         $connection = new NatsConnection(
-            new NatsOptions(pingIntervalSeconds: 0),
+            new NatsOptions(pingIntervalSeconds: 0, reconnectEnabled: false),
             $transport,
         );
         $connection->connect()->await();
         $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
 
-        $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage('Malformed HMSG frame');
+        try {
+            $connection->processIncoming()->await();
+            self::fail('Expected a ConnectionException from the corrupt-stream recovery path');
+        } catch (ConnectionException) {
+            // Expected: corrupt stream -> recoverConnection() -> reconnect disabled -> Closed.
+        }
 
-        $connection->processIncoming()->await();
+        self::assertSame(ConnectionState::Closed, $connection->state());
     }
 
     // ─── Exponential Backoff ────────────────────────────────────────────

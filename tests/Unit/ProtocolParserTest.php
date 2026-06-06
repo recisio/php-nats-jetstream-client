@@ -310,4 +310,64 @@ final class ProtocolParserTest extends TestCase
         self::assertNotNull($frames[0]->payload);
         self::assertSame(1024, strlen($frames[0]->payload));
     }
+
+    public function testRejectsNonNumericMsgSid(): void
+    {
+        $parser = new ProtocolParser();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Invalid sid');
+
+        // A non-numeric sid must be rejected, not coerced to 0 and routed to a phantom subscription.
+        $parser->push("MSG subject xyz 5\r\nhello\r\n");
+    }
+
+    public function testRejectsNonNumericMsgSize(): void
+    {
+        $parser = new ProtocolParser();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Invalid payload size');
+
+        $parser->push("MSG subject 1 abc\r\nhello\r\n");
+    }
+
+    public function testRejectsNegativeMsgSize(): void
+    {
+        $parser = new ProtocolParser();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Invalid payload size');
+
+        $parser->push("MSG subject 1 -5\r\nhello\r\n");
+    }
+
+    public function testRejectsHmsgHeaderBytesExceedingTotal(): void
+    {
+        $parser = new ProtocolParser();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('header bytes exceed total bytes');
+
+        $parser->push("HMSG subject 1 20 10\r\n1234567890\r\n");
+    }
+
+    public function testResyncsPastMalformedControlLineInsteadOfPoisoning(): void
+    {
+        $parser = new ProtocolParser();
+
+        try {
+            $parser->push("BADOP foo\r\n");
+            self::fail('Expected ProtocolException for an unsupported control frame');
+        } catch (ProtocolException) {
+            // Expected: the offending line is rejected.
+        }
+
+        // The bad line must have been consumed (resynced), so a subsequent valid frame parses
+        // normally instead of re-throwing forever on the poisoned buffer.
+        $frames = $parser->push("PING\r\n");
+
+        self::assertCount(1, $frames);
+        self::assertSame(ProtocolFrameType::Ping, $frames[0]->type);
+    }
 }

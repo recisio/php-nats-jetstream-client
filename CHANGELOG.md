@@ -37,6 +37,12 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` The protocol parser now rejects malformed frames instead of silently
+  misframing the stream: non-numeric or negative MSG/HMSG sizes and sids, and HMSG
+  header bytes exceeding total bytes, raise a `ProtocolException`. A parse failure now
+  resyncs past the offending bytes instead of leaving them buffered to re-throw on
+  every subsequent read, and `processIncoming()` treats an unparseable stream as a
+  transport failure (reconnect) rather than letting the exception escape the read loop.
 - `[bugfix]` The client no longer transmits credentials in plaintext to a TLS-required
   server. When the server advertises `tls_required` (or the option/`tls://` scheme
   requires TLS) but no TLS materials were configured at connect time, the previous

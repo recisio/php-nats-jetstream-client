@@ -51,48 +51,60 @@ final class ProtocolParser
         $offset = 0;
         $bufferLength = strlen($this->buffer);
 
-        while ($offset < $bufferLength) {
-            if ($this->pending !== null) {
-                $required = $this->pending['payloadOffset'] + $this->pending['totalBytes'] + 2;
-                if ($bufferLength < $required) {
-                    // Payload still incomplete; keep buffered bytes for the next chunk without
-                    // re-scanning or re-parsing the control line.
+        // The buffer is trimmed by $offset in the finally even when a parse throws, and the offending
+        // bytes are consumed (offset advanced past them) BEFORE each parse that can throw, so a
+        // malformed frame cannot remain buffered and re-throw forever (resync instead of poison).
+        try {
+            while ($offset < $bufferLength) {
+                if ($this->pending !== null) {
+                    $required = $this->pending['payloadOffset'] + $this->pending['totalBytes'] + 2;
+                    if ($bufferLength < $required) {
+                        // Payload still incomplete; keep buffered bytes for the next chunk without
+                        // re-scanning or re-parsing the control line.
+                        break;
+                    }
+
+                    // Consume the frame's bytes and clear the pending header before/while building,
+                    // so a malformed payload (bad trailing CRLF) cannot leave the bytes buffered.
+                    try {
+                        $frames[] = $this->buildPendingFrame();
+                    } finally {
+                        $offset = $required;
+                        $this->pending = null;
+                    }
+
+                    continue;
+                }
+
+                $lineEndPos = strpos($this->buffer, "\r\n", $offset);
+                if ($lineEndPos === false) {
                     break;
                 }
 
-                $frames[] = $this->buildPendingFrame();
-                $offset = $required;
-                $this->pending = null;
+                $line = substr($this->buffer, $offset, $lineEndPos - $offset);
+                $nextOffset = $lineEndPos + 2;
 
-                continue;
+                if (str_starts_with($line, 'MSG ') || str_starts_with($line, 'HMSG ')) {
+                    // Consume the control line first so a malformed header resyncs past it on throw.
+                    // The next loop iteration (or a later push) completes the payload.
+                    $offset = $nextOffset;
+                    $this->pending = $this->parseDataFrameHeader($line, $nextOffset);
+
+                    continue;
+                }
+
+                // Consume the control line first so an unsupported/invalid line resyncs past it.
+                $offset = $nextOffset;
+                $frames[] = $this->parseControlFrame($line);
             }
+        } finally {
+            if ($offset > 0) {
+                $this->buffer = substr($this->buffer, $offset);
 
-            $lineEndPos = strpos($this->buffer, "\r\n", $offset);
-            if ($lineEndPos === false) {
-                break;
-            }
-
-            $line = substr($this->buffer, $offset, $lineEndPos - $offset);
-            $nextOffset = $lineEndPos + 2;
-
-            if (str_starts_with($line, 'MSG ') || str_starts_with($line, 'HMSG ')) {
-                // Parse the control line once; the next loop iteration (or a later push) completes
-                // the payload. Header validation/size limits are enforced here immediately.
-                $this->pending = $this->parseDataFrameHeader($line, $nextOffset);
-
-                continue;
-            }
-
-            $frames[] = $this->parseControlFrame($line);
-            $offset = $nextOffset;
-        }
-
-        if ($offset > 0) {
-            $this->buffer = substr($this->buffer, $offset);
-
-            // Keep the pending payload offset relative to the trimmed buffer.
-            if ($this->pending !== null) {
-                $this->pending['payloadOffset'] -= $offset;
+                // Keep the pending payload offset relative to the trimmed buffer.
+                if ($this->pending !== null) {
+                    $this->pending['payloadOffset'] -= $offset;
+                }
             }
         }
 
@@ -158,15 +170,16 @@ final class ProtocolParser
             throw new ProtocolException('Invalid MSG frame line: ' . $line);
         }
 
-        $size = (int) $parts[count($parts) - 1];
-        if ($size < 0 || $size > $this->maxFrameSize) {
+        $sid = $this->parseUnsignedInt($parts[2], 'sid', $line);
+        $size = $this->parseUnsignedInt($parts[count($parts) - 1], 'payload size', $line);
+        if ($size > $this->maxFrameSize) {
             throw new ProtocolException('MSG frame payload size is invalid: ' . $size);
         }
 
         return [
             'type' => ProtocolFrameType::Msg,
             'subject' => $parts[1],
-            'sid' => (int) $parts[2],
+            'sid' => $sid,
             'replyTo' => count($parts) === 5 ? $parts[3] : null,
             'headerBytes' => null,
             'totalBytes' => $size,
@@ -184,29 +197,48 @@ final class ProtocolParser
             throw new ProtocolException('Invalid HMSG frame line: ' . $line);
         }
 
+        $sid = $this->parseUnsignedInt($parts[2], 'sid', $line);
+
         if (count($parts) === 6) {
             $replyTo = $parts[3];
-            $headerBytes = (int) $parts[4];
-            $totalBytes = (int) $parts[5];
+            $headerBytes = $this->parseUnsignedInt($parts[4], 'header bytes', $line);
+            $totalBytes = $this->parseUnsignedInt($parts[5], 'total bytes', $line);
         } else {
             $replyTo = null;
-            $headerBytes = (int) $parts[3];
-            $totalBytes = (int) $parts[4];
+            $headerBytes = $this->parseUnsignedInt($parts[3], 'header bytes', $line);
+            $totalBytes = $this->parseUnsignedInt($parts[4], 'total bytes', $line);
         }
 
-        if ($totalBytes < 0 || $totalBytes > $this->maxFrameSize) {
+        if ($totalBytes > $this->maxFrameSize) {
             throw new ProtocolException('HMSG frame payload size is invalid: ' . $totalBytes);
+        }
+
+        if ($headerBytes > $totalBytes) {
+            throw new ProtocolException('HMSG header bytes exceed total bytes: ' . $line);
         }
 
         return [
             'type' => ProtocolFrameType::HMsg,
             'subject' => $parts[1],
-            'sid' => (int) $parts[2],
+            'sid' => $sid,
             'replyTo' => $replyTo,
             'headerBytes' => $headerBytes,
             'totalBytes' => $totalBytes,
             'payloadOffset' => $payloadOffset,
         ];
+    }
+
+    /**
+     * Parses a required unsigned-integer token (sid / size / header bytes), rejecting non-numeric
+     * or negative values instead of silently coercing them to 0 (which would misframe the stream).
+     */
+    private function parseUnsignedInt(string $value, string $field, string $line): int
+    {
+        if ($value === '' || !ctype_digit($value)) {
+            throw new ProtocolException(sprintf('Invalid %s in frame line: %s', $field, $line));
+        }
+
+        return (int) $value;
     }
 
     /**

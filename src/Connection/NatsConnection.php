@@ -316,7 +316,17 @@ final class NatsConnection
                 return 0;
             }
 
-            $frames = $this->parser->push($chunk);
+            try {
+                $frames = $this->parser->push($chunk);
+            } catch (ProtocolException) {
+                // An unparseable/corrupt stream is a transport-level failure: reconnect rather than
+                // letting the exception escape the caller's processing loop. The parser has already
+                // resynced past the offending bytes, so a recovery-disabled retry will not re-throw.
+                $this->recoverConnection();
+
+                return 0;
+            }
+
             foreach ($frames as $frame) {
                 $this->handleFrame($frame);
             }
