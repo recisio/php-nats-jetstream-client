@@ -196,9 +196,13 @@ final class Service
                                 'error' => $e->getMessage(),
                             ]);
 
+                            // Do not leak the raw exception text to the (possibly untrusted) requester:
+                            // it can disclose internal paths, queries, or secrets. The requester gets a
+                            // generic message under the HANDLER_ERROR code; the real detail stays
+                            // server-side in lastError and the request_error observer event above.
                             $response = $this->errorPayload(
                                 code: 'HANDLER_ERROR',
-                                message: $e->getMessage(),
+                                message: 'Internal server error',
                                 correlationId: is_string($context['correlation_id'] ?? null)
                                     ? $context['correlation_id']
                                     : null,
@@ -336,8 +340,6 @@ final class Service
                 'name' => $endpoint->name,
                 'subject' => $endpoint->subject,
                 'queue_group' => $endpoint->queueGroup,
-                'requests' => $endpoint->requests,
-                'errors' => $endpoint->errors,
                 'num_requests' => $endpoint->requests,
                 'num_errors' => $endpoint->errors,
                 'last_error' => $endpoint->lastError,

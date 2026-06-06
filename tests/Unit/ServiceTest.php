@@ -296,6 +296,53 @@ final class ServiceTest extends TestCase
         self::assertSame($stats['started'] ?? null, $statsAgain['started'] ?? null);
     }
 
+    public function testHandlerErrorResponseDoesNotLeakExceptionMessage(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.echo 13 _INBOX.req 4\r\nboom\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static function (NatsMessage $message): string {
+                throw new \RuntimeException('secret-dsn user:pass@db-host');
+            });
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        // The error reply sent to the (untrusted) requester must NOT contain the raw exception text.
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('Internal server error', $writes);
+        self::assertStringNotContainsString('secret-dsn', $writes);
+
+        // The real detail is still available to the operator server-side (lastError / STATS).
+        $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
+        self::assertSame('secret-dsn user:pass@db-host', $endpoint['last_error'] ?? null);
+    }
+
+    public function testStatsOmitsNonSpecAliasKeys(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => 'ok');
+
+        $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
+
+        // Spec field names are present; the non-spec aliases are gone.
+        self::assertArrayHasKey('num_requests', $endpoint);
+        self::assertArrayHasKey('num_errors', $endpoint);
+        self::assertArrayNotHasKey('requests', $endpoint);
+        self::assertArrayNotHasKey('errors', $endpoint);
+    }
+
     /**
      * Verifies reset clears accumulated endpoint statistics.
      */
