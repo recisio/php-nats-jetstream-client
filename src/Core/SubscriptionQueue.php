@@ -155,7 +155,8 @@ final class SubscriptionQueue
 
         // A finite cancellation always bounds each read so a real socket cannot block past the
         // timeout window — and, when no timeout is configured, past a single non-blocking cycle.
-        $cancellation = new TimeoutCancellation($this->timeout > 0 ? $this->timeout : self::NON_BLOCKING_TIMEOUT);
+        $hasTimeout = $this->timeout > 0;
+        $cancellation = new TimeoutCancellation($hasTimeout ? $this->timeout : self::NON_BLOCKING_TIMEOUT);
 
         try {
             while ($limit === null || count($collected) < $limit) {
@@ -166,7 +167,15 @@ final class SubscriptionQueue
                 }
 
                 if ($frames === 0 && $this->messages->isEmpty()) {
-                    break;
+                    if (!$hasTimeout) {
+                        // No timeout configured: best-effort single cycle, return what is buffered.
+                        break;
+                    }
+
+                    // With a timeout, keep waiting for the full window instead of bailing on a
+                    // transient empty read (e.g. the heartbeat self-read briefly owning the socket).
+                    // The cancellation ends the wait by throwing CancelledException.
+                    delay(0.001, cancellation: $cancellation);
                 }
             }
         } catch (CancelledException) {

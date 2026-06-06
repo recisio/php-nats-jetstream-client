@@ -2305,6 +2305,54 @@ final class NatsConnectionTest extends TestCase
         $connection->disconnect()->await();
     }
 
+    public function testProcessIncomingResetsPingCounterOnlyOnPong(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG updates 1 5\r\nhello\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+        $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
+
+        $pings = new \ReflectionProperty($connection, 'outstandingPings');
+        $pings->setValue($connection, 2);
+
+        // A data frame is inbound traffic but NOT a PONG: it must not reset the watchdog counter
+        // (otherwise a server that stops answering PINGs but still sends data is never detected).
+        $connection->processIncoming()->await();
+        self::assertSame(2, $pings->getValue($connection));
+
+        // Only an actual PONG resets it.
+        $connection->processIncoming()->await();
+        self::assertSame(0, $pings->getValue($connection));
+    }
+
+    public function testDrainContinuesPastTransientEmptyReadUntilPong(): void
+    {
+        $received = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            '', // a transient 0-frame read during the flush must NOT end it early ...
+            "MSG events 1 3\r\nabc\r\n", // ... so this server-flushed delivery is still delivered ...
+            "PONG\r\n", // ... and the flush ends only on the PONG.
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+        $connection->subscribe('events', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        })->await();
+
+        $connection->drain()->await();
+
+        self::assertContains('abc', $received);
+    }
+
     // ─── TLS upgrade ordering (P1-4) ────────────────────────────────────
 
     public function testStandardTlsUpgradeRunsAfterInfoWhenNotHandshakeFirst(): void

@@ -318,4 +318,26 @@ final class SubscriptionQueueTest extends TestCase
 
         self::assertSame([], $result);
     }
+
+    public function testFetchAllDoesNotBailOnTransientEmptyReadWithinTimeout(): void
+    {
+        // A transient 0-frame read (e.g. the heartbeat self-read briefly owning the socket) between
+        // two deliveries must NOT end fetchAll early while a timeout window remains.
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            "MSG events 1 4\r\nmsg1\r\n",
+            '', // empty read -> processIncoming returns 0 frames mid-window
+            "MSG events 1 4\r\nmsg2\r\n",
+        ]);
+
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('events')->await();
+        $queue->setTimeout(0.5);
+
+        $messages = $queue->fetchAll(2);
+
+        self::assertCount(2, $messages);
+        self::assertSame('msg1', $messages[0]->payload);
+        self::assertSame('msg2', $messages[1]->payload);
+    }
 }

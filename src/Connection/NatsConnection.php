@@ -52,6 +52,12 @@ final class NatsConnection
     private int $outstandingPings = 0;
     private ?string $pingTimerId = null;
     private bool $drainFlushPending = false;
+    /**
+     * In-progress reconnect, so concurrent callers wait for it instead of starting a second one.
+     *
+     * @var ?DeferredFuture<void>
+     */
+    private ?DeferredFuture $reconnecting = null;
     /** Guards against two overlapping socket reads (user read vs heartbeat self-read). */
     private bool $readInProgress = false;
 
@@ -152,11 +158,22 @@ final class NatsConnection
             $this->drainFlushPending = true;
             $this->transport->write($this->codec->encodePing())->await();
 
-            while ($this->drainFlushPending) {
-                $frames = $this->processIncoming()->await();
-                if ($frames === 0) {
-                    break;
+            // Read until the server's PONG confirms the flush (handleFrame clears drainFlushPending),
+            // bounded by a deadline so a slow/wedged server cannot hang drain() forever. A partial
+            // chunk (0 complete frames yet) must NOT end the flush early — only the PONG or the
+            // deadline does.
+            $flushCancellation = new TimeoutCancellation(max(0.1, $this->options->requestTimeoutMs / 1000));
+            try {
+                while (!$flushCancellation->isRequested()) {
+                    $this->processIncoming($flushCancellation)->await();
+
+                    if (!$this->drainFlushPending) {
+                        // The server's PONG arrived (handleFrame cleared the flag): flush complete.
+                        break;
+                    }
                 }
+            } catch (CancelledException) {
+                // Flush deadline reached; close with whatever was delivered.
             }
 
             // Drain any remaining buffered messages to callbacks.
@@ -284,6 +301,9 @@ final class NatsConnection
      * @param Cancellation|null $cancellation Optional token that cancels the underlying socket read,
      *                                        so a timed-out caller does not orphan an in-flight read.
      * @return Future<int>
+     *
+     * @phpstan-impure Mutates connection state (e.g. clears drainFlushPending / outstandingPings via
+     *                 handled frames), so callers must not assume remembered property values persist.
      */
     public function processIncoming(?Cancellation $cancellation = null): Future
     {
@@ -331,8 +351,9 @@ final class NatsConnection
                 $this->handleFrame($frame);
             }
 
-            // Any successful read proves the link is alive; clear outstanding ping tracking.
-            $this->outstandingPings = 0;
+            // Note: the outstanding-ping counter is reset only when an actual PONG is handled (see
+            // handleFrame), not on any inbound bytes — otherwise a server that stops answering PINGs
+            // but still trickles data would never trip maxPingsOut and the watchdog could not escalate.
 
             // Drain buffered deliveries after each chunk to preserve wire-order delivery.
             $this->drainAllPending();
@@ -560,8 +581,42 @@ final class NatsConnection
 
     /**
      * Reconnects using retry policy and restores subscription state.
+     *
+     * Concurrent callers are coalesced: while one reconnect is running, others (e.g. a ping-timer
+     * callback resuming after its write while the read path already began recovering) await the same
+     * attempt and share its outcome, rather than racing on the parser, state, and socket.
      */
     private function recoverConnection(): void
+    {
+        $inProgress = $this->reconnecting;
+        if ($inProgress !== null) {
+            $inProgress->getFuture()->await();
+
+            return;
+        }
+
+        $deferred = new DeferredFuture();
+        // Suppress unhandled-error reporting for the no-waiter case; awaiting callers still receive
+        // the error from await().
+        $deferred->getFuture()->ignore();
+        $this->reconnecting = $deferred;
+
+        try {
+            $this->performRecovery();
+            $deferred->complete();
+        } catch (\Throwable $e) {
+            $deferred->error($e);
+
+            throw $e;
+        } finally {
+            $this->reconnecting = null;
+        }
+    }
+
+    /**
+     * Performs the actual reconnect + subscription replay, serialized by {@see recoverConnection()}.
+     */
+    private function performRecovery(): void
     {
         if (!$this->options->reconnectEnabled) {
             $this->state = ConnectionState::Closed;
@@ -1043,7 +1098,8 @@ final class NatsConnection
                 $this->handleFrame($frame);
             }
 
-            $this->outstandingPings = 0;
+            // The PONG handled above (handleFrame) resets the outstanding-ping counter; do not reset
+            // on any other frame, so an unresponsive server still trips maxPingsOut.
 
             // Deliver any message frames captured during the heartbeat read instead of leaving
             // them buffered until the next processIncoming(), mirroring processIncoming().

@@ -37,6 +37,20 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` The heartbeat watchdog now resets the outstanding-ping counter only when
+  an actual PONG is received, not on any inbound bytes. Previously a server that
+  stopped answering PINGs but kept trickling data (or a proxy replaying buffered data)
+  never tripped `maxPingsOut`, defeating dead-link detection on busy connections.
+- `[bugfix]` `drain()` now waits for the server's PONG (bounded by a deadline) before
+  closing, instead of bailing on a transient partial/empty read. A larger message
+  split across socket reads no longer cuts the flush short and drops in-flight
+  deliveries.
+- `[bugfix]` `SubscriptionQueue::fetchAll()` no longer returns early on a transient
+  empty read (e.g. the heartbeat self-read briefly owning the socket) while its
+  configured timeout window still has time remaining.
+- `[bugfix]` `recoverConnection()` now coalesces concurrent reconnect attempts. A
+  suspended ping-timer callback resuming while the read path already began recovering
+  can no longer launch a second reconnect that races on the parser, state, and socket.
 - `[bugfix]` The protocol parser now rejects malformed frames instead of silently
   misframing the stream: non-numeric or negative MSG/HMSG sizes and sids, and HMSG
   header bytes exceeding total bytes, raise a `ProtocolException`. A parse failure now
