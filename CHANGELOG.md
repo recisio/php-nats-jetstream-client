@@ -58,6 +58,10 @@ were all verified working and are unchanged.
   (e.g. invalid-UTF-8 metadata) instead of throwing out of the shared dispatch loop,
   which would abort delivery of buffered frames for other subscriptions.
 - `[feature]` `NatsClient::state()` exposes the current connection state.
+- `[feature]` `SubscriptionQueue::unsubscribe()` / `close()` cancel the queue's own
+  subscription (convenience for `$client->unsubscribe($queue->sid)`).
+- `[feature]` `AmpSocketTransport` now accepts `nats://` DSNs directly (self-normalizing
+  to `tcp://`), so the transport is usable standalone, not only via the connection layer.
 - `[bugfix]` Object Store downloads now use a no-ack (`ack_policy=none`) consumer. The
   read-only download previously used an explicit-ack consumer and acked each chunk; on
   a slow link an ack stalling past `ack_wait` triggered redelivery, which re-hashed a

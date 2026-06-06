@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IDCT\NATS\Core;
 
 use Amp\CancelledException;
+use Amp\Future;
 use Amp\TimeoutCancellation;
 use SplQueue;
 
@@ -48,6 +49,28 @@ final class SubscriptionQueue
     public function enqueue(NatsMessage $message): void
     {
         $this->messages->enqueue($message);
+    }
+
+    /**
+     * Cancels the underlying subscription so this queue stops receiving messages.
+     *
+     * Convenience for `$client->unsubscribe($queue->sid)`.
+     *
+     * @return Future<void>
+     */
+    public function unsubscribe(): Future
+    {
+        return $this->client->unsubscribe($this->sid);
+    }
+
+    /**
+     * Alias of {@see unsubscribe()}.
+     *
+     * @return Future<void>
+     */
+    public function close(): Future
+    {
+        return $this->client->unsubscribe($this->sid);
     }
 
     /**

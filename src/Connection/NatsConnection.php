@@ -570,7 +570,7 @@ final class NatsConnection
     {
         $servers = $this->options->servers;
         if ($servers === []) {
-            return 'nats://127.0.0.1:4222';
+            return NatsOptions::DEFAULT_SERVER;
         }
 
         $index = $this->serverCursor % count($servers);

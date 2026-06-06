@@ -201,6 +201,12 @@ final class AmpSocketTransport implements TlsAwareTransportInterface
             return 'tcp://' . substr($dsn, strlen('tls://'));
         }
 
+        // Accept the NATS scheme directly so the transport is usable standalone (the connection
+        // layer normalizes nats:// before calling connect(), but a direct caller may not).
+        if (str_starts_with($dsn, 'nats://')) {
+            return 'tcp://' . substr($dsn, strlen('nats://'));
+        }
+
         return $dsn;
     }
 }

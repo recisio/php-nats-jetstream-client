@@ -340,4 +340,15 @@ final class SubscriptionQueueTest extends TestCase
         self::assertSame('msg1', $messages[0]->payload);
         self::assertSame('msg2', $messages[1]->payload);
     }
+
+    public function testUnsubscribeSendsUnsubForOwnSid(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('events')->await();
+
+        $queue->unsubscribe()->await();
+
+        self::assertStringContainsString("UNSUB {$queue->sid}\r\n", implode('', $transport->writes));
+    }
 }

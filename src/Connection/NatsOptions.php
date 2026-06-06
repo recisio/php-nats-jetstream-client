@@ -12,6 +12,9 @@ use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
  */
 final class NatsOptions
 {
+    /** Default server endpoint used when none is configured. */
+    public const DEFAULT_SERVER = 'nats://127.0.0.1:4222';
+
     /**
      * Configures connection and runtime behavior for a NATS client instance.
      *
@@ -50,7 +53,7 @@ final class NatsOptions
       * @param SlowConsumerPolicy $slowConsumerPolicy Strategy applied when per-subscription pending queue reaches capacity.
      */
     public function __construct(
-        public readonly array $servers = ['nats://127.0.0.1:4222'],
+        public readonly array $servers = [self::DEFAULT_SERVER],
         public readonly string $name = 'idct-php-nats-client',
         public readonly string $inboxPrefix = '_INBOX',
         public readonly int $connectTimeoutMs = 5_000,
@@ -88,6 +91,6 @@ final class NatsOptions
      */
     public function firstServer(): string
     {
-        return $this->servers[0] ?? 'nats://127.0.0.1:4222';
+        return $this->servers[0] ?? self::DEFAULT_SERVER;
     }
 }

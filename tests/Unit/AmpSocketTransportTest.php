@@ -133,6 +133,8 @@ final class AmpSocketTransportTest extends TestCase
 
         self::assertSame('tcp://example.org:4443', $this->invokeNormalizeSocketUri($transport, 'tls://example.org:4443'));
         self::assertSame('tcp://example.org:4222', $this->invokeNormalizeSocketUri($transport, 'tcp://example.org:4222'));
+        // nats:// is accepted directly so the transport is usable standalone.
+        self::assertSame('tcp://example.org:4222', $this->invokeNormalizeSocketUri($transport, 'nats://example.org:4222'));
     }
 
     private function invokeWithTlsContext(AmpSocketTransport $transport, ConnectContext $context, string $dsn): ConnectContext
