@@ -9,6 +9,7 @@ use Amp\CancelledException;
 use Amp\CompositeCancellation;
 use Amp\Future;
 use Amp\TimeoutCancellation;
+use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
@@ -73,6 +74,12 @@ final class Service
         // Per the NATS micro spec endpoints share a queue group ("q" by default) so multiple
         // service instances load-balance requests. Pass null or '' to opt out (fan-out: every
         // instance receives every request).
+        if (isset($this->endpoints[$subject])) {
+            // Two endpoints resolving to the same subject would silently overwrite the first (and
+            // its handler), and under-report it in INFO/SCHEMA/STATS. Fail fast at registration.
+            throw new \InvalidArgumentException(sprintf('An endpoint is already registered for subject "%s"', $subject));
+        }
+
         $resolvedQueueGroup = ($queueGroup === null || $queueGroup === '') ? null : $queueGroup;
         $endpoint = new ServiceEndpoint($name, $subject, $resolvedQueueGroup, $schema);
         $this->endpoints[$subject] = $endpoint;
@@ -219,11 +226,20 @@ final class Service
     public function stop(): Future
     {
         return async(function (): void {
-            foreach ($this->subscriptionSids as $sid) {
-                $this->client->unsubscribe($sid)->await();
+            try {
+                foreach ($this->subscriptionSids as $sid) {
+                    try {
+                        $this->client->unsubscribe($sid)->await();
+                    } catch (\Throwable) {
+                        // The connection may already be closed/lost during shutdown (unsubscribe
+                        // throws when not open). Keep unsubscribing the rest rather than aborting on
+                        // the first failure and leaking the remaining SIDs.
+                    }
+                }
+            } finally {
+                // Always clear state so a subsequent start() can re-subscribe cleanly.
+                $this->subscriptionSids = [];
             }
-
-            $this->subscriptionSids = [];
         });
     }
 
@@ -262,7 +278,18 @@ final class Service
                     } catch (CancelledException) {
                         break;
                     } catch (\Throwable) {
-                        delay(0.02);
+                        // A connection-level failure. If the connection is unrecoverable (closed for
+                        // good), stop instead of busy-spinning forever silently swallowing the error;
+                        // otherwise back off — interruptibly — and let reconnect catch up.
+                        if ($this->client->state() === ConnectionState::Closed) {
+                            break;
+                        }
+
+                        try {
+                            delay(0.02, cancellation: $effectiveCancellation);
+                        } catch (CancelledException) {
+                            break;
+                        }
                     }
                 }
             } finally {
@@ -349,8 +376,14 @@ final class Service
                         return;
                     }
 
-                    $payload = $this->discoveryPayloadForSubject($subject);
-                    $this->client->publish($message->replyTo, json_encode($payload, JSON_THROW_ON_ERROR))->await();
+                    try {
+                        $payload = $this->discoveryPayloadForSubject($subject);
+                        $this->client->publish($message->replyTo, json_encode($payload, JSON_THROW_ON_ERROR))->await();
+                    } catch (\Throwable) {
+                        // A discovery encode/publish failure (e.g. invalid-UTF-8 metadata) must not
+                        // escape the shared dispatch loop and abort delivery of buffered frames for
+                        // other subscriptions. Best-effort: skip this discovery response.
+                    }
                 })->await();
 
                 $this->subscriptionSids[] = $sid;

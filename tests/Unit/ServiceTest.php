@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Unit;
 
 use Amp\DeferredCancellation;
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
@@ -37,6 +38,15 @@ final class ServiceTestInvalidClassHandler {}
 
 final class ServiceTest extends TestCase
 {
+    /** @return list<string> */
+    private function infoAndPong(): array
+    {
+        return [
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ];
+    }
+
     /**
      * Verifies service start registers discovery and endpoint subscriptions.
      */
@@ -686,5 +696,80 @@ final class ServiceTest extends TestCase
         self::assertInstanceOf(NatsConnection::class, $connection);
         $readInProgress = new \ReflectionProperty(NatsConnection::class, 'readInProgress');
         self::assertFalse($readInProgress->getValue($connection));
+    }
+
+    public function testAddEndpointRejectsDuplicateSubject(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('a', 'svc.echo', static fn (NatsMessage $m): string => 'a');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $service->addEndpoint('b', 'svc.echo', static fn (NatsMessage $m): string => 'b');
+    }
+
+    public function testStopToleratesClosedConnection(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $m): string => $m->payload);
+        $service->start()->await();
+
+        // The connection is gone before stop(): unsubscribe() would throw "not open".
+        $client->disconnect()->await();
+
+        // stop() must not abort on the first failure; it swallows per-SID and clears state.
+        $service->stop()->await();
+
+        $sids = new \ReflectionProperty($service, 'subscriptionSids');
+        self::assertSame([], $sids->getValue($service));
+    }
+
+    public function testRunStopsWhenConnectionIsUnrecoverable(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            FakeTransport::EOF, // peer close -> recover -> reconnect disabled -> Closed
+        ]);
+        $client = new NatsClient(new NatsOptions(reconnectEnabled: false, pingIntervalSeconds: 0), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $m): string => $m->payload);
+
+        // run() with no timeout must still return once the connection is unrecoverable, instead of
+        // busy-spinning forever. The outer bound fails the test if it spins.
+        $result = \Amp\Future\await([async(static function () use ($service): void {
+            $service->run()->await();
+        })], new TimeoutCancellation(2.0));
+
+        self::assertSame([null], $result);
+    }
+
+    public function testDiscoveryHandlerSwallowsEncodeFailure(): void
+    {
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // $SRV.INFO.calc is the 5th discovery subscription (sid 5); request it with a reply inbox.
+            "MSG \$SRV.INFO.calc 5 _INBOX.r 0\r\n\r\n",
+        ]);
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // An invalid-UTF-8 description makes the INFO discovery payload fail to JSON-encode.
+        $client->service('calc', '1.0.0', "bad\xB1description")
+            ->addEndpoint('add', 'calc.add', static fn (NatsMessage $m): string => 'ok')
+            ->start()->await();
+
+        // The encode failure must be swallowed inside the discovery handler, not escape the dispatch
+        // loop (which would abort delivery for other subscriptions). processIncoming completes.
+        $frames = $client->processIncoming()->await();
+        self::assertSame(1, $frames);
     }
 }

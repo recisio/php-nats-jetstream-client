@@ -37,6 +37,20 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` `Service::stop()` now tolerates a closed/lost connection: it unsubscribes
+  each endpoint best-effort and always clears its subscription state, instead of
+  aborting on the first failure (which leaked the remaining subscriptions and broke a
+  later `start()` restart).
+- `[bugfix]` `Service::addEndpoint()` now rejects a duplicate subject with an
+  `InvalidArgumentException` instead of silently overwriting the earlier endpoint and
+  handler (which also under-reported them in INFO/SCHEMA/STATS).
+- `[bugfix]` `Service::run()` now stops when the connection is unrecoverable (closed
+  for good) and backs off interruptibly, instead of busy-spinning at ~50 Hz silently
+  swallowing the error.
+- `[bugfix]` The microservice discovery handler now swallows an encode/publish failure
+  (e.g. invalid-UTF-8 metadata) instead of throwing out of the shared dispatch loop,
+  which would abort delivery of buffered frames for other subscriptions.
+- `[feature]` `NatsClient::state()` exposes the current connection state.
 - `[bugfix]` Object Store downloads now use a no-ack (`ack_policy=none`) consumer. The
   read-only download previously used an explicit-ack consumer and acked each chunk; on
   a slow link an ack stalling past `ack_wait` triggered redelivery, which re-hashed a

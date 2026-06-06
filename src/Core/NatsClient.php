@@ -6,6 +6,7 @@ namespace IDCT\NATS\Core;
 
 use Amp\Cancellation;
 use Amp\Future;
+use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\JetStream\JetStreamContext;
@@ -148,6 +149,14 @@ final class NatsClient
     public function processIncoming(?Cancellation $cancellation = null): Future
     {
         return $this->connection->processIncoming($cancellation);
+    }
+
+    /**
+     * Returns the current connection state (Open, Connecting, Draining, Closed, ...).
+     */
+    public function state(): ConnectionState
+    {
+        return $this->connection->state();
     }
 
     /**
