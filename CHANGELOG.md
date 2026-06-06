@@ -24,6 +24,14 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` `request()` (and every JetStream/KV/Object Store call built on it) no longer
+  throws a spurious `TimeoutException` when the reply is delivered in the same event-loop
+  tick the deadline fires. The wait loop now checks for completion before the deadline, so
+  a reply that lands as the timeout expires is returned instead of discarded.
+- `[bugfix]` Ordered-consumer gap recovery now contains a failed consumer recreate
+  (pruned/deleted stream, leadership change, transient timeout) instead of throwing out of
+  the shared subscription dispatch loop and aborting delivery for every other subscription
+  on the connection.
 - `[bugfix]` `PullConsumerIterator` infinite mode (`setIterations(null)`) now survives a
   transient `409` (`Exceeded MaxAckPending`, `Leadership Change`, `Server Shutdown`,
   `Exceeded MaxWaiting`) and keeps polling, instead of treating every non-404/408 status

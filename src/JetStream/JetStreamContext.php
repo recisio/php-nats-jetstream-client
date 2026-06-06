@@ -577,14 +577,21 @@ final class JetStreamContext
                     $consumerOptions['opt_start_seq'] = $lastStreamSeq + 1;
 
                     try {
-                        $this->deleteConsumer($stream, $consumerName)->await();
-                    } catch (JetStreamException) {
-                        // Best-effort cleanup for ephemeral consumers that may already be gone.
-                    }
+                        try {
+                            $this->deleteConsumer($stream, $consumerName)->await();
+                        } catch (JetStreamException) {
+                            // Best-effort cleanup for ephemeral consumers that may already be gone.
+                        }
 
-                    $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
-                    $consumerName = $consumer->name;
-                    $expectedConsumerSeq = 1;
+                        $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
+                        $consumerName = $consumer->name;
+                        $expectedConsumerSeq = 1;
+                    } catch (\Throwable) {
+                        // Recreate failed (stream pruned/deleted, leadership change, transient
+                        // timeout). Contain the failure to THIS ordered consumer instead of throwing
+                        // out of the shared subscription dispatch loop, which would abort delivery for
+                        // every other subscription on the connection.
+                    }
 
                     return;
                 }

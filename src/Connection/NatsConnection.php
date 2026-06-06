@@ -433,10 +433,15 @@ final class NatsConnection
         $inbox = Inbox::generate($this->options->inboxPrefix);
         /** @var DeferredFuture<NatsMessage> $deferred */
         $deferred = new DeferredFuture();
+        // Set by the handler when the reply is delivered. The wait loop checks this rather than
+        // $deferred->isComplete() so a reply delivered in the same tick the deadline fires is
+        // returned instead of being discarded as a spurious timeout.
+        $replyReceived = false;
 
-        $sid = $this->subscribe($inbox, static function (NatsMessage $message) use ($deferred): void {
+        $sid = $this->subscribe($inbox, static function (NatsMessage $message) use ($deferred, &$replyReceived): void {
             if (!$deferred->isComplete()) {
                 $deferred->complete($message);
+                $replyReceived = true;
             }
         })->await();
 
@@ -457,7 +462,22 @@ final class NatsConnection
                 ? $timeoutCancellation
                 : new CompositeCancellation($cancellation, $timeoutCancellation);
 
-            while (!$deferred->isComplete()) {
+            while (true) {
+                // Completion is checked BEFORE the deadline so a reply delivered in the same tick the
+                // deadline fires (by this loop's read or a concurrent heartbeat read) is returned
+                // rather than discarded as a spurious timeout.
+                if ($replyReceived) {
+                    break;
+                }
+
+                if ($waitCancellation->isRequested()) {
+                    if ($cancellation !== null && $cancellation->isRequested()) {
+                        throw new CancelledException();
+                    }
+
+                    throw new TimeoutException('Request timed out for subject ' . $subject);
+                }
+
                 try {
                     $frames = $this->processIncoming($waitCancellation)->await();
                 } catch (CancelledException $e) {
@@ -465,16 +485,10 @@ final class NatsConnection
                         throw $e;
                     }
 
-                    throw new TimeoutException('Request timed out for subject ' . $subject);
-                }
-
-                // Check if the cancellation token has fired between iterations.
-                if ($waitCancellation->isRequested()) {
-                    if ($cancellation !== null && $cancellation->isRequested()) {
-                        throw new CancelledException();
-                    }
-
-                    throw new TimeoutException('Request timed out for subject ' . $subject);
+                    // The deadline fired during the read. Loop once more: the top-of-loop check
+                    // returns the reply if it was delivered in the same tick, otherwise the deadline
+                    // check there throws the timeout.
+                    continue;
                 }
 
                 if ($frames === 0) {

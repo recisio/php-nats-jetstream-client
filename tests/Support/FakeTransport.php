@@ -46,8 +46,16 @@ final class FakeTransport implements TlsAwareTransportInterface
      * @param bool $blockWhenEmpty When true, readLine() on an exhausted queue mirrors a real socket:
      *                             it suspends until the supplied cancellation fires (or forever when
      *                             the cancellation is null) instead of returning '' immediately.
+     * @param string|null $holdChunkContaining When set, readLine() delays $holdSeconds (ignoring the
+     *                             cancellation) before returning a chunk containing this substring —
+     *                             used to reproduce "reply delivered as the deadline fires" races.
      */
-    public function __construct(private array $readQueue = [], private bool $blockWhenEmpty = false) {}
+    public function __construct(
+        private array $readQueue = [],
+        private bool $blockWhenEmpty = false,
+        private ?string $holdChunkContaining = null,
+        private float $holdSeconds = 0.0,
+    ) {}
 
     /**
      * Records connect calls for assertions.
@@ -95,6 +103,12 @@ final class FakeTransport implements TlsAwareTransportInterface
                 $chunk = (string) array_shift($this->readQueue);
                 if ($chunk === self::EOF) {
                     throw new TransportClosedException('Socket closed by peer (EOF)');
+                }
+
+                if ($this->holdChunkContaining !== null && $this->holdSeconds > 0.0 && str_contains($chunk, $this->holdChunkContaining)) {
+                    // Hold this chunk past a request deadline (ignoring the cancellation) so the
+                    // caller observes the reply arriving in the same tick the deadline expires.
+                    delay($this->holdSeconds);
                 }
 
                 return $chunk;

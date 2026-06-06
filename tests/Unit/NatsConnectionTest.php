@@ -399,6 +399,29 @@ final class NatsConnectionTest extends TestCase
         self::assertSame("UNSUB 1\r\n", $transport->writes[4]);
     }
 
+    public function testRequestReturnsReplyDeliveredOnSameTickAsTimeout(): void
+    {
+        // A reply delivered in the same processIncoming() call the deadline fires in must be returned,
+        // not discarded as a spurious timeout. The transport holds the reply chunk for 50ms (past the
+        // 10ms request deadline, ignoring the cancellation) to reproduce the completion-vs-timeout race.
+        $transport = new FakeTransport(
+            [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+                "MSG _INBOX.any 1 5\r\nhello\r\n",
+            ],
+            holdChunkContaining: 'hello',
+            holdSeconds: 0.05,
+        );
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $response = $connection->request('svc.echo', '{"x":1}', 10)->await();
+
+        self::assertSame('hello', $response->payload);
+    }
+
     /**
      * Verifies request/reply raises timeout when no response arrives before deadline.
      */
