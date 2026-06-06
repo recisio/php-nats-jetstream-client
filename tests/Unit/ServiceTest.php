@@ -36,6 +36,16 @@ final class ServiceTestClassHandler implements ServiceEndpointHandlerInterface
 
 final class ServiceTestInvalidClassHandler {}
 
+final class ServiceTestCtorArgHandler implements ServiceEndpointHandlerInterface
+{
+    public function __construct(private readonly string $required) {}
+
+    public function handle(NatsMessage $message): string
+    {
+        return $this->required . ':' . $message->payload;
+    }
+}
+
 final class ServiceTest extends TestCase
 {
     /** @return list<string> */
@@ -709,6 +719,47 @@ final class ServiceTest extends TestCase
 
         $this->expectException(\InvalidArgumentException::class);
         $service->addEndpoint('b', 'svc.echo', static fn (NatsMessage $m): string => 'b');
+    }
+
+    public function testAddEndpointRejectsEmptyName(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('name must not be empty');
+        $service->addEndpoint('   ', 'svc.echo', static fn (NatsMessage $m): string => 'x');
+    }
+
+    public function testAddEndpointRejectsEmptySubject(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('subject must not be empty');
+        $service->addEndpoint('echo', '', static fn (NatsMessage $m): string => 'x');
+    }
+
+    public function testClassHandlerWithRequiredConstructorArgIsRejected(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0');
+
+        // A class-string handler with a required constructor argument cannot be auto-instantiated;
+        // it must fail with a clear framework error, not a raw ArgumentCountError.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('could not be instantiated');
+        $service->addEndpoint('echo', 'svc.echo', ServiceTestCtorArgHandler::class);
     }
 
     public function testStopToleratesClosedConnection(): void

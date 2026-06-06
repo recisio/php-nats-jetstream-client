@@ -74,6 +74,14 @@ final class Service
         // Per the NATS micro spec endpoints share a queue group ("q" by default) so multiple
         // service instances load-balance requests. Pass null or '' to opt out (fan-out: every
         // instance receives every request).
+        if (trim($name) === '') {
+            throw new \InvalidArgumentException('Service endpoint name must not be empty');
+        }
+
+        if (trim($subject) === '') {
+            throw new \InvalidArgumentException('Service endpoint subject must not be empty');
+        }
+
         if (isset($this->endpoints[$subject])) {
             // Two endpoints resolving to the same subject would silently overwrite the first (and
             // its handler), and under-report it in INFO/SCHEMA/STATS. Fail fast at registration.
@@ -546,7 +554,16 @@ final class Service
     private function resolveHandler(callable|object|string $handler): callable
     {
         if (is_string($handler) && class_exists($handler)) {
-            $instance = new $handler();
+            try {
+                $instance = new $handler();
+            } catch (\Throwable $e) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Service endpoint class handler %s could not be instantiated (it must have a no-argument constructor): %s',
+                    $handler,
+                    $e->getMessage(),
+                ), 0, $e);
+            }
+
             if (!$instance instanceof ServiceEndpointHandlerInterface) {
                 throw new \InvalidArgumentException(sprintf(
                     'Service endpoint class handler %s must implement %s.',

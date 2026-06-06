@@ -25,6 +25,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 
 - [Installation](#installation)
 - [Features](#features)
+- [TODO](#todo)
 - [Usage](#usage)
 - [Authentication Options](#authentication-options)
 - [Connect and Publish/Subscribe](#connect-and-publishsubscribe)
@@ -106,7 +107,7 @@ Use `IDCT\\NATS\\JetStream\\Schedule::at(...)` or `Schedule::atTimestamp(...)` t
 
 ## TODO
 
-- Align `ProtocolParser` control-line parsing more closely with the NATS wire spec by accepting case-insensitive operation names and tab-delimited field separators.
+- Align `ProtocolParser` operation detection more closely with the NATS wire spec by accepting case-insensitive operation names (verbs are currently matched case-sensitively and must be followed by a space). Field separators within a recognized control line already accept any whitespace, including tabs.
 
 ## 🚀 This project looks for funding. Love my work? Support it! 💖
 
