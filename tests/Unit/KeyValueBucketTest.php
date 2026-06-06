@@ -389,6 +389,24 @@ final class KeyValueBucketTest extends TestCase
         $client->jetStream()->keyValue('cfg')->get('theme')->await();
     }
 
+    public function testGetWrapsMalformedReplyAsJetStreamException(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG _INBOX.a 1 7\r\nnotjson\r\n", // a non-JSON reply
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // A malformed reply must surface as the library's JetStreamException, not a raw \JsonException.
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Malformed JetStream reply');
+
+        $client->jetStream()->keyValue('cfg')->get('theme')->await();
+    }
+
     /**
      * Verifies DEL marker headers are mapped to tombstone entry values.
      */

@@ -323,11 +323,43 @@ final class ObjectStoreBucket
      */
     private function verifyDigest(ObjectInfo $info, string $actualDigest): void
     {
-        if ($info->digest !== '' && $info->digest !== $actualDigest) {
+        if ($info->digest === '') {
+            return;
+        }
+
+        // Compare the decoded digest BYTES, not the encoded strings: the metadata digest may use
+        // unpadded base64url (some non-Go clients) while we compute padded, so a plain string compare
+        // would spuriously reject a byte-identical object. hash_equals is constant-time.
+        $expected = $this->decodeDigest($info->digest);
+        $actual = $this->decodeDigest($actualDigest);
+
+        if ($expected === null || $actual === null || !hash_equals($expected, $actual)) {
             throw new JetStreamException(
                 'Object digest mismatch: expected ' . $info->digest . ', got ' . $actualDigest,
             );
         }
+    }
+
+    /**
+     * Decodes a "SHA-256=<base64url>" digest to its raw bytes, tolerating missing base64url padding.
+     * Returns null when the value is not a recognizable SHA-256 digest.
+     */
+    private function decodeDigest(string $digest): ?string
+    {
+        $prefix = 'SHA-256=';
+        if (!str_starts_with($digest, $prefix)) {
+            return null;
+        }
+
+        $encoded = strtr(substr($digest, strlen($prefix)), '-_', '+/');
+        $remainder = strlen($encoded) % 4;
+        if ($remainder > 0) {
+            $encoded .= str_repeat('=', 4 - $remainder);
+        }
+
+        $raw = base64_decode($encoded, true);
+
+        return $raw === false ? null : $raw;
     }
 
     /**

@@ -50,4 +50,27 @@ final class NatsHeadersTest extends TestCase
             'Nats-Consumer-Stalled' => '_INBOX.123',
         ], NatsHeaders::fromWireBlock($raw));
     }
+
+    public function testToWireBlockRejectsEmptyHeaderName(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Header name');
+        NatsHeaders::toWireBlock(['' => 'value']);
+    }
+
+    public function testToWireBlockRejectsHeaderNameWithColonOrWhitespace(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Header name');
+        NatsHeaders::toWireBlock(['a:b' => 'value']);
+    }
+
+    public function testHeaderValueSurroundingWhitespaceRoundTripsSymmetrically(): void
+    {
+        // Encode and decode both trim surrounding whitespace, so a value round-trips consistently
+        // instead of asymmetrically losing leading/trailing spaces only on decode.
+        $raw = NatsHeaders::toWireBlock(['X-Test' => '  spaced  ']);
+
+        self::assertSame(['X-Test' => 'spaced'], NatsHeaders::fromWireBlock($raw));
+    }
 }

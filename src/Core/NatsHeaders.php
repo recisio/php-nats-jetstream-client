@@ -20,13 +20,21 @@ final class NatsHeaders
 
         foreach ($headers as $name => $value) {
             $name = (string) $name;
-            if (preg_match('/[\r\n]/', $name) || preg_match('/[\r\n]/', $value)) {
-                throw new \InvalidArgumentException('Header names and values must not contain CR or LF characters');
+            // A header name must be a non-empty token: an empty/blank name emits ":value" (dropped on
+            // round-trip), and a name containing whitespace or a colon corrupts the "key:value" parse.
+            if ($name === '' || preg_match('/[\s:]/', $name) === 1) {
+                throw new \InvalidArgumentException('Header name must be a non-empty token without whitespace or a colon');
             }
 
-            // Use compact "key:value" form because some server-side header parsers
-            // do not trim leading spaces from values.
-            $lines[] = $name . ':' . $value;
+            if (preg_match('/[\r\n]/', $value) === 1) {
+                throw new \InvalidArgumentException('Header values must not contain CR or LF characters');
+            }
+
+            // Compact "key:value" form (no space after the colon) because some server-side header
+            // parsers do not trim a leading space from values. Surrounding whitespace in a value is
+            // not significant — it is trimmed here and again on decode — so values round-trip
+            // symmetrically rather than asymmetrically losing leading/trailing spaces.
+            $lines[] = $name . ':' . trim($value);
         }
 
         // NATS headers terminate with an additional CRLF after all header lines.

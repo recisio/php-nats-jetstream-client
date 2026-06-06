@@ -24,6 +24,17 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` `NatsHeaders::toWireBlock()` now rejects an empty/blank header name or one
+  containing whitespace or a colon (previously only CR/LF were rejected, so a bad name
+  silently produced a malformed/mutated block), and trims surrounding whitespace from
+  values so they round-trip symmetrically with decode (which already trims).
+- `[bugfix]` Object Store digest verification now compares the decoded digest *bytes*
+  (tolerating missing base64url padding) with `hash_equals()`, instead of a string compare
+  that spuriously rejected a byte-identical object whose metadata used unpadded base64url
+  (some non-Go clients).
+- `[bugfix]` KeyValue `get()`/`update()`/`delete()`/`purge()`/`getAll()` now wrap a
+  malformed (non-JSON) reply in a `JetStreamException` instead of leaking a raw
+  `JsonException`, consistent with `put()` and the rest of the API.
 - `[bugfix]` The protocol parser now bounds an unterminated control line (no CRLF) to 1 MiB
   and raises a `ProtocolException` instead of buffering it without limit. `maxFrameSize`
   only bounded MSG/HMSG payloads (parsed after their control line completes), so a peer

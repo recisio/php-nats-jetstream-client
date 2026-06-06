@@ -244,6 +244,36 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertStringContainsString('"filter_subject":"$O.assets.C.' . $nuid . '"', $writes);
     }
 
+    public function testGetVerifiesUnpaddedBase64UrlDigest(): void
+    {
+        $nuid = 'nuidunpad01';
+        // A non-Go client may store the digest as UNPADDED base64url; byte comparison must still
+        // verify it against our padded computation instead of throwing a spurious mismatch.
+        $unpadded = rtrim($this->digestOf('hello'), '=');
+        self::assertNotSame($unpadded, $this->digestOf('hello')); // guard: the fixture is actually unpadded
+
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => $nuid, 'size' => 5, 'chunks' => 1, 'digest' => $unpadded]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPH1","config":{"ack_policy":"explicit"}}';
+        $deleteConsumer = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
+            "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fetched = $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+
+        self::assertInstanceOf(ObjectData::class, $fetched);
+        self::assertSame('hello', $fetched->data);
+    }
+
     /**
      * Verifies get throws on a content digest mismatch.
      */

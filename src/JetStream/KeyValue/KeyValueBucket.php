@@ -345,8 +345,7 @@ final class KeyValueBucket
         $payload = json_encode(['subjects_filter' => $this->subjectPrefix() . '>'], JSON_THROW_ON_ERROR);
         $message = $this->client->request($subject, $payload)->await();
 
-        /** @var array<string,mixed> $data */
-        $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+        $data = $this->decodeReply($message->payload);
 
         /** @var array<string,mixed> $state */
         $state = is_array($data['state'] ?? null) ? $data['state'] : [];
@@ -366,8 +365,7 @@ final class KeyValueBucket
         $payload = json_encode(['last_by_subj' => $this->subjectForKey($key)], JSON_THROW_ON_ERROR);
         $message = $this->client->request($subject, $payload)->await();
 
-        /** @var array<string,mixed> $data */
-        $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+        $data = $this->decodeReply($message->payload);
 
         /** @var array<string,mixed>|null $error */
         $error = is_array($data['error'] ?? null) ? $data['error'] : null;
@@ -375,6 +373,24 @@ final class KeyValueBucket
             $description = (string) ($error['description'] ?? 'JetStream API error');
             $code = (int) ($error['code'] ?? 0);
             throw new JetStreamException($description, $code);
+        }
+
+        return $data;
+    }
+
+    /**
+     * Decodes a JetStream JSON reply, mapping a malformed (non-JSON) body to a JetStreamException
+     * instead of leaking a raw \JsonException to the caller (consistent with the other API calls).
+     *
+     * @return array<string,mixed>
+     */
+    private function decodeReply(string $payload): array
+    {
+        try {
+            /** @var array<string,mixed> $data */
+            $data = json_decode($payload, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new JetStreamException('Malformed JetStream reply: ' . $e->getMessage(), 0, $e);
         }
 
         return $data;
@@ -435,8 +451,7 @@ final class KeyValueBucket
         return async(function () use ($subject, $payload, $headers): PubAck {
             $message = $this->client->requestWithHeaders($subject, $payload, $headers)->await();
 
-            /** @var array<string,mixed> $data */
-            $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+            $data = $this->decodeReply($message->payload);
 
             /** @var array<string,mixed>|null $error */
             $error = is_array($data['error'] ?? null) ? $data['error'] : null;
