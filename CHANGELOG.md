@@ -37,6 +37,10 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` Object Store `put()` now pipelines chunk publishes in bounded in-flight
+  windows instead of awaiting one PubAck round-trip per chunk, so large-object uploads
+  are no longer strictly round-trip-bound. PUB frames are written to the single
+  connection in chunk order, so stream order (and download reassembly) is preserved.
 - `[bugfix]` KeyValue `getAll()` and Object Store `list()` now read the latest record
   per key/object via the Direct Get API issued concurrently, instead of N+1 sequential
   leader-only `STREAM.MSG.GET` reads. For large buckets this stops hammering the stream

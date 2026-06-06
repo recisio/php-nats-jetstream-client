@@ -34,6 +34,12 @@ final class ObjectStoreBucket
     private const DOWNLOAD_BATCH_EXPIRES_MS = 10000;
 
     /**
+     * Maximum number of chunk publishes kept in flight at once during an upload. Bounds outstanding
+     * PubAcks/memory while letting their round-trips overlap instead of running strictly serially.
+     */
+    private const UPLOAD_PIPELINE_DEPTH = 16;
+
+    /**
      * Creates an Object Store bucket context bound to a client and bucket name.
      *
      * @param NatsClient $client Connected client used for chunk publish and metadata retrieval operations.
@@ -104,12 +110,26 @@ final class ObjectStoreBucket
                 $this->jetStream->publish($chunkSubject, $data)->await();
                 $chunks = 1;
             } else {
+                // Pipeline chunk publishes in bounded in-flight windows instead of one full PubAck
+                // round-trip per chunk. The PUB frames are written to the single connection in chunk
+                // order (writes are serialized in call order), so stream order — and therefore
+                // download reassembly — is preserved; the acks for a window are awaited together.
+                $pending = [];
                 $offset = 0;
                 while ($offset < $totalSize) {
                     $chunk = substr($data, $offset, $this->chunkSize);
-                    $this->jetStream->publish($chunkSubject, $chunk)->await();
+                    $pending[] = $this->jetStream->publish($chunkSubject, $chunk);
                     $offset += strlen($chunk);
                     $chunks++;
+
+                    if (count($pending) >= self::UPLOAD_PIPELINE_DEPTH) {
+                        Future\await($pending);
+                        $pending = [];
+                    }
+                }
+
+                if ($pending !== []) {
+                    Future\await($pending);
                 }
             }
 

@@ -12,6 +12,7 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
+use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
 use PHPUnit\Framework\TestCase;
 
 use function Amp\async;
@@ -292,6 +293,39 @@ final class JetStreamIntegrationTest extends TestCase
             self::assertNotSame('', $reply->payload);
         }
 
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies a pipelined multi-chunk upload round-trips intact: a tiny chunk size forces many
+     * chunks across more than one in-flight window, and an exact-bytes + digest match on download
+     * proves the pipelined publishes preserved stream order.
+     */
+    public function testJetStreamObjectStorePipelinedMultiChunkRoundTrip(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'mc' . strtolower(bin2hex(random_bytes(2)));
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        // 64-byte chunks over a ~2 KiB payload => ~32 chunks => more than one pipeline window.
+        $store = new ObjectStoreBucket($client, $client->jetStream(), $bucket, 64);
+        $store->create()->await();
+
+        $payload = bin2hex(random_bytes(1024)); // 2048 bytes
+
+        $info = $store->put('blob.bin', $payload)->await();
+        self::assertGreaterThan(16, $info->chunks);
+
+        $data = $store->get('blob.bin')->await();
+        self::assertNotNull($data);
+        // get() verifies the SHA-256 digest internally; an exact-bytes match additionally proves the
+        // pipelined chunks were stored and reassembled in order.
+        self::assertSame($payload, $data->data);
+
+        $store->deleteBucket()->await();
         $client->disconnect()->await();
     }
 
