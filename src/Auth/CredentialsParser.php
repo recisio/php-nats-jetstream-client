@@ -33,9 +33,11 @@ final class CredentialsParser
     /**
      * Extracts JWT and NKey seed from credential file contents.
      *
-     * NATS `.creds` files contain two PEM-like blocks:
-     * - `-----BEGIN NATS USER JWT-----` / `-----END NATS USER JWT-----`
-     * - `-----BEGIN USER NKEY SEED-----` / `-----END USER NKEY SEED-----`
+     * NATS `.creds` files contain two PEM-like blocks. Note that nsc/the NATS toolchain
+     * emits asymmetric dash runs — five dashes on the BEGIN marker and six on the END
+     * marker — so the parser accepts five-or-more dashes on either side:
+     * - `-----BEGIN NATS USER JWT-----` / `------END NATS USER JWT------`
+     * - `-----BEGIN USER NKEY SEED-----` / `------END USER NKEY SEED------`
      *
      * @return array{jwt: string, nkeySeed: string}
      */
@@ -59,7 +61,8 @@ final class CredentialsParser
      */
     private static function extractBlock(string $contents, string $blockType): ?string
     {
-        $pattern = '/-----BEGIN ' . preg_quote($blockType, '/') . '-----\s*\n(.+?)\n\s*-----END ' . preg_quote($blockType, '/') . '-----/s';
+        // Accept five-or-more dashes on each marker: nsc emits 5 on BEGIN and 6 on END.
+        $pattern = '/-{5,}BEGIN ' . preg_quote($blockType, '/') . '-{5,}\s*\n(.+?)\n\s*-{5,}END ' . preg_quote($blockType, '/') . '-{5,}/s';
         if (preg_match($pattern, $contents, $matches) !== 1) {
             return null;
         }

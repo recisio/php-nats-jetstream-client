@@ -24,6 +24,12 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` `CredentialsParser` now parses real `nsc`-generated `.creds` files. The
+  marker regex required exactly five dashes on both the BEGIN and END lines, but the
+  NATS toolchain emits five dashes on BEGIN and **six** on END, so
+  `CredentialsParser::fromFile()` threw `Credentials file does not contain a NATS USER
+  JWT block` on essentially every genuine credentials file — making the documented
+  JWT-via-`.creds` auth path unusable. Both markers now accept five-or-more dashes.
 - `[bugfix]` Object Store now stores a 0-byte object with `chunks=0` and publishes no
   chunk message, matching the official Object Store layout; previously it wrote one
   empty chunk and recorded `chunks=1`. `get()` of an empty object also returns

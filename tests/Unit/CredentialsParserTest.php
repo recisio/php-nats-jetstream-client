@@ -28,6 +28,39 @@ final class CredentialsParserTest extends TestCase
         self::assertSame('SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM', $result['nkeySeed']);
     }
 
+    public function testParseAcceptsCanonicalNscMarkersWithSixDashEnd(): void
+    {
+        // Real nsc/.creds output is asymmetric: five dashes on BEGIN, SIX on END. The parser must
+        // accept it (the previous five-dash-only regex rejected every genuine credentials file).
+        $contents = <<<'CREDS'
+            -----BEGIN NATS USER JWT-----
+            eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ.real.jwt
+            ------END NATS USER JWT------
+
+            -----BEGIN USER NKEY SEED-----
+            SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM
+            ------END USER NKEY SEED------
+            CREDS;
+
+        $result = CredentialsParser::parse($contents);
+
+        self::assertSame('eyJhbGciOiJlZDI1NTE5LW5rZXkiLCJ0eXAiOiJKV1QifQ.real.jwt', $result['jwt']);
+        self::assertSame('SUAM42LQBA2VJFRGZ3LHHK3PPJF3FRC3GPKMRSWO4FEZ3BWBSDX7ZJHPM', $result['nkeySeed']);
+    }
+
+    public function testFromFileParsesRealNscFixtureWhenPresent(): void
+    {
+        $fixture = dirname(__DIR__, 2) . '/build/nats/jwt/user.creds';
+        if (!is_file($fixture)) {
+            self::markTestSkipped('Real .creds fixture not present (run composer fixture:jwt).');
+        }
+
+        $result = CredentialsParser::fromFile($fixture);
+
+        self::assertStringStartsWith('ey', $result['jwt']);          // a real JWT
+        self::assertStringStartsWith('S', $result['nkeySeed']);      // a NATS NKey seed
+    }
+
     public function testParseRejectsMissingJwtBlock(): void
     {
         $contents = <<<'CREDS'
