@@ -11,6 +11,7 @@ use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Services\BasicJsonSchemaValidator;
+use IDCT\NATS\Services\ServiceEndpoint;
 use IDCT\NATS\Services\ServiceEndpointHandlerInterface;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
@@ -341,6 +342,81 @@ final class ServiceTest extends TestCase
         self::assertArrayHasKey('num_errors', $endpoint);
         self::assertArrayNotHasKey('requests', $endpoint);
         self::assertArrayNotHasKey('errors', $endpoint);
+    }
+
+    public function testServiceRejectsInvalidName(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Service name');
+        // A dot would break $SRV.PING.<name> subject construction / over-subscribe.
+        $client->service('bad.name', '1.0.0');
+    }
+
+    public function testServiceRejectsNonSemverVersion(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('semantic version');
+        $client->service('calc', 'v1');
+    }
+
+    public function testValidationRejectionEmitsRequestEnd(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.v 13 _INBOX.r 2\r\nhi\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $events = [];
+        $service = $client->service('val', '1.0.0')
+            ->addObserver(static function (string $event, ServiceEndpoint $endpoint, NatsMessage $message, array $context) use (&$events): void {
+                $events[] = $event;
+            })
+            ->withRequestValidator(static fn (NatsMessage $message, array $schema): string => 'bad input')
+            ->addEndpoint('v', 'svc.v', static fn (NatsMessage $message): string => 'ok', schema: ['type' => 'object']);
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        // A schema-rejected request must still emit the terminal request_end (so observer spans/gauges
+        // opened on request_start are not leaked).
+        self::assertSame(['request_start', 'request_error', 'request_end'], $events);
+    }
+
+    public function testStartRollsBackAndClearsStateOnPartialFailure(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // The second endpoint's subject is invalid (whitespace): addEndpoint accepts it, but the
+        // subscribe at start() fails after discovery + the first endpoint already subscribed.
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('good', 'svc.good', static fn (NatsMessage $message): string => 'ok')
+            ->addEndpoint('bad', 'bad subject', static fn (NatsMessage $message): string => 'no');
+
+        try {
+            $service->start()->await();
+            self::fail('Expected start() to throw on the invalid subject');
+        } catch (\Throwable) {
+            // expected
+        }
+
+        // A partial failure must leave no lingering SIDs and must NOT mark the service started, so a
+        // retried start() is not silently a no-op.
+        self::assertSame([], (new \ReflectionProperty($service, 'subscriptionSids'))->getValue($service));
+        self::assertFalse((new \ReflectionProperty($service, 'started'))->getValue($service));
     }
 
     /**

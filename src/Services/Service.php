@@ -28,6 +28,9 @@ final class Service
     /** @var array<int, int> */
     private array $subscriptionSids = [];
 
+    /** Whether start() has fully completed; distinct from the SID list so a partial failure is not mistaken for "running". */
+    private bool $started = false;
+
     /** @var array<string, ServiceEndpoint> */
     private array $endpoints = [];
 
@@ -59,6 +62,17 @@ final class Service
         private readonly ?string $description = null,
         private readonly array $metadata = [],
     ) {
+        // The name is interpolated into discovery subjects ($SRV.PING.<name>, $SRV.INFO.<name>, ...),
+        // so a dot/space/wildcard would crash start() mid-loop or over-subscribe to unrelated
+        // services. Validate it (and require a semantic version, per the NATS micro spec) up front.
+        if (preg_match('/^[A-Za-z0-9_-]+$/', $name) !== 1) {
+            throw new \InvalidArgumentException('Service name must be non-empty and match ^[A-Za-z0-9_-]+$');
+        }
+
+        if (preg_match('/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/', $version) !== 1) {
+            throw new \InvalidArgumentException('Service version must be a semantic version, e.g. "1.2.3"');
+        }
+
         $this->id = bin2hex(random_bytes(8));
         $this->startedAt = gmdate('Y-m-d\TH:i:s\Z');
     }
@@ -146,87 +160,117 @@ final class Service
     public function start(): Future
     {
         return async(function (): void {
-            if ($this->subscriptionSids !== []) {
+            if ($this->started) {
                 return;
             }
 
-            $this->subscribeDiscovery()->await();
+            // Collect new SIDs locally and only commit them on full success, so a subscribe failing
+            // mid-loop does not leave the service half-initialized (with the idempotency guard then
+            // masking a retry as a no-op). On failure, roll back and rethrow so start() can be retried.
+            $sids = [];
 
-            foreach ($this->endpoints as $subject => $endpoint) {
-                $sid = $this->client->subscribe(
-                    $subject,
-                    function (NatsMessage $message) use ($subject, $endpoint): void {
-                        $endpoint->requests++;
-                        $started = hrtime(true);
-                        $context = $this->buildObserverContext($message, $subject);
+            try {
+                $this->subscribeDiscovery($sids)->await();
 
-                        $this->notifyObservers('request_start', $endpoint, $message, $context);
+                foreach ($this->endpoints as $subject => $endpoint) {
+                    $sid = $this->client->subscribe(
+                        $subject,
+                        function (NatsMessage $message) use ($subject, $endpoint): void {
+                            $endpoint->requests++;
+                            $started = hrtime(true);
+                            $context = $this->buildObserverContext($message, $subject);
 
-                        if ($endpoint->schema !== null && $this->requestValidator !== null) {
-                            $validationError = ($this->requestValidator)($message, $endpoint->schema);
-                            if ($validationError !== null) {
+                            $this->notifyObservers('request_start', $endpoint, $message, $context);
+
+                            if ($endpoint->schema !== null && $this->requestValidator !== null) {
+                                $validationError = ($this->requestValidator)($message, $endpoint->schema);
+                                if ($validationError !== null) {
+                                    $duration = (int) max(0, hrtime(true) - $started);
+                                    $endpoint->errors++;
+                                    $endpoint->lastError = $validationError;
+                                    $endpoint->processingTimeNs += $duration;
+
+                                    $this->notifyObservers('request_error', $endpoint, $message, $context + [
+                                        'code' => 'VALIDATION_ERROR',
+                                        'error' => $validationError,
+                                    ]);
+
+                                    $this->publishResponse($message->replyTo, $this->errorPayload(
+                                        code: 'VALIDATION_ERROR',
+                                        message: $validationError,
+                                        correlationId: is_string($context['correlation_id'] ?? null)
+                                            ? $context['correlation_id']
+                                            : null,
+                                    ));
+
+                                    // Emit the terminal request_end on the rejection path too, so an
+                                    // observer that opened a span/timer/gauge on request_start does not
+                                    // leak it for schema-rejected (often hostile) traffic.
+                                    $this->notifyObservers('request_end', $endpoint, $message, $context + [
+                                        'duration_ns' => $duration,
+                                    ]);
+
+                                    return;
+                                }
+                            }
+
+                            try {
+                                $response = ($this->handlers[$subject])($message);
+                            } catch (\Throwable $e) {
                                 $endpoint->errors++;
-                                $endpoint->lastError = $validationError;
-                                $endpoint->processingTimeNs += (int) max(0, hrtime(true) - $started);
-
+                                $endpoint->lastError = $e->getMessage();
                                 $this->notifyObservers('request_error', $endpoint, $message, $context + [
-                                    'code' => 'VALIDATION_ERROR',
-                                    'error' => $validationError,
+                                    'code' => 'HANDLER_ERROR',
+                                    'error' => $e->getMessage(),
                                 ]);
 
-                                $this->publishResponse($message->replyTo, $this->errorPayload(
-                                    code: 'VALIDATION_ERROR',
-                                    message: $validationError,
+                                // Do not leak the raw exception text to the (possibly untrusted)
+                                // requester: it can disclose internal paths, queries, or secrets. The
+                                // requester gets a generic message under the HANDLER_ERROR code; the
+                                // real detail stays server-side in lastError and the request_error event.
+                                $response = $this->errorPayload(
+                                    code: 'HANDLER_ERROR',
+                                    message: 'Internal server error',
                                     correlationId: is_string($context['correlation_id'] ?? null)
                                         ? $context['correlation_id']
                                         : null,
-                                ));
+                                );
+                            } finally {
+                                $duration = (int) max(0, hrtime(true) - $started);
+                                $endpoint->processingTimeNs += $duration;
 
+                                $this->notifyObservers('request_end', $endpoint, $message, $context + [
+                                    'duration_ns' => $duration,
+                                ]);
+                            }
+
+                            if ($response === null) {
                                 return;
                             }
-                        }
 
-                        try {
-                            $response = ($this->handlers[$subject])($message);
-                        } catch (\Throwable $e) {
-                            $endpoint->errors++;
-                            $endpoint->lastError = $e->getMessage();
-                            $this->notifyObservers('request_error', $endpoint, $message, $context + [
-                                'code' => 'HANDLER_ERROR',
-                                'error' => $e->getMessage(),
-                            ]);
+                            $this->publishResponse($message->replyTo, $response);
+                        },
+                        $endpoint->queueGroup,
+                    )->await();
 
-                            // Do not leak the raw exception text to the (possibly untrusted) requester:
-                            // it can disclose internal paths, queries, or secrets. The requester gets a
-                            // generic message under the HANDLER_ERROR code; the real detail stays
-                            // server-side in lastError and the request_error observer event above.
-                            $response = $this->errorPayload(
-                                code: 'HANDLER_ERROR',
-                                message: 'Internal server error',
-                                correlationId: is_string($context['correlation_id'] ?? null)
-                                    ? $context['correlation_id']
-                                    : null,
-                            );
-                        } finally {
-                            $duration = (int) max(0, hrtime(true) - $started);
-                            $endpoint->processingTimeNs += $duration;
+                    $sids[] = $sid;
+                }
+            } catch (\Throwable $e) {
+                // Roll back any subscriptions made so far so a retried start() is not blocked and no
+                // half-initialized endpoints linger.
+                foreach ($sids as $sid) {
+                    try {
+                        $this->client->unsubscribe($sid)->await();
+                    } catch (\Throwable) {
+                        // Best-effort rollback; the connection may already be gone.
+                    }
+                }
 
-                            $this->notifyObservers('request_end', $endpoint, $message, $context + [
-                                'duration_ns' => $duration,
-                            ]);
-                        }
-
-                        if ($response === null) {
-                            return;
-                        }
-
-                        $this->publishResponse($message->replyTo, $response);
-                    },
-                    $endpoint->queueGroup,
-                )->await();
-
-                $this->subscriptionSids[] = $sid;
+                throw $e;
             }
+
+            $this->subscriptionSids = $sids;
+            $this->started = true;
         });
     }
 
@@ -251,6 +295,7 @@ final class Service
             } finally {
                 // Always clear state so a subsequent start() can re-subscribe cleanly.
                 $this->subscriptionSids = [];
+                $this->started = false;
             }
         });
     }
@@ -362,9 +407,14 @@ final class Service
     /**
      * @return Future<void>
      */
-    private function subscribeDiscovery(): Future
+    /**
+     * @param array<int, int> $sids Collector for the created subscription SIDs (by reference) so the
+     *                              caller can commit or roll them back atomically.
+     * @return Future<void>
+     */
+    private function subscribeDiscovery(array &$sids): Future
     {
-        return async(function (): void {
+        return async(function () use (&$sids): void {
             $subjects = [
                 '$SRV.PING',
                 '$SRV.PING.' . $this->name,
@@ -396,7 +446,7 @@ final class Service
                     }
                 })->await();
 
-                $this->subscriptionSids[] = $sid;
+                $sids[] = $sid;
             }
         });
     }

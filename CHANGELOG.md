@@ -24,6 +24,22 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` The protocol parser now bounds an unterminated control line (no CRLF) to 1 MiB
+  and raises a `ProtocolException` instead of buffering it without limit. `maxFrameSize`
+  only bounded MSG/HMSG payloads (parsed after their control line completes), so a peer
+  streaming bytes without a CRLF could drive the client to OOM.
+- `[bugfix]` `Service::start()` is now atomic: if a subscribe fails partway, it rolls back
+  the subscriptions already made and rethrows, instead of leaving the service
+  half-initialized with the idempotency guard then masking a retried `start()` as a no-op.
+  A separate `started` flag tracks completion.
+- `[bugfix]` Microservice request observers now receive the terminal `request_end` event
+  on the schema-validation rejection path too (previously only `request_start` →
+  `request_error` fired), so observer spans/timers/gauges are not leaked for rejected
+  (often hostile) traffic.
+- `[bugfix]` `NatsClient::service()` now validates the service name
+  (`^[A-Za-z0-9_-]+$`) and requires a semantic version, failing fast instead of crashing
+  `start()` mid-loop or over-subscribing to discovery subjects when the name contains a
+  dot/space/wildcard.
 - `[bugfix]` `request()` (and every JetStream/KV/Object Store call built on it) no longer
   throws a spurious `TimeoutException` when the reply is delivered in the same event-loop
   tick the deadline fires. The wait loop now checks for completion before the deadline, so

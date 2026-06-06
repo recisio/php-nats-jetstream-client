@@ -352,6 +352,27 @@ final class ProtocolParserTest extends TestCase
         $parser->push("HMSG subject 1 20 10\r\n1234567890\r\n");
     }
 
+    public function testBuffersSubCapControlLineWithoutCrlf(): void
+    {
+        $parser = new ProtocolParser();
+
+        // A partial control line with no CRLF yet is buffered (waiting for more), not rejected.
+        $frames = $parser->push(str_repeat('A', 1000));
+
+        self::assertSame([], $frames);
+    }
+
+    public function testRejectsUnterminatedControlLineExceedingBound(): void
+    {
+        $parser = new ProtocolParser();
+
+        // A peer streaming >1 MiB without a CRLF must be rejected, not buffered unbounded (OOM guard).
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Control line exceeds maximum length');
+
+        $parser->push(str_repeat('A', 1048576 + 1));
+    }
+
     public function testResyncsPastMalformedControlLineInsteadOfPoisoning(): void
     {
         $parser = new ProtocolParser();

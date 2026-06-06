@@ -12,6 +12,14 @@ use IDCT\NATS\Protocol\Enum\ProtocolFrameType;
  */
 final class ProtocolParser
 {
+    /**
+     * Maximum length of a single control line (everything up to CRLF: INFO, MSG/HMSG headers, -ERR,
+     * etc.). Real control lines are at most a few KB; this bounds an unterminated line so a peer
+     * streaming bytes without a CRLF cannot grow the buffer to OOM. maxFrameSize only bounds MSG/HMSG
+     * payloads, which are not parsed until their control line completes, so it does not cover this.
+     */
+    private const MAX_CONTROL_LINE_BYTES = 1048576; // 1 MiB
+
     private string $buffer = '';
 
     /** Maximum total frame size (headers + payload) accepted from the server. */
@@ -78,6 +86,12 @@ final class ProtocolParser
 
                 $lineEndPos = strpos($this->buffer, "\r\n", $offset);
                 if ($lineEndPos === false) {
+                    // No complete control line yet. Bound the unterminated line so a peer that streams
+                    // bytes without a CRLF cannot drive the buffer to unbounded growth (OOM).
+                    if (($bufferLength - $offset) > self::MAX_CONTROL_LINE_BYTES) {
+                        throw new ProtocolException('Control line exceeds maximum length without CRLF');
+                    }
+
                     break;
                 }
 
