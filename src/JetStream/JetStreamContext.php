@@ -182,11 +182,25 @@ final class JetStreamContext
     public function listStreams(array $options = []): Future
     {
         return async(function () use ($options): array {
-            $response = $this->requestJson(JetStreamApi::STREAM_LIST, $options);
-            /** @var list<array<string,mixed>> $streams */
-            $streams = is_array($response['streams'] ?? null) ? $response['streams'] : [];
+            $streams = [];
+            $offset = 0;
 
-            return array_map(static fn(array $s): StreamInfo => StreamInfo::fromArray($s), $streams);
+            do {
+                $response = $this->requestJson(JetStreamApi::STREAM_LIST, ['offset' => $offset] + $options);
+                /** @var list<array<string,mixed>> $page */
+                $page = is_array($response['streams'] ?? null) ? $response['streams'] : [];
+
+                foreach ($page as $stream) {
+                    $streams[] = StreamInfo::fromArray($stream);
+                }
+
+                $offset += count($page);
+                $total = is_int($response['total'] ?? null) ? $response['total'] : count($streams);
+                // Stop when the server has no more entries, or a page comes back empty (the empty-page
+                // guard prevents an infinite loop if `total` is inconsistent).
+            } while ($page !== [] && count($streams) < $total);
+
+            return $streams;
         });
     }
 
@@ -198,11 +212,23 @@ final class JetStreamContext
     public function listConsumers(string $stream): Future
     {
         return async(function () use ($stream): array {
-            $response = $this->requestJson(JetStreamApi::CONSUMER_LIST_PREFIX . $stream, []);
-            /** @var list<array<string,mixed>> $consumers */
-            $consumers = is_array($response['consumers'] ?? null) ? $response['consumers'] : [];
+            $consumers = [];
+            $offset = 0;
 
-            return array_map(static fn(array $c): ConsumerInfo => ConsumerInfo::fromArray($c), $consumers);
+            do {
+                $response = $this->requestJson(JetStreamApi::CONSUMER_LIST_PREFIX . $stream, ['offset' => $offset]);
+                /** @var list<array<string,mixed>> $page */
+                $page = is_array($response['consumers'] ?? null) ? $response['consumers'] : [];
+
+                foreach ($page as $consumer) {
+                    $consumers[] = ConsumerInfo::fromArray($consumer);
+                }
+
+                $offset += count($page);
+                $total = is_int($response['total'] ?? null) ? $response['total'] : count($consumers);
+            } while ($page !== [] && count($consumers) < $total);
+
+            return $consumers;
         });
     }
 

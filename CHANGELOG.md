@@ -37,6 +37,14 @@ were all verified working and are unchanged.
   (delivery) sequence, the out-of-order message is discarded, and the consumer is
   recreated from the last in-order stream sequence (resuming from the next available
   message if the restart point was pruned).
+- `[bugfix]` `listStreams()` and `listConsumers()` now paginate through the JetStream
+  LIST API (`offset`/`total`). Previously they read only the first page, silently
+  truncating accounts with more than the server page size (256) of streams, or a
+  stream with more than 256 consumers.
+- `[bugfix]` `PullConsumerIterator` infinite mode (`setIterations(null)`) now keeps
+  polling past routine empty windows (404/408) instead of terminating on the first
+  idle gap, so a long-running worker is no longer killed by a quiet period. Terminal
+  errors (e.g. 409 consumer deleted) still stop the loop, and finite mode is unchanged.
 - `[bugfix]` The heartbeat watchdog now resets the outstanding-ping counter only when
   an actual PONG is received, not on any inbound bytes. Previously a server that
   stopped answering PINGs but kept trickling data (or a proxy replaying buffered data)

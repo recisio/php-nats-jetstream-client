@@ -147,4 +147,40 @@ final class PullConsumerIteratorTest extends TestCase
 
         self::assertSame(0, $total);
     }
+
+    public function testHandleInfiniteModeContinuesPastEmptyWindow(): void
+    {
+        $noMessages = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $deleted = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\n\r\n";
+        $h404 = strlen($noMessages);
+        $h409 = strlen($deleted);
+        $body = 'order-1';
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // iter 1 (sid 1): empty window (404) — infinite mode must keep polling, not stop.
+            sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $h404, $h404, $noMessages),
+            // iter 2 (sid 2): a message arrives after the idle gap.
+            sprintf("MSG _INBOX.JS.FETCH.any 2 \$JS.ACK.ORDERS.PROC.1.1.1.123.0 %d\r\n%s\r\n", strlen($body), $body),
+            // iter 3 (sid 3): a terminal error (consumer deleted) stops the loop.
+            sprintf("HMSG _INBOX.JS.FETCH.any 3 %d %d\r\n%s\r\n", $h409, $h409, $deleted),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $processed = [];
+        $total = $client->jetStream()
+            ->pullConsumer('ORDERS', 'PROC')
+            ->setBatching(1)
+            ->setExpiresMs(100)
+            ->setIterations(null) // infinite
+            ->handle(function (NatsMessage $msg, JetStreamContext $js) use (&$processed): void {
+                $processed[] = $msg->payload;
+            })->await();
+
+        // The message after the empty window is delivered (old code stopped on the first 404).
+        self::assertSame(1, $total);
+        self::assertSame(['order-1'], $processed);
+    }
 }

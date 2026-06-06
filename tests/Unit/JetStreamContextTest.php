@@ -14,6 +14,7 @@ use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\Configuration\StreamSource;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\JetStreamContext;
+use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
 use IDCT\NATS\JetStream\Schedule;
 use IDCT\NATS\Tests\Support\FakeTransport;
@@ -1183,6 +1184,44 @@ final class JetStreamContextTest extends TestCase
         self::assertSame('B', $consumers[1]->name);
         self::assertTrue($consumers[1]->push);
         self::assertStringContainsString('$JS.API.CONSUMER.LIST.ORDERS', implode('', $transport->writes));
+    }
+
+    public function testListStreamsPaginatesAcrossPages(): void
+    {
+        $page1 = json_encode([
+            'total' => 3,
+            'offset' => 0,
+            'streams' => [
+                ['config' => ['name' => 'S1', 'subjects' => ['a.>']]],
+                ['config' => ['name' => 'S2', 'subjects' => ['b.>']]],
+            ],
+        ], JSON_THROW_ON_ERROR);
+        $page2 = json_encode([
+            'total' => 3,
+            'offset' => 2,
+            'streams' => [
+                ['config' => ['name' => 'S3', 'subjects' => ['c.>']]],
+            ],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $page1), (string) $page1),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen((string) $page2), (string) $page2),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $streams = $client->jetStream()->listStreams()->await();
+
+        // All three streams are returned across two pages (server page size would otherwise truncate).
+        self::assertSame(['S1', 'S2', 'S3'], array_map(static fn (StreamInfo $s): string => $s->name, $streams));
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('"offset":0', $writes);
+        self::assertStringContainsString('"offset":2', $writes);
     }
 
     public function testGetStreamMessage(): void

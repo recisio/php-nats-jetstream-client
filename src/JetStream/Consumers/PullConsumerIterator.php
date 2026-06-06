@@ -131,8 +131,15 @@ final class PullConsumerIterator
                         $this->batch,
                         $this->expiresMs,
                     )->await();
-                } catch (JetStreamException) {
-                    // No messages within timeout — stop iterating.
+                } catch (JetStreamException $e) {
+                    // 404 (no messages) and 408 (request timeout) are routine empty-window results.
+                    // In infinite mode keep polling so a long-running worker is not killed by the
+                    // first idle gap; in finite mode preserve the existing stop-on-empty behavior.
+                    if ($this->iterations === null && in_array($e->getCode(), [404, 408], true)) {
+                        continue;
+                    }
+
+                    // Finite mode, or a terminal error (e.g. 409 consumer deleted): stop iterating.
                     break;
                 }
 
