@@ -2,6 +2,7 @@
 
 [![codecov](https://codecov.io/gh/ideaconnect/php-nats-jetstream-client/graph/badge.svg?token=A816f4EXon)](https://codecov.io/gh/ideaconnect/php-nats-jetstream-client)
 [![CI](https://github.com/ideaconnect/php-nats-jetstream-client/actions/workflows/ci.yml/badge.svg)](https://github.com/ideaconnect/php-nats-jetstream-client/actions/workflows/ci.yml)
+[![Made in EU](https://raw.githubusercontent.com/ideaconnect/made-in-eu/main/software-badge/made-in-eu.svg)](https://github.com/ideaconnect/made-in-eu)
 
 Async-first NATS and JetStream client for PHP 8.2+ with first-class support for core NATS messaging, JetStream, KeyValue, ObjectStore, and NATS microservices.
 
