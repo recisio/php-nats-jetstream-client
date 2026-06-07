@@ -165,7 +165,19 @@ final class ProtocolCodec
         array $headers,
         ?string $replyTo = null,
     ): string {
-        $headerBlock = NatsHeaders::toWireBlock($headers);
+        return $this->encodeHeaderPublishBlock($subject, $payload, NatsHeaders::toWireBlock($headers), $replyTo);
+    }
+
+    /**
+     * Builds an HPUB frame from an ALREADY-encoded header wire block, so callers that also need the
+     * block's size (or that retry) build and validate it once instead of re-running toWireBlock().
+     */
+    public function encodeHeaderPublishBlock(
+        string $subject,
+        string $payload,
+        string $headerBlock,
+        ?string $replyTo = null,
+    ): string {
         $headerBytes = strlen($headerBlock);
         $totalBytes = $headerBytes + strlen($payload);
 

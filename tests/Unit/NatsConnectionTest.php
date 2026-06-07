@@ -1244,6 +1244,25 @@ final class NatsConnectionTest extends TestCase
         self::assertStringContainsString("PING\r\n", $writes);
     }
 
+    public function testDrainedSubscriptionQueuesAreNotRetained(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG events 1 5\r\nhello\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+        $connection->subscribe('events', function (): void {})->await();
+        $connection->processIncoming()->await();
+
+        // Once delivered, the per-SID pending queue is removed rather than retained as an empty queue,
+        // so the per-chunk drain scan stays proportional to subscriptions with pending messages.
+        $pending = (new \ReflectionProperty(NatsConnection::class, 'pendingMessages'))->getValue($connection);
+        self::assertSame([], $pending);
+    }
+
     public function testDrainDoesNotResurrectConnectionOnReadFailure(): void
     {
         // Connect, then the flush read FAILS (peer close / EOF) instead of returning the drain PONG.

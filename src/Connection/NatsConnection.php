@@ -245,14 +245,16 @@ final class NatsConnection
             if ($replyTo !== null) {
                 $this->validateSubject($replyTo);
             }
-            $headerBytes = strlen(NatsHeaders::toWireBlock($headers));
-            $this->enforceMaxPayload($headerBytes + strlen($payload));
+            // Build (and CR/LF-validate) the header wire block once, then reuse it for sizing and for
+            // each write attempt, instead of re-running toWireBlock() per call.
+            $headerBlock = NatsHeaders::toWireBlock($headers);
+            $this->enforceMaxPayload(strlen($headerBlock) + strlen($payload));
 
             try {
-                $this->transport->write($this->codec->encodeHeaderPublish($subject, $payload, $headers, $replyTo))->await();
+                $this->transport->write($this->codec->encodeHeaderPublishBlock($subject, $payload, $headerBlock, $replyTo))->await();
             } catch (\Throwable) {
                 $this->recoverConnection();
-                $this->transport->write($this->codec->encodeHeaderPublish($subject, $payload, $headers, $replyTo))->await();
+                $this->transport->write($this->codec->encodeHeaderPublishBlock($subject, $payload, $headerBlock, $replyTo))->await();
             }
         });
     }
@@ -1209,7 +1211,15 @@ final class NatsConnection
      */
     private function drainPendingForSid(int $sid): void
     {
-        if (!isset($this->pendingMessages[$sid], $this->subscriptions[$sid])) {
+        if (!isset($this->pendingMessages[$sid])) {
+            return;
+        }
+
+        if (!isset($this->subscriptions[$sid])) {
+            // The subscription is gone; its backlog is undeliverable. Drop it instead of retaining an
+            // entry that drainAllPending() would re-scan on every chunk.
+            unset($this->pendingMessages[$sid]);
+
             return;
         }
 
@@ -1224,11 +1234,21 @@ final class NatsConnection
             $message = $queue->dequeue();
             $this->subscriptions[$sid]($message);
         }
+
+        if ($queue->isEmpty()) {
+            // Don't retain a drained (empty) queue: keep drainAllPending()'s per-chunk scan
+            // proportional to the subscriptions that actually have pending messages, not every
+            // subscription that has ever received one.
+            unset($this->pendingMessages[$sid]);
+        }
     }
 
     private function cleanupRequestSubscription(int $sid): void
     {
-        if (!isset($this->subscriptionMeta[$sid], $this->subscriptions[$sid], $this->pendingMessages[$sid])) {
+        // Clean up based on the subscription itself, not on a pending message queue: the queue is
+        // created lazily and removed once drained, so requiring it here would skip the UNSUB for any
+        // request that actually received a reply.
+        if (!isset($this->subscriptionMeta[$sid], $this->subscriptions[$sid])) {
             return;
         }
 

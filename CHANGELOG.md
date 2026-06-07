@@ -27,6 +27,13 @@ were all verified working and are unchanged.
 - `[bugfix]` The CONNECT frame now advertises the resolved client library version (from the
   installed Composer package, with a constant fallback) instead of the stale hardcoded
   `0.1.0-dev`, so server `connz`/monitoring attributes traffic to the correct version.
+- `[bugfix]` Header publishes (`publishWithHeaders()`, KV/Object Store metadata writes) now
+  build and CR/LF-validate the header wire block once and reuse it for sizing and each write
+  attempt, instead of re-running `toWireBlock()` two or three times per publish.
+- `[bugfix]` The per-chunk subscription drain no longer rescans every subscription that has
+  ever received a message: a drained (or undeliverable) per-SID queue is now released, so the
+  drain stays proportional to the subscriptions with pending messages. This also fixed a latent
+  coupling where the request UNSUB cleanup was gated on the (now-released) pending queue.
 - `[bugfix]` Object Store `get()`/`getToCallback()` now fetch a single-chunk object with one
   Direct Get on its chunk subject, instead of creating, pulling from, and deleting a transient
   ephemeral consumer — turning the common small-object download from 4 round-trips into 1 (plus

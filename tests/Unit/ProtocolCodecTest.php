@@ -26,6 +26,23 @@ final class ProtocolCodecTest extends TestCase
         self::assertStringContainsString('"name":"test-client"', $result);
     }
 
+    public function testEncodeHeaderPublishBlockMatchesEncodeHeaderPublish(): void
+    {
+        $codec = new ProtocolCodec();
+        $headers = ['KV-Operation' => 'PUT', 'Nats-Rollup' => 'sub'];
+        $block = \IDCT\NATS\Core\NatsHeaders::toWireBlock($headers);
+
+        // The precomputed-block variant must produce byte-identical frames (with and without replyTo).
+        self::assertSame(
+            $codec->encodeHeaderPublish('subj', 'body', $headers),
+            $codec->encodeHeaderPublishBlock('subj', 'body', $block),
+        );
+        self::assertSame(
+            $codec->encodeHeaderPublish('subj', 'body', $headers, '_INBOX.r'),
+            $codec->encodeHeaderPublishBlock('subj', 'body', $block, '_INBOX.r'),
+        );
+    }
+
     public function testEncodeConnectAdvertisesResolvedClientVersion(): void
     {
         $result = (new ProtocolCodec())->encodeConnect(new NatsOptions());
