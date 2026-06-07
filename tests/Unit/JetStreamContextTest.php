@@ -1340,6 +1340,24 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(42, $parsed);
     }
 
+    public function testExtractSequencesParseElevenTokenDomainReplySubject(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $streamMethod = new \ReflectionMethod($js, 'extractStreamSequence');
+        $consumerMethod = new \ReflectionMethod($js, 'extractConsumerSequence');
+
+        // Domain-qualified ACK subject WITHOUT a trailing random token (11 tokens): stream sequence at
+        // index 7, consumer sequence at index 8 — same as the 12-token form. Previously fell through to
+        // null, silently disabling ordered-consumer gap detection and KV/ObjectStore revision on
+        // JetStream-domain/leaf deployments.
+        $message = new NatsMessage('s', 1, '$JS.ACK.hub.ACC123.ORDERS.CONS.1.42.7.123.0', 'x');
+
+        self::assertSame(42, $streamMethod->invoke($js, $message));
+        self::assertSame(7, $consumerMethod->invoke($js, $message));
+    }
+
     public function testExtractStreamSequenceReturnsNullForInvalidReplySubject(): void
     {
         $client = new NatsClient(new NatsOptions(), new FakeTransport());

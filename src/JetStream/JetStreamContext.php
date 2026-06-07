@@ -1047,13 +1047,14 @@ final class JetStreamContext
             return null;
         }
 
-        // Two ACK reply-subject shapes exist (matching nats.go token-count detection):
+        // Three ACK reply-subject shapes exist:
         //   9 tokens:  $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>
-        //  12 tokens:  $JS.ACK.<domain>.<account>.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>.<token>
-        // The stream sequence sits at index 5 in the short form and index 7 in the domain form.
+        //  11 tokens:  $JS.ACK.<domain>.<account>.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>
+        //  12 tokens:  ...the 11-token domain form plus a trailing random token.
+        // The stream sequence sits at index 5 in the short form and index 7 in both domain forms.
         $streamSeqIndex = match (count($parts)) {
             9 => 5,
-            12 => 7,
+            11, 12 => 7,
             default => null,
         };
 
@@ -1085,11 +1086,11 @@ final class JetStreamContext
             return null;
         }
 
-        // The consumer sequence sits at index 6 in the short (9-token) form and index 8 in the
-        // domain-qualified (12-token) form.
+        // The consumer sequence sits at index 6 in the short (9-token) form and index 8 in both
+        // domain-qualified forms (11-token, and 11 + a trailing random token = 12).
         $consumerSeqIndex = match (count($parts)) {
             9 => 6,
-            12 => 8,
+            11, 12 => 8,
             default => null,
         };
 

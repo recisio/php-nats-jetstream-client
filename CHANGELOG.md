@@ -24,6 +24,11 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Ordered-consumer gap detection and `streamSequenceOf()` (used for KV/Object Store
+  revision) now parse the 11-token domain-qualified ACK reply subject
+  (`$JS.ACK.<domain>.<account>.<stream>...` without the trailing random token), not just the 9- and
+  12-token forms. Previously the sequence fell through to null on JetStream-domain/leaf deployments,
+  silently disabling gap detection and revision tracking there.
 - `[bugfix]` The plaintext-credentials fail-safe now also covers the handshake-first TLS path. The
   guard that refuses to write CONNECT (which carries jwt/sig/nkey/user/pass/token) over a still-plain
   socket was gated on the non-handshake-first branch, so `tlsHandshakeFirst=true` combined with no TLS
