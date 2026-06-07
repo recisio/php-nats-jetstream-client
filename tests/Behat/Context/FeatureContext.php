@@ -1876,11 +1876,16 @@ final class FeatureContext implements Context
     public function theObjectShouldBeMarkedAsDeleted(string $name): void
     {
         $bucket = $this->requireValue($this->state->objectStoreBucket, 'Object Store bucket');
-        $objectData = $this->client('primary')->jetStream()->objectStore($bucket)->get($name)->await();
-        $this->state->lastObjectData = $objectData?->data;
-        $this->state->lastObjectInfo = $objectData?->info;
+        $store = $this->client('primary')->jetStream()->objectStore($bucket);
 
-        if ($objectData === null || !$objectData->info->deleted || $objectData->data !== null) {
+        // A deleted object reads as not-available (get() returns null, like a missing object); the
+        // tombstone metadata is observable via info().
+        $objectData = $store->get($name)->await();
+        $info = $store->info($name)->await();
+        $this->state->lastObjectData = $objectData?->data;
+        $this->state->lastObjectInfo = $info;
+
+        if ($objectData !== null || $info === null || !$info->deleted) {
             throw new RuntimeException(sprintf('Expected object "%s" to be marked as deleted.', $name));
         }
     }
