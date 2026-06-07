@@ -157,8 +157,10 @@ final class SubscriptionQueue
     /**
      * Fetches all available messages up to the given limit.
      *
-     * Uses the configured timeout to wait for messages. Returns early
-     * if no new messages arrive after a processIncoming cycle.
+     * With a configured timeout (see {@see setTimeout()}), waits up to the full window for up to
+     * `$limit` messages, tolerating transient empty reads within the window. With no timeout
+     * configured it performs a single best-effort `processIncoming()` cycle and returns whatever is
+     * buffered (it does not block).
      *
      * @param int|null $limit Maximum messages to return (null = unlimited).
      * @return list<NatsMessage>

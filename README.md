@@ -569,6 +569,8 @@ _Verified by: [KeyValueBucketTest](tests/Unit/KeyValueBucketTest.php); [JetStrea
 
 declare(strict_types=1);
 
+use Amp\CancelledException;
+use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\JetStream\KeyValue\KeyValueEntry;
@@ -578,6 +580,12 @@ $client->connect()->await();
 
 $kv = $client->jetStream()->keyValue('cfg');
 $kv->create()->await();
+
+// Register the watcher BEFORE the writes it should observe: watch() delivers live updates only
+// (deliver_policy=new) and does not replay pre-existing values. Each entry carries its revision.
+$watchSid = $kv->watch(static function (KeyValueEntry $entry): void {
+	echo $entry->key . ':' . ($entry->value ?? '<deleted>') . ' (rev ' . ($entry->revision ?? 0) . ')' . PHP_EOL;
+}, 'theme')->await();
 
 $kv->put('theme', 'dark')->await();
 $entry = $kv->get('theme')->await();
@@ -593,13 +601,17 @@ echo ($all['theme'] ?? '') . PHP_EOL;
 $status = $kv->getStatus()->await();
 echo $status['stream'] . PHP_EOL;
 
-$watchSid = $kv->watch(static function (KeyValueEntry $entry): void {
-	echo $entry->key . ':' . ($entry->value ?? '<deleted>') . PHP_EOL;
-}, 'theme')->await();
-
 $kv->delete('theme')->await();
 $kv->purge('theme')->await();
-$client->processIncoming()->await();
+
+// Drive delivery so the watcher receives the buffered updates, bounded so it cannot block forever.
+try {
+	$cancellation = new TimeoutCancellation(2.0);
+	while (true) {
+		$client->processIncoming($cancellation)->await();
+	}
+} catch (CancelledException) {
+}
 
 $client->unsubscribe($watchSid)->await();
 $kv->deleteBucket()->await();
@@ -1038,7 +1050,7 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 
 ### Credentials File Authentication
 
-_Verified by: [CredentialsParserTest::testFromFileReadsValidCredsFile](tests/Unit/CredentialsParserTest.php), [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php); [features/auth/jwt_and_nkey_auth.feature](features/auth/jwt_and_nkey_auth.feature)._
+_Verified by: [CredentialsParserTest](tests/Unit/CredentialsParserTest.php) (`testParseAcceptsCanonicalNscMarkersWithSixDashEnd`, `testFromFileParsesRealNscFixtureWhenPresent`), [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php); [features/auth/jwt_and_nkey_auth.feature](features/auth/jwt_and_nkey_auth.feature)._
 
 ```php
 <?php
@@ -1264,7 +1276,7 @@ The client also applies asynchronous `INFO` updates received after connect, so `
 
 _Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testIdleConnectionStaysOpenViaHeartbeatSelfRead`, `testHeartbeatReadHandlesEmptyErrorAndFatalFrames`, `testRequestTimeoutCancelsReadAndAllowsSubsequentRequest`)._
 
-The heartbeat timer answers its own `PONG`: after sending a `PING` it performs a short, bounded read to consume the reply (unless an application `processIncoming()` read is already in flight). Liveness detection therefore does not depend on the application continuously calling `processIncoming()`, so an otherwise idle connection (for example a pure publisher) is not closed by spurious `maxPingsOut` detection. Any successful read also resets the outstanding-ping counter.
+The heartbeat timer answers its own `PONG`: after sending a `PING` it performs a short, bounded read to consume the reply (unless an application `processIncoming()` read is already in flight). Liveness detection therefore does not depend on the application continuously calling `processIncoming()`, so an otherwise idle connection (for example a pure publisher) is not closed by spurious `maxPingsOut` detection. Only an actual server `PONG` resets the outstanding-ping counter — other inbound frames (data, `INFO`, `PING`) do not — so a server that keeps sending data but stops answering `PING`s is still detected via `maxPingsOut`.
 
 Request and pull-fetch timeouts cancel the underlying socket read rather than leaving it pending. A timed-out `request()` (or `fetchBatch()`/`fetchNext()`) cleanly releases the read, so it cannot orphan an in-flight read or trigger a spurious reconnect on the next operation.
 
@@ -1288,7 +1300,7 @@ The initial handshake is bounded by `connectTimeoutMs`, not by a fixed number of
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testSubscribeOrderedConsumerRecreatesOnSequenceGap`, `testSubscribeOrderedConsumerDeliversFilteredMessagesWithoutSpuriousRecreate`); [JetStreamIntegrationTest::testJetStreamOrderedConsumerWithFilteredSubjectAfterPriorMessages](tests/Integration/JetStreamIntegrationTest.php)._
 
-`subscribeOrderedConsumer()` tracks the JetStream **consumer** delivery sequence (which is contiguous per delivery, even for a filtered consumer over a stream that also carries non-matching subjects). If a push is missed — the consumer sequence skips — the consumer is transparently deleted and recreated starting just after the last in-order message; the out-of-order message that exposed the gap is **discarded** (not forwarded), and the recreated consumer replays the missing range in order. Delivery to your callback therefore stays in order and gap-free, with no duplicates and no recreate storm. If the restart point has been pruned/expired, recovery simply resumes from the next available message.
+`subscribeOrderedConsumer()` tracks the JetStream **consumer** delivery sequence (which is contiguous per delivery, even for a filtered consumer over a stream that also carries non-matching subjects). If a push is missed — the consumer sequence skips — the consumer is transparently deleted and recreated starting just after the last in-order message; the out-of-order message that exposed the gap is **discarded** (not forwarded), and the recreated consumer replays the missing range in order. Delivery to your callback therefore stays in order and gap-free, with no duplicates and no recreate storm. If the restart point has been pruned/expired, recovery resumes from the next available message. If the recreate itself fails (for example the stream was deleted or a leadership change is in progress), the error is contained to this ordered consumer rather than disrupting delivery to other subscriptions on the connection.
 
 ## Configuration Option Mapping
 
