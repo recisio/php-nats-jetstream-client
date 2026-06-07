@@ -43,6 +43,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [KeyValue Bucket](#keyvalue-bucket)
 - [Object Store Bucket](#object-store-bucket)
 - [Object Store Streaming to Callback](#object-store-streaming-to-callback)
+- [Object Store Streaming Upload](#object-store-streaming-upload)
 - [Services Framework](#services-framework)
 - [Services: SCHEMA Discovery](#services-schema-discovery)
 - [Graceful Drain](#graceful-drain)
@@ -88,7 +89,8 @@ Current functionality includes:
 - JetStream stream message get by sequence — both the regular `STREAM.MSG.GET` request and the Direct Get API (`directGetStreamMessage()` / `directGetLastMessageForSubject()`)
 - Scheduled publish (`@at` support)
 - KeyValue API (bucket lifecycle with history/TTL/storage options, put/get/update/delete/purge, watch, getAll/status)
-- ObjectStore API (bucket lifecycle, put/get/delete/list/watch, chunked uploads, SHA-256 digest verification)
+- ObjectStore API (bucket lifecycle, put/get/delete/list/watch, chunked uploads, streaming upload via `putStream()`, SHA-256 digest verification)
+- Connection `flush()` (PING/PONG round-trip) to confirm the server has processed prior writes
 - Microservices framework (service registration, PING/INFO/STATS/SCHEMA discovery, grouped endpoints)
 - Server authorization methods: token, username/password, JWT + nonce signer, built-in NKey seed signer, credentials file parser
 - Standalone NKey authentication (Ed25519 challenge signing without JWT)
@@ -683,6 +685,42 @@ $info = $store->getToCallback('logo.txt', static function (string $chunk): void 
 
 echo PHP_EOL;
 echo $info?->name . PHP_EOL;
+
+$store->deleteBucket()->await();
+$client->disconnect()->await();
+```
+
+### Object Store Streaming Upload
+
+_Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testPutStreamReChunksAndComputesDigestIncrementally`, `testPutStreamReChunksLargeBlockAcrossManyChunks`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamObjectStorePutStreamRoundTrip`)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$store = $client->jetStream()->objectStore('assets');
+$store->create()->await();
+
+// putStream() pulls the object's bytes from a producer callback (return the next block, or null at
+// end of stream), so the whole payload is never held in memory. Blocks of any size are re-chunked to
+// the bucket's chunk size, published in bounded in-flight windows, and the SHA-256 digest is computed
+// incrementally — the streaming counterpart to getToCallback().
+$handle = fopen('/path/to/large.bin', 'rb');
+$info = $store->putStream('large.bin', static function () use ($handle): ?string {
+	$block = fread($handle, 1 << 16);
+
+	return ($block === '' || $block === false) ? null : $block;
+})->await();
+fclose($handle);
+
+echo $info->size . ' bytes in ' . $info->chunks . ' chunks' . PHP_EOL;
 
 $store->deleteBucket()->await();
 $client->disconnect()->await();

@@ -44,6 +44,10 @@ final class NatsHeaders
     /**
      * Decodes a NATS/1.0 wire header block into a name/value map.
      *
+     * A repeated header name collapses to last-value-wins (the map is `array<string,string>`, not a
+     * multimap). This matches every header the client consumes — the system headers it reads
+     * (Status, Nats-Sequence, KV-Operation, Nats-Consumer-Stalled, ...) are single-valued.
+     *
      * @return array<string,string>
      */
     public static function fromWireBlock(?string $rawHeaders): array

@@ -142,7 +142,12 @@ final class KeyValueBucket
     }
 
     /**
-     * Loads the latest entry for a key, or null when no key exists.
+     * Loads the latest entry for a key.
+     *
+     * Returns null only when the key has no record at all (never written, or its history was purged
+     * out). When the latest record is a delete/purge marker the entry is still returned, with
+     * operation `DEL`/`PURGE` and a null value — inspect `$entry->operation` to tell a live value from
+     * a tombstone. (`getAll()`, by contrast, omits deleted keys entirely.)
      *
      * @return Future<KeyValueEntry|null>
      */
