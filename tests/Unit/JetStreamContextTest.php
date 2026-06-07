@@ -1340,6 +1340,25 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(42, $parsed);
     }
 
+    public function testKeyValueRejectsInvalidBucketName(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(\IDCT\NATS\Exception\JetStreamException::class);
+        $this->expectExceptionMessage('Invalid bucket name');
+        // A dotted name would mis-scope $KV.<bucket>.> subjects.
+        $client->jetStream()->keyValue('bad.bucket');
+    }
+
+    public function testObjectStoreRejectsInvalidBucketName(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(\IDCT\NATS\Exception\JetStreamException::class);
+        $this->expectExceptionMessage('Invalid bucket name');
+        $client->jetStream()->objectStore('bad/bucket');
+    }
+
     public function testExtractSequencesParseElevenTokenDomainReplySubject(): void
     {
         $client = new NatsClient(new NatsOptions(), new FakeTransport());

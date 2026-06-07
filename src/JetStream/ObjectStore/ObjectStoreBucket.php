@@ -6,6 +6,7 @@ namespace IDCT\NATS\JetStream\ObjectStore;
 
 use Amp\Future;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamApi;
@@ -52,7 +53,12 @@ final class ObjectStoreBucket
         private readonly JetStreamContext $jetStream,
         private readonly string $bucket,
         private readonly int $chunkSize = self::DEFAULT_CHUNK_SIZE,
-    ) {}
+    ) {
+        // A non-positive chunk size would make put()/putStream() loop forever (no chunk is ever full).
+        if ($this->chunkSize <= 0) {
+            throw new JetStreamException('Object Store chunk size must be a positive number of bytes');
+        }
+    }
 
     /**
      * Creates or updates the underlying Object Store stream.
@@ -217,9 +223,17 @@ final class ObjectStoreBucket
                 $totalSize += strlen($block);
                 $buffer .= $block;
 
-                while (strlen($buffer) >= $this->chunkSize) {
-                    $publishChunk(substr($buffer, 0, $this->chunkSize));
-                    $buffer = substr($buffer, $this->chunkSize);
+                // Emit whole chunks by advancing an offset, then drop the consumed prefix ONCE per
+                // producer block. Recopying the shrinking tail per chunk (substr after each publish)
+                // would be O(n^2) for a block much larger than chunkSize.
+                if (strlen($buffer) >= $this->chunkSize) {
+                    $offset = 0;
+                    while (strlen($buffer) - $offset >= $this->chunkSize) {
+                        $publishChunk(substr($buffer, $offset, $this->chunkSize));
+                        $offset += $this->chunkSize;
+                    }
+
+                    $buffer = substr($buffer, $offset);
                 }
             }
 
@@ -518,7 +532,12 @@ final class ObjectStoreBucket
                 return null;
             }
 
-            return ObjectInfo::fromArray($this->bucket, $metadata);
+            // The record's stream sequence (its revision) travels in the Direct Get Nats-Sequence
+            // header, not in the meta JSON; surface it on ObjectInfo.
+            $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+            $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
+
+            return ObjectInfo::fromArray($this->bucket, $metadata, $revision);
         });
     }
 
@@ -553,7 +572,9 @@ final class ObjectStoreBucket
             return null;
         }
 
-        return ObjectInfo::fromArray($this->bucket, $metadata);
+        $revision = isset($message['seq']) ? (int) $message['seq'] : null;
+
+        return ObjectInfo::fromArray($this->bucket, $metadata, $revision);
     }
 
     /**
@@ -665,7 +686,9 @@ final class ObjectStoreBucket
                         return null;
                     }
 
-                    $info = ObjectInfo::fromArray($this->bucket, $metadata);
+                    $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+                    $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
+                    $info = ObjectInfo::fromArray($this->bucket, $metadata, $revision);
 
                     return $info->name === '' ? null : $info;
                 });

@@ -205,6 +205,47 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('big.txt'), $writes);
     }
 
+    public function testPutStreamReChunksLargeBlockAcrossManyChunks(): void
+    {
+        // A single producer block larger than chunkSize must split into multiple chunks via the
+        // offset loop (no O(n^2) tail recopy), preserving order and digest.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),  // lookup (sid 1)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),       // chunk1 (sid 2)
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(2)), $this->pubAck(2)),       // chunk2 (sid 3)
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($this->pubAck(3)), $this->pubAck(3)),       // chunk3 (sid 4)
+            sprintf("MSG _INBOX.e 5 %d\r\n%s\r\n", strlen($this->pubAck(4)), $this->pubAck(4)),       // meta (sid 5)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // 2-byte chunks: one 'abcdef' block re-chunks to 'ab' + 'cd' + 'ef' (3 chunks).
+        $store = new ObjectStoreBucket($client, $client->jetStream(), 'assets', 2);
+        $blocks = ['abcdef'];
+        $index = 0;
+        $stored = $store->putStream('big.bin', static function () use (&$index, $blocks): ?string {
+            return $blocks[$index++] ?? null;
+        })->await();
+
+        self::assertSame(6, $stored->size);
+        self::assertSame(3, $stored->chunks);
+        self::assertSame($this->digestOf('abcdef'), $stored->digest);
+        self::assertSame(3, substr_count(implode('||', $transport->writes), 'PUB $O.assets.C.' . $stored->nuid . ' '));
+    }
+
+    public function testConstructorRejectsNonPositiveChunkSize(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('chunk size');
+
+        new ObjectStoreBucket($client, $client->jetStream(), 'assets', 0);
+    }
+
     /**
      * Verifies an empty object stores zero chunks and publishes no chunk message (only meta).
      */
@@ -590,6 +631,27 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertStringContainsString('"offset":0', $writes);
         self::assertStringContainsString('"offset":1', $writes);
         self::assertStringContainsString('"offset":2', $writes);
+    }
+
+    public function testInfoIncludesRevisionFromSequenceHeader(): void
+    {
+        // ObjectInfo::revision is the record's stream sequence, carried in the Direct Get Nats-Sequence
+        // header (directReplyFromEnvelope encodes the envelope's seq=2).
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+
+        self::assertNotNull($info);
+        self::assertSame(2, $info->revision);
     }
 
     public function testInfoFallsBackToStreamMessageWhenDirectGetUnavailable(): void

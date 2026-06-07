@@ -192,6 +192,10 @@ final class NatsConnection
                 }
             } catch (CancelledException) {
                 // Flush deadline reached; close with whatever was delivered.
+            } catch (\Throwable) {
+                // A fatal frame (e.g. a server -ERR) surfaced mid-flush. Stop flushing and fall through
+                // to the cleanup below so drain() still closes the socket and clears state rather than
+                // leaving the connection wedged in Draining with the socket open.
             }
 
             // Drain any remaining buffered messages to callbacks.

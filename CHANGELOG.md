@@ -24,6 +24,20 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` `ObjectStoreBucket::putStream()` no longer recopies the buffer tail per chunk (O(n^2)
+  for a producer block much larger than `chunkSize`); it advances a read offset and compacts once per
+  block. The constructor now rejects a non-positive `chunkSize` (which made `put()`/`putStream()` loop
+  forever) with a `JetStreamException`.
+- `[bugfix]` Object Store `info()`/`get()`/`list()` now populate `ObjectInfo::revision` from the
+  record's stream sequence (the `Nats-Sequence` Direct Get header, or the `seq` of the STREAM.MSG.GET
+  fallback) instead of always leaving it null.
+- `[bugfix]` KeyValue/Object Store bucket names are now validated (`^[A-Za-z0-9_-]+$`); a name with
+  dots or wildcards would otherwise mis-scope the backing stream subjects.
+- `[bugfix]` JetStream `publish()`/`publishScheduled()` now translate a no-responders reply into a
+  `JetStreamException` (code 503) — e.g. publishing to a subject not bound to any stream — so a
+  `catch (JetStreamException)` no longer misses it as a bare `NatsException`.
+- `[bugfix]` `drain()` now always closes the socket and clears state even if a fatal frame surfaces
+  mid-flush, instead of escaping the flush loop and leaving the connection wedged in `Draining`.
 - `[bugfix]` Reconnect no longer deadlocks when a subscription handler publishes during recovery.
   Subscription-replay (`drainImmediateServerFrames`) previously delivered buffered messages to user
   callbacks while still inside the reconnect critical section; a callback that published and hit a

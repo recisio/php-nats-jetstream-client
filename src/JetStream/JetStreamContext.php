@@ -71,6 +71,8 @@ final class JetStreamContext
      */
     public function keyValue(string $bucket): KeyValueBucket
     {
+        self::assertValidBucket($bucket);
+
         if (!isset($this->kvBuckets[$bucket])) {
             $this->kvBuckets[$bucket] = new KeyValueBucket($this->client, $this, $bucket);
         }
@@ -83,11 +85,28 @@ final class JetStreamContext
      */
     public function objectStore(string $bucket): ObjectStoreBucket
     {
+        self::assertValidBucket($bucket);
+
         if (!isset($this->objectBuckets[$bucket])) {
             $this->objectBuckets[$bucket] = new ObjectStoreBucket($this->client, $this, $bucket);
         }
 
         return $this->objectBuckets[$bucket];
+    }
+
+    /**
+     * Validates a KV/Object Store bucket name. The name is interpolated into the backing stream name
+     * (`KV_<bucket>`/`OBJ_<bucket>`) and subject prefixes (`$KV.<bucket>.>`/`$O.<bucket>.>`), so a name
+     * with dots or wildcards would silently mis-scope those subjects; restrict it to the same safe set
+     * the official clients use.
+     */
+    private static function assertValidBucket(string $bucket): void
+    {
+        if ($bucket === '' || preg_match('/^[A-Za-z0-9_-]+$/', $bucket) !== 1) {
+            throw new JetStreamException(
+                'Invalid bucket name "' . $bucket . '": only letters, digits, "-" and "_" are allowed',
+            );
+        }
     }
 
     /**
@@ -690,6 +709,35 @@ final class JetStreamContext
     }
 
     /**
+     * Issues a JetStream API request, translating a no-responders error into a JetStreamException
+     * (code 503) so callers catching JetStreamException are not surprised by a bare NatsException
+     * (e.g. publishing to a subject not bound to any stream, or with JetStream disabled).
+     *
+     * @param array<string,string>|null $headers
+     */
+    private function jsRequest(string $subject, string $payload, ?array $headers = null): NatsMessage
+    {
+        try {
+            return $headers === null
+                ? $this->client->request($subject, $payload)->await()
+                : $this->client->requestWithHeaders($subject, $payload, $headers)->await();
+        } catch (JetStreamException $e) {
+            throw $e;
+        } catch (NatsException $e) {
+            if (str_contains($e->getMessage(), 'No responders')) {
+                throw new JetStreamException(
+                    'No JetStream responder for subject ' . $subject
+                    . ' (the subject is not bound to a stream, or JetStream is not enabled)',
+                    503,
+                    $e,
+                );
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
      * Publishes to a stream subject and returns JetStream publish acknowledgment.
      *
      * @return Future<PubAck>
@@ -697,7 +745,7 @@ final class JetStreamContext
     public function publish(string $subject, string $payload): Future
     {
         return async(function () use ($subject, $payload): PubAck {
-            $message = $this->client->request($subject, $payload)->await();
+            $message = $this->jsRequest($subject, $payload);
 
             try {
                 /** @var array<string,mixed> $data */
@@ -742,7 +790,7 @@ final class JetStreamContext
                 $headers['Nats-Schedule-TTL'] = $scheduleTtl;
             }
 
-            $message = $this->client->requestWithHeaders($scheduleSubject, $payload, $headers)->await();
+            $message = $this->jsRequest($scheduleSubject, $payload, $headers);
 
             try {
                 /** @var array<string,mixed> $data */
