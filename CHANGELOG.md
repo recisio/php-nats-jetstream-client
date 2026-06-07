@@ -24,6 +24,12 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` The plaintext-credentials fail-safe now also covers the handshake-first TLS path. The
+  guard that refuses to write CONNECT (which carries jwt/sig/nkey/user/pass/token) over a still-plain
+  socket was gated on the non-handshake-first branch, so `tlsHandshakeFirst=true` combined with no TLS
+  materials (and a `nats://` DSN) while the server's INFO advertised `tls_required` could leak
+  credentials in cleartext. The fail-fast now runs whenever TLS is required and the handshake did not
+  establish it, regardless of `tlsHandshakeFirst`.
 - `[bugfix]` A JetStream flow-control STALL heartbeat is now answered. The server leaves the message
   reply empty for a stall and puts the flow-control reply subject in the `Nats-Consumer-Stalled`
   header value; the client previously detected the stall but published to the empty reply, so the

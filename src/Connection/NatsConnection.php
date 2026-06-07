@@ -577,19 +577,25 @@ final class NatsConnection
 
         $this->serverInfo = $this->awaitServerInfo();
 
-        // Standard NATS TLS upgrade: after the plaintext INFO, upgrade the socket to TLS unless the
-        // handshake-first path already negotiated TLS during connect().
+        // Standard NATS TLS upgrade: after the plaintext INFO, upgrade the socket to TLS (unless the
+        // handshake-first path already negotiated TLS during connect()).
         if (!$this->options->tlsHandshakeFirst && $this->requiresTls($server, $this->serverInfo)) {
             $this->transport->upgradeTls()->await();
+        }
 
-            // Never write CONNECT (which carries credentials) over a socket that is still plaintext.
-            // If the server requires TLS but the transport could not establish it, fail fast.
-            if ($this->transport instanceof TlsAwareTransportInterface && !$this->transport->tlsActive()) {
-                throw new ConnectionException(
-                    'Server requires TLS but the TLS handshake was not established; '
-                    . 'configure TLS materials (NatsOptions tlsRequired / tlsCaFile / tlsCertFile) for this connection',
-                );
-            }
+        // Never write CONNECT (which carries credentials) over a socket that is still plaintext when
+        // TLS is required — regardless of which path was meant to establish it. This guard runs for the
+        // handshake-first path too, so a misconfiguration (tlsHandshakeFirst=true but no TLS materials
+        // or a nats:// DSN, while the server's INFO advertises tls_required) fails fast instead of
+        // leaking credentials in cleartext.
+        if ($this->requiresTls($server, $this->serverInfo)
+            && $this->transport instanceof TlsAwareTransportInterface
+            && !$this->transport->tlsActive()
+        ) {
+            throw new ConnectionException(
+                'Server requires TLS but the TLS handshake was not established; '
+                . 'configure TLS materials (NatsOptions tlsRequired / tlsCaFile / tlsCertFile) for this connection',
+            );
         }
 
         $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce))->await();

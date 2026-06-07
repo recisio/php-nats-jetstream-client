@@ -2557,6 +2557,7 @@ final class NatsConnectionTest extends TestCase
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
         ]);
+        $transport->tlsActiveOnConnect = true; // handshake-first established TLS during connect()
 
         $connection = new NatsConnection(
             new NatsOptions(tlsRequired: true, tlsHandshakeFirst: true, pingIntervalSeconds: 0),
@@ -2566,6 +2567,37 @@ final class NatsConnectionTest extends TestCase
 
         self::assertSame(ConnectionState::Open, $connection->state());
         // Handshake-first negotiates TLS during connect(), so no explicit post-INFO upgrade.
+        self::assertSame(0, $transport->upgradeTlsCalls);
+        self::assertTrue($transport->tlsActive());
+    }
+
+    public function testHandshakeFirstWithoutEstablishedTlsFailsBeforeWritingConnect(): void
+    {
+        // Misconfiguration: tlsHandshakeFirst=true but no TLS materials/scheme (so the transport stays
+        // plaintext), while the server's INFO advertises tls_required. The credentials fail-safe must
+        // still fire on the handshake-first path and must NOT write CONNECT over the plaintext socket.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"tls_required":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->tlsActiveOnConnect = false; // handshake-first did NOT establish TLS
+
+        $connection = new NatsConnection(
+            new NatsOptions(tlsRequired: false, tlsHandshakeFirst: true, reconnectEnabled: false, pingIntervalSeconds: 0),
+            $transport,
+        );
+
+        try {
+            $connection->connect()->await();
+            self::fail('Expected a TLS ConnectionException');
+        } catch (ConnectionException $e) {
+            self::assertStringContainsStringIgnoringCase('tls', $e->getMessage());
+        }
+
+        $writes = implode('', $transport->writes);
+        self::assertStringNotContainsString('CONNECT ', $writes);
+        self::assertStringNotContainsString('PING', $writes);
+        // Handshake-first never calls the explicit post-INFO upgrade.
         self::assertSame(0, $transport->upgradeTlsCalls);
     }
 

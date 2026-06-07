@@ -24,6 +24,9 @@ final class FakeTransport implements TlsAwareTransportInterface
     /** Whether a TLS handshake has "completed" (set by upgradeTls() when $canUpgrade). */
     public bool $tlsActive = false;
 
+    /** When true, connect() marks TLS active — models a handshake-first transport with TLS materials. */
+    public bool $tlsActiveOnConnect = false;
+
     /** @var list<string> */
     public array $connectCalls = [];
 
@@ -64,6 +67,11 @@ final class FakeTransport implements TlsAwareTransportInterface
     {
         return async(function () use ($dsn, $timeoutMs): void {
             $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+
+            if ($this->tlsActiveOnConnect) {
+                // Handshake-first transports negotiate TLS during connect(), before INFO is read.
+                $this->tlsActive = true;
+            }
         });
     }
 
