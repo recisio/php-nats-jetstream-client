@@ -143,6 +143,11 @@ were all verified working and are unchanged.
   windows instead of awaiting one PubAck round-trip per chunk, so large-object uploads
   are no longer strictly round-trip-bound. PUB frames are written to the single
   connection in chunk order, so stream order (and download reassembly) is preserved.
+- `[bugfix]` Single-record reads — KeyValue `get()` and Object Store `info()` (and the
+  metadata read behind `get()`/`getToCallback()`) — now use the Direct Get API (served by
+  any replica) instead of leader-only `STREAM.MSG.GET`, consistent with `getAll()`/`list()`.
+  On clustered/replicated streams this stops concentrating reads on the stream leader. (The
+  internal put/delete cleanup lookup stays on `STREAM.MSG.GET` for deterministic ordering.)
 - `[bugfix]` KeyValue `getAll()` and Object Store `list()` now read the latest record
   per key/object via the Direct Get API issued concurrently, instead of N+1 sequential
   leader-only `STREAM.MSG.GET` reads. For large buckets this stops hammering the stream

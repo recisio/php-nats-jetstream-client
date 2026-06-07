@@ -13,6 +13,28 @@ use PHPUnit\Framework\TestCase;
 
 final class KeyValueBucketTest extends TestCase
 {
+    /** Builds a Direct Get reply (HMSG): the stored value as the body, with Nats-* + optional KV-Operation. */
+    private function kvDirectReply(string $subject, string $value, int $seq, int $sid, ?string $operation = null): string
+    {
+        $hdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: {$subject}\r\nNats-Sequence: {$seq}\r\n";
+        if ($operation !== null) {
+            $hdrs .= "KV-Operation: {$operation}\r\n";
+        }
+        $hdrs .= "\r\n";
+        $h = strlen($hdrs);
+
+        return sprintf("HMSG _INBOX.x %d %d %d\r\n%s%s\r\n", $sid, $h, $h + strlen($value), $hdrs, $value);
+    }
+
+    /** Builds a Direct Get status-only reply (HMSG), e.g. a 404 miss or a non-404 error. */
+    private function kvDirectStatus(int $sid, int $code, string $description): string
+    {
+        $hdrs = "NATS/1.0 {$code} {$description}\r\nStatus: {$code}\r\n\r\n";
+        $h = strlen($hdrs);
+
+        return sprintf("HMSG _INBOX.x %d %d %d\r\n%s\r\n", $sid, $h, $h, $hdrs);
+    }
+
     /**
      * Verifies KV bucket create/delete map to KV stream lifecycle APIs.
      */
@@ -47,17 +69,13 @@ final class KeyValueBucketTest extends TestCase
     public function testPutGetDelete(): void
     {
         $putAck = '{"stream":"KV_cfg","seq":1,"duplicate":false}';
-        $getPayload = sprintf(
-            '{"message":{"subject":"$KV.cfg.theme","seq":1,"data":"%s"}}',
-            base64_encode('blue'),
-        );
         $deleteAck = '{"stream":"KV_cfg","seq":2,"duplicate":false}';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($putAck), $putAck),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($getPayload), $getPayload),
+            $this->kvDirectReply('$KV.cfg.theme', 'blue', 1, 2),
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($deleteAck), $deleteAck),
         ]);
 
@@ -77,7 +95,7 @@ final class KeyValueBucketTest extends TestCase
         self::assertSame('KV_cfg', $delete->stream);
 
         self::assertStringStartsWith('PUB $KV.cfg.theme _INBOX.', $transport->writes[3]);
-        self::assertStringStartsWith('PUB $JS.API.STREAM.MSG.GET.KV_cfg _INBOX.', $transport->writes[6]);
+        self::assertStringStartsWith('PUB $JS.API.DIRECT.GET.KV_cfg _INBOX.', $transport->writes[6]);
         self::assertStringStartsWith('HPUB $KV.cfg.theme _INBOX.', $transport->writes[9]);
         self::assertStringContainsString('KV-Operation:DEL', $transport->writes[9]);
     }
@@ -87,12 +105,10 @@ final class KeyValueBucketTest extends TestCase
      */
     public function testGetMissingReturnsNull(): void
     {
-        $missingPayload = '{"error":{"code":404,"description":"message not found"}}';
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($missingPayload), $missingPayload),
+            $this->kvDirectStatus(1, 404, 'Message Not Found'),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -375,12 +391,10 @@ final class KeyValueBucketTest extends TestCase
      */
     public function testGetPropagatesNon404ApiErrors(): void
     {
-        $errorPayload = '{"error":{"code":500,"description":"internal error"}}';
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
+            $this->kvDirectStatus(1, 500, 'internal error'),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -392,22 +406,22 @@ final class KeyValueBucketTest extends TestCase
         $client->jetStream()->keyValue('cfg')->get('theme')->await();
     }
 
-    public function testGetWrapsMalformedReplyAsJetStreamException(): void
+    public function testDeleteWrapsMalformedReplyAsJetStreamException(): void
     {
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            "MSG _INBOX.a 1 7\r\nnotjson\r\n", // a non-JSON reply
+            "MSG _INBOX.a 1 7\r\nnotjson\r\n", // a non-JSON ack
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
         $client->connect()->await();
 
-        // A malformed reply must surface as the library's JetStreamException, not a raw \JsonException.
+        // A malformed ack must surface as the library's JetStreamException, not a raw \JsonException.
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('Malformed JetStream reply');
 
-        $client->jetStream()->keyValue('cfg')->get('theme')->await();
+        $client->jetStream()->keyValue('cfg')->delete('theme')->await();
     }
 
     /**
@@ -415,17 +429,10 @@ final class KeyValueBucketTest extends TestCase
      */
     public function testGetMapsDeleteMarkerToNullValue(): void
     {
-        $headers = base64_encode("NATS/1.0\r\nKV-Operation:DEL\r\n\r\n");
-        $payload = sprintf(
-            '{"message":{"subject":"$KV.cfg.theme","seq":3,"data":"%s","hdrs":"%s"}}',
-            base64_encode('ignored'),
-            $headers,
-        );
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
+            $this->kvDirectReply('$KV.cfg.theme', 'ignored', 3, 1, 'DEL'),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -436,6 +443,7 @@ final class KeyValueBucketTest extends TestCase
         self::assertNotNull($entry);
         self::assertSame('DEL', $entry->operation);
         self::assertNull($entry->value);
+        self::assertSame(3, $entry->revision);
     }
 
     public function testBucketNameHelpers(): void
@@ -466,25 +474,6 @@ final class KeyValueBucketTest extends TestCase
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('Expected revision must be greater than zero');
         $client->jetStream()->keyValue('cfg')->update('theme', 'v', 0)->await();
-    }
-
-    public function testGetRejectsMalformedBase64Payload(): void
-    {
-        $payload = '{"message":{"subject":"$KV.cfg.theme","seq":6,"data":"%%%not-base64%%%"}}';
-
-        $transport = new FakeTransport([
-            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
-            "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
-        ]);
-
-        $client = new NatsClient(new NatsOptions(), $transport);
-        $client->connect()->await();
-
-        $this->expectException(JetStreamException::class);
-        $this->expectExceptionMessage('Malformed KV payload for key theme');
-
-        $client->jetStream()->keyValue('cfg')->get('theme')->await();
     }
 
     public function testGetAllSkipsKeysThatReturnNotFound(): void

@@ -70,6 +70,22 @@ final class ObjectStoreBucketTest extends TestCase
         return sprintf("HMSG _INBOX.x %d %d %d\r\n%s%s\r\n", $sid, $h, $h + strlen($body), $hdrs, $body);
     }
 
+    /**
+     * Converts a metaGetResponse() STREAM.MSG.GET envelope into the equivalent Direct Get reply
+     * (HMSG with the raw meta JSON as the body), as info()/get()/getToCallback() now read it.
+     */
+    private function directReplyFromEnvelope(string $envelope, int $sid): string
+    {
+        /** @var array{message: array{seq?: int, data?: string}} $decoded */
+        $decoded = json_decode($envelope, true, 512, JSON_THROW_ON_ERROR);
+        $metaJson = (string) base64_decode((string) ($decoded['message']['data'] ?? ''), true);
+        $seq = (int) ($decoded['message']['seq'] ?? 1);
+        $hdrs = "NATS/1.0\r\nNats-Stream: OBJ_assets\r\nNats-Sequence: {$seq}\r\n\r\n";
+        $h = strlen($hdrs);
+
+        return sprintf("HMSG _INBOX.x %d %d %d\r\n%s%s\r\n", $sid, $h, $h + strlen($metaJson), $hdrs, $metaJson);
+    }
+
     /** Builds a Direct Get status-only reply (HMSG) such as a 404 miss or a non-404 error. */
     private function directStatusReply(int $sid, int $code, string $description): string
     {
@@ -225,7 +241,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                          // info()
+            $this->directReplyFromEnvelope($meta, 1),                          // info()
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),                  // create ephemeral consumer
             "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",                                              // chunk delivery (no reply -> no ack)
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),      // delete consumer
@@ -260,7 +276,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            $this->directReplyFromEnvelope($meta, 1),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
             "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
@@ -293,7 +309,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            $this->directReplyFromEnvelope($meta, 1),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
             "MSG _INBOX.JS.FETCH.c 3 11\r\nCORRUPTED!!\r\n",
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
@@ -325,7 +341,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            $this->directReplyFromEnvelope($meta, 1),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
             "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
@@ -371,7 +387,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            $this->directReplyFromEnvelope($meta, 1),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
             "MSG _INBOX.JS.FETCH.c 3 3\r\nabc\r\n",
             "MSG _INBOX.JS.FETCH.c 3 3\r\ndef\r\n",
@@ -407,7 +423,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            $this->directReplyFromEnvelope($meta, 1),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -560,7 +576,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
+            $this->directStatusReply(1, 404, 'Message Not Found'),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -738,7 +754,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                     // info()
+            $this->directReplyFromEnvelope($meta, 1),                     // info()
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),             // create ephemeral consumer
             // All three chunks arrive on the single fetch-batch inbox (sid 3), no per-chunk pull.
             "MSG _INBOX.JS.FETCH.c 3 3\r\nabc\r\n",
@@ -922,7 +938,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                          // info()
+            $this->directReplyFromEnvelope($meta, 1),                          // info()
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),                  // create consumer
             sprintf("HMSG _INBOX.JS.FETCH.c 3 %d %d\r\n%s\r\n", $hb, $hb, $status),                 // pull -> 408 (break)
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),       // delete consumer
@@ -952,7 +968,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),                          // info() (chunks=2, no digest)
+            $this->directReplyFromEnvelope($meta, 1),                          // info() (chunks=2, no digest)
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),                  // create consumer (sid 2)
             sprintf("HMSG _INBOX.JS.FETCH.c 3 %d %d\r\n%s\r\n", $hb, $hb, $status),                 // pull -> 408, 0 of 2 chunks
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),       // delete consumer (sid 4)
@@ -981,7 +997,7 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($meta), $meta),
+            $this->directReplyFromEnvelope($meta, 1),
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
             sprintf("HMSG _INBOX.JS.FETCH.c 3 %d %d\r\n%s\r\n", $hb, $hb, $status),                 // pull -> 409 (rethrow)
             sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),

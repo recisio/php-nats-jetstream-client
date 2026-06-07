@@ -372,17 +372,38 @@ final class ObjectStoreBucket
      */
     public function info(string $name): Future
     {
-        return async(fn (): ?ObjectInfo => $this->fetchInfo($name, false));
+        return async(function () use ($name): ?ObjectInfo {
+            $this->assertValidName($name);
+
+            // Read the latest meta record via the Direct Get API (served by any replica, not just the
+            // leader), consistent with list(). The Direct Get body is the raw meta JSON; 404 = absent.
+            try {
+                $message = $this->jetStream
+                    ->directGetLastMessageForSubject($this->streamName(), $this->metaSubject($name))
+                    ->await();
+            } catch (JetStreamException $e) {
+                if ($e->getCode() === 404) {
+                    return null;
+                }
+
+                throw $e;
+            }
+
+            /** @var array<string,mixed>|null $metadata */
+            $metadata = json_decode($message->payload, true);
+            if (!is_array($metadata)) {
+                return null;
+            }
+
+            return ObjectInfo::fromArray($this->bucket, $metadata);
+        });
     }
 
     /**
-     * Fetches an object's metadata within the calling coroutine (or null when absent). When
-     * $swallowErrors is true ANY JetStream error maps to null (best-effort lookup for cleanup);
-     * otherwise only a 404 maps to null and other errors propagate.
-     *
-     * Kept synchronous (one coroutine layer below info()/lookupExisting()) so a concurrently-launched
-     * lookup issues its request at the same nesting depth as the upload's publishes — i.e. it
-     * subscribes its inbox first, keeping the request/SID order deterministic.
+     * Best-effort metadata lookup for the put()/delete() chunk-purge cleanup (or null when absent).
+     * ANY JetStream error maps to null. Kept on the leader STREAM.MSG.GET path (not Direct Get) and
+     * synchronous within the calling coroutine so a concurrently-launched lookup issues its request
+     * at the same nesting depth as the upload's publishes, keeping the request/SID order deterministic.
      */
     private function fetchInfo(string $name, bool $swallowErrors): ?ObjectInfo
     {

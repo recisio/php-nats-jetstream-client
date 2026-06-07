@@ -151,8 +151,13 @@ final class KeyValueBucket
         return async(function () use ($key): ?KeyValueEntry {
             $this->assertValidKey($key);
 
+            // Read the latest record via the Direct Get API (served by any replica, not just the
+            // leader), consistent with getAll(). Direct Get returns the stored value as the message
+            // body with Nats-* (and KV-Operation) headers; a 404 means the key does not exist.
             try {
-                $response = $this->requestKvMessage($key);
+                $message = $this->jetStream
+                    ->directGetLastMessageForSubject($this->streamName(), $this->subjectForKey($key))
+                    ->await();
             } catch (JetStreamException $e) {
                 if ($e->getCode() === 404) {
                     return null;
@@ -161,23 +166,16 @@ final class KeyValueBucket
                 throw $e;
             }
 
-            /** @var array<string,mixed>|null $message */
-            $message = is_array($response['message'] ?? null) ? $response['message'] : null;
-            if ($message === null) {
-                return null;
-            }
-
-            $data = (string) ($message['data'] ?? '');
-            $decoded = $this->decodeApiMessageData($data, $key);
-            $headers = $this->decodeHeadersFromApiMessage($message);
+            $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
             $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+            $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
 
             return new KeyValueEntry(
                 bucket: $this->bucket,
                 key: $key,
-                value: $operation === 'DEL' || $operation === 'PURGE' ? null : $decoded,
+                value: $operation === 'DEL' || $operation === 'PURGE' ? null : $message->payload,
                 operation: $operation,
-                revision: isset($message['seq']) ? (int) $message['seq'] : null,
+                revision: $revision,
             );
         });
     }
@@ -357,28 +355,6 @@ final class KeyValueBucket
     }
 
     /**
-     * @return array<string,mixed>
-     */
-    private function requestKvMessage(string $key): array
-    {
-        $subject = JetStreamApi::STREAM_MSG_GET_PREFIX . $this->streamName();
-        $payload = json_encode(['last_by_subj' => $this->subjectForKey($key)], JSON_THROW_ON_ERROR);
-        $message = $this->client->request($subject, $payload)->await();
-
-        $data = $this->decodeReply($message->payload);
-
-        /** @var array<string,mixed>|null $error */
-        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
-        if ($error !== null) {
-            $description = (string) ($error['description'] ?? 'JetStream API error');
-            $code = (int) ($error['code'] ?? 0);
-            throw new JetStreamException($description, $code);
-        }
-
-        return $data;
-    }
-
-    /**
      * Decodes a JetStream JSON reply, mapping a malformed (non-JSON) body to a JetStreamException
      * instead of leaking a raw \JsonException to the caller (consistent with the other API calls).
      *
@@ -396,38 +372,6 @@ final class KeyValueBucket
         return $data;
     }
 
-    /**
-     * @param array<string,mixed> $message
-     * @return array<string,string>
-     */
-    private function decodeHeadersFromApiMessage(array $message): array
-    {
-        $encodedHeaders = (string) ($message['hdrs'] ?? '');
-        if ($encodedHeaders === '') {
-            return [];
-        }
-
-        $rawHeaders = base64_decode($encodedHeaders, true);
-        if ($rawHeaders === false) {
-            return [];
-        }
-
-        return NatsHeaders::fromWireBlock($rawHeaders);
-    }
-
-    private function decodeApiMessageData(string $encoded, string $key): string
-    {
-        if ($encoded === '') {
-            return '';
-        }
-
-        $decoded = base64_decode($encoded, true);
-        if ($decoded === false) {
-            throw new JetStreamException('Malformed KV payload for key ' . $key);
-        }
-
-        return $decoded;
-    }
 
     /**
      * Parses a key from a KV subject.
