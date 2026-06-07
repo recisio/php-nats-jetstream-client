@@ -99,7 +99,9 @@ final class ObjectStoreBucket
         return async(function () use ($name, $data, $metadata): ObjectInfo {
             $this->assertValidName($name);
 
-            $previous = $this->lookupExisting($name);
+            // Run the previous-revision lookup concurrently with the upload below: it is only needed
+            // to purge the old chunks afterwards, so awaiting it here would add a serial round-trip.
+            $previousFuture = $this->lookupExisting($name);
 
             $nuid = $this->nuid();
             $chunkSubject = $this->chunkSubjectForNuid($nuid);
@@ -154,6 +156,7 @@ final class ObjectStoreBucket
 
             // Best-effort cleanup of the previous revision's chunks (rollup keeps only the latest
             // meta, but chunk subjects are NUID-specific and must be purged explicitly).
+            $previous = $previousFuture->await();
             if ($previous !== null && $previous->nuid !== '' && $previous->nuid !== $nuid) {
                 $this->purgeChunks($previous->nuid);
             }
@@ -369,32 +372,44 @@ final class ObjectStoreBucket
      */
     public function info(string $name): Future
     {
-        return async(function () use ($name): ?ObjectInfo {
-            $this->assertValidName($name);
+        return async(fn (): ?ObjectInfo => $this->fetchInfo($name, false));
+    }
 
-            try {
-                $response = $this->requestStreamMessage($this->metaSubject($name));
-            } catch (JetStreamException $e) {
-                if ($e->getCode() === 404) {
-                    return null;
-                }
+    /**
+     * Fetches an object's metadata within the calling coroutine (or null when absent). When
+     * $swallowErrors is true ANY JetStream error maps to null (best-effort lookup for cleanup);
+     * otherwise only a 404 maps to null and other errors propagate.
+     *
+     * Kept synchronous (one coroutine layer below info()/lookupExisting()) so a concurrently-launched
+     * lookup issues its request at the same nesting depth as the upload's publishes — i.e. it
+     * subscribes its inbox first, keeping the request/SID order deterministic.
+     */
+    private function fetchInfo(string $name, bool $swallowErrors): ?ObjectInfo
+    {
+        $this->assertValidName($name);
 
-                throw $e;
-            }
-
-            /** @var array<string,mixed>|null $message */
-            $message = is_array($response['message'] ?? null) ? $response['message'] : null;
-            if ($message === null) {
+        try {
+            $response = $this->requestStreamMessage($this->metaSubject($name));
+        } catch (JetStreamException $e) {
+            if ($swallowErrors || $e->getCode() === 404) {
                 return null;
             }
 
-            $metadata = $this->decodeMetadataFromApiMessage($message);
-            if ($metadata === null) {
-                return null;
-            }
+            throw $e;
+        }
 
-            return ObjectInfo::fromArray($this->bucket, $metadata);
-        });
+        /** @var array<string,mixed>|null $message */
+        $message = is_array($response['message'] ?? null) ? $response['message'] : null;
+        if ($message === null) {
+            return null;
+        }
+
+        $metadata = $this->decodeMetadataFromApiMessage($message);
+        if ($metadata === null) {
+            return null;
+        }
+
+        return ObjectInfo::fromArray($this->bucket, $metadata);
     }
 
     /**
@@ -407,7 +422,8 @@ final class ObjectStoreBucket
         return async(function () use ($name): ObjectInfo {
             $this->assertValidName($name);
 
-            $previous = $this->lookupExisting($name);
+            // Run the lookup concurrently with the tombstone publish; only needed for chunk purge.
+            $previousFuture = $this->lookupExisting($name);
 
             $info = [
                 'name' => $name,
@@ -424,6 +440,7 @@ final class ObjectStoreBucket
 
             $this->publishMeta($name, $info);
 
+            $previous = $previousFuture->await();
             if ($previous !== null && $previous->nuid !== '') {
                 $this->purgeChunks($previous->nuid);
             }
@@ -597,13 +614,16 @@ final class ObjectStoreBucket
      * Looks up an existing object's metadata, returning null when absent (best-effort, swallows
      * not-found and lookup errors so a fresh put/delete is never blocked by it).
      */
-    private function lookupExisting(string $name): ?ObjectInfo
+    /**
+     * Best-effort lookup of the existing object's metadata, returned as a Future so callers can run
+     * it concurrently with the upload/meta publish and only await it before purging the previous
+     * revision's chunks — saving a serial round-trip on the write path. Any error maps to null.
+     *
+     * @return Future<ObjectInfo|null>
+     */
+    private function lookupExisting(string $name): Future
     {
-        try {
-            return $this->info($name)->await();
-        } catch (JetStreamException) {
-            return null;
-        }
+        return async(fn (): ?ObjectInfo => $this->fetchInfo($name, true));
     }
 
     /**

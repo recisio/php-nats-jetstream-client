@@ -27,6 +27,12 @@ were all verified working and are unchanged.
 - `[bugfix]` The CONNECT frame now advertises the resolved client library version (from the
   installed Composer package, with a constant fallback) instead of the stale hardcoded
   `0.1.0-dev`, so server `connz`/monitoring attributes traffic to the correct version.
+- `[bugfix]` Object Store `put()` and `delete()` now run the previous-revision lookup
+  concurrently with the chunk upload / tombstone publish, awaiting it only just before the
+  best-effort chunk purge it feeds. Previously the lookup was a serial round-trip on the
+  critical path before the first byte was written, roughly doubling small-object write
+  latency. The lookup is issued at the same coroutine depth as the upload, so request
+  ordering stays deterministic.
 - `[bugfix]` Ephemeral push consumers (KeyValue/Object Store `watch()`, ordered consumer)
   now set an `inactive_threshold`, so the server reaps them once the subscription ends
   instead of leaking server-side consumers when a long-running app re-subscribes. An active

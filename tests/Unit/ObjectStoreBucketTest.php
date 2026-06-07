@@ -156,10 +156,11 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            // 1) existing-object lookup -> not found
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
-            // 2) meta publish ack (no chunk publish happens for a 0-byte object)
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+            // With no chunk to await first, the meta publish is issued before the concurrent lookup:
+            // 1) meta publish ack (sid 1)
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+            // 2) existing-object lookup -> not found (sid 2, awaited after the meta publish)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -435,11 +436,12 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            // 1) existing-object lookup
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->metaGetResponse('logo.txt', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])), $this->metaGetResponse('logo.txt', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])),
-            // 2) tombstone meta publish ack
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(7)), $this->pubAck(7)),
-            // 3) purge ack
+            // The tombstone publish is issued before the concurrent lookup (no chunk to await first):
+            // 1) tombstone meta publish ack (sid 1)
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->pubAck(7)), $this->pubAck(7)),
+            // 2) existing-object lookup -> previous revision (sid 2), awaited before the purge
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->metaGetResponse('logo.txt', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])), $this->metaGetResponse('logo.txt', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])),
+            // 3) purge ack (sid 3)
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen('{"success":true,"purged":1}'), '{"success":true,"purged":1}'),
         ]);
 
@@ -871,8 +873,8 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($lookupError), $lookupError),              // lookup -> 500 (swallowed)
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(7)), $this->pubAck(7)),        // tombstone ack
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->pubAck(7)), $this->pubAck(7)),        // tombstone ack (sid 1)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($lookupError), $lookupError),               // lookup -> 500 swallowed (sid 2)
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -893,8 +895,8 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),    // lookup -> 404 (no previous)
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($publishError), $publishError),            // tombstone publish -> error
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($publishError), $publishError),            // tombstone publish -> error (sid 1)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),    // lookup -> 404 (sid 2)
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
