@@ -24,6 +24,14 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Ephemeral push consumers (KeyValue/Object Store `watch()`, ordered consumer)
+  now set an `inactive_threshold`, so the server reaps them once the subscription ends
+  instead of leaking server-side consumers when a long-running app re-subscribes. An active
+  subscription keeps the consumer alive; callers may override the threshold.
+- `[bugfix]` `SubscriptionQueue` now bounds its polling backlog with
+  `maxPendingMessagesPerSubscription` and the configured slow-consumer policy. Previously
+  the connection's per-chunk drain emptied its (capped) queue into the unbounded polling
+  queue, so a queue consumed slower than it was fed could grow until OOM.
 - `[bugfix]` Object Store `list()` now paginates the meta-subject enumeration (via the
   STREAM.INFO `offset`) instead of reading a single page, so a bucket with more objects
   than the server's subjects-map cap is no longer silently truncated. The loop terminates

@@ -365,6 +365,9 @@ final class KeyValueBucketTest extends TestCase
         $createRequest = implode('', $transport->writes);
         self::assertStringContainsString('"deliver_policy":"new"', $createRequest);
         self::assertStringContainsString('"ack_policy":"none"', $createRequest);
+        // The ephemeral watch consumer carries an inactive_threshold so the server reaps it after the
+        // caller unsubscribes, rather than leaking server-side.
+        self::assertStringContainsString('"inactive_threshold"', $createRequest);
     }
 
     /**

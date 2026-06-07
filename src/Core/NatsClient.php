@@ -23,6 +23,7 @@ use function Amp\async;
 final class NatsClient
 {
     private readonly NatsConnection $connection;
+    private readonly NatsOptions $options;
     private ?JetStreamContext $jetStreamContext = null;
 
     /**
@@ -35,6 +36,7 @@ final class NatsClient
         NatsOptions $options = new NatsOptions(),
         ?TransportInterface $transport = null,
     ) {
+        $this->options = $options;
         $this->connection = new NatsConnection(
             options: $options,
             transport: $transport ?? new AmpSocketTransport($options),
@@ -124,7 +126,12 @@ final class NatsClient
                 },
                 $queue,
             )->await();
-            $subscriptionQueue = new SubscriptionQueue($this, $sid);
+            $subscriptionQueue = new SubscriptionQueue(
+                $this,
+                $sid,
+                $this->options->maxPendingMessagesPerSubscription,
+                $this->options->slowConsumerPolicy,
+            );
 
             return $subscriptionQueue;
         });

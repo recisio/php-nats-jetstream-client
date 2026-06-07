@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Unit;
 
 use Amp\TimeoutCancellation;
+use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Core\SubscriptionQueue;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
@@ -339,6 +341,40 @@ final class SubscriptionQueueTest extends TestCase
         self::assertCount(2, $messages);
         self::assertSame('msg1', $messages[0]->payload);
         self::assertSame('msg2', $messages[1]->payload);
+    }
+
+    public function testEnqueueBoundsBacklogWithDropOldest(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = $this->makeConnectedClient($transport);
+        $queue = new SubscriptionQueue($client, 99, 2, SlowConsumerPolicy::DropOldest);
+
+        $queue->enqueue(new NatsMessage('events', 99, null, 'a'));
+        $queue->enqueue(new NatsMessage('events', 99, null, 'b'));
+        $queue->enqueue(new NatsMessage('events', 99, null, 'c')); // over cap (2) -> drop oldest ('a')
+
+        $messages = $queue->fetchAll();
+
+        self::assertCount(2, $messages);
+        self::assertSame('b', $messages[0]->payload);
+        self::assertSame('c', $messages[1]->payload);
+    }
+
+    public function testEnqueueDropsNewestWhenPolicyIsDropNewest(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = $this->makeConnectedClient($transport);
+        $queue = new SubscriptionQueue($client, 99, 2, SlowConsumerPolicy::DropNewest);
+
+        $queue->enqueue(new NatsMessage('events', 99, null, 'a'));
+        $queue->enqueue(new NatsMessage('events', 99, null, 'b'));
+        $queue->enqueue(new NatsMessage('events', 99, null, 'c')); // over cap -> drop the newest ('c')
+
+        $messages = $queue->fetchAll();
+
+        self::assertCount(2, $messages);
+        self::assertSame('a', $messages[0]->payload);
+        self::assertSame('b', $messages[1]->payload);
     }
 
     public function testUnsubscribeSendsUnsubForOwnSid(): void

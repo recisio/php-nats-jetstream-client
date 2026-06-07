@@ -28,6 +28,9 @@ use function Amp\delay;
  */
 final class JetStreamContext
 {
+    /** Idle window (ns) after which the server reaps an ephemeral push consumer with no interest. */
+    private const EPHEMERAL_INACTIVE_THRESHOLD_NS = 300_000_000_000; // 5 minutes
+
     /** @var array<string,KeyValueBucket> */
     private array $kvBuckets = [];
     /** @var array<string,ObjectStoreBucket> */
@@ -450,6 +453,14 @@ final class JetStreamContext
 
             if ($filterSubject !== null && $filterSubject !== '') {
                 $config['filter_subject'] = $filterSubject;
+            }
+
+            // Have the server reap this ephemeral consumer once it has no interest (e.g. after the
+            // caller unsubscribes, or an ordered consumer is recreated/abandoned), so long-running
+            // apps that re-subscribe do not leak server-side consumers. An active subscription keeps
+            // it alive. Callers can override by passing their own inactive_threshold.
+            if (!array_key_exists('inactive_threshold', $config)) {
+                $config['inactive_threshold'] = self::EPHEMERAL_INACTIVE_THRESHOLD_NS;
             }
 
             $response = $this->requestJson(

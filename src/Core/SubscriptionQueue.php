@@ -7,6 +7,8 @@ namespace IDCT\NATS\Core;
 use Amp\CancelledException;
 use Amp\Future;
 use Amp\TimeoutCancellation;
+use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
+use IDCT\NATS\Exception\NatsException;
 use SplQueue;
 
 use function Amp\delay;
@@ -37,6 +39,8 @@ final class SubscriptionQueue
     public function __construct(
         private readonly NatsClient $client,
         public readonly int $sid,
+        private readonly int $maxPending = 1024,
+        private readonly SlowConsumerPolicy $slowConsumerPolicy = SlowConsumerPolicy::DropOldest,
     ) {
         $this->messages = new SplQueue();
     }
@@ -48,6 +52,21 @@ final class SubscriptionQueue
      */
     public function enqueue(NatsMessage $message): void
     {
+        // Bound the polling backlog with the same cap + slow-consumer policy as the connection's
+        // callback queue. Without this the connection's per-chunk drain empties its (capped) queue
+        // into this one unbounded, so a queue fed faster than it is polled would grow until OOM.
+        $limit = max(1, $this->maxPending);
+
+        if ($this->messages->count() >= $limit) {
+            if ($this->slowConsumerPolicy === SlowConsumerPolicy::DropOldest) {
+                $this->messages->dequeue();
+            } elseif ($this->slowConsumerPolicy === SlowConsumerPolicy::DropNewest) {
+                return;
+            } else {
+                throw new NatsException('Subscription queue overflow for sid ' . $this->sid);
+            }
+        }
+
         $this->messages->enqueue($message);
     }
 
