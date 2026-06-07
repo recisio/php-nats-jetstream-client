@@ -173,6 +173,38 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertStringContainsString('Nats-Rollup:sub', $writes);
     }
 
+    public function testPutStreamReChunksAndComputesDigestIncrementally(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // lookup (sid 1, concurrent), two chunk acks (sid 2, 3), meta ack (sid 4)
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(2)), $this->pubAck(2)),
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($this->pubAck(3)), $this->pubAck(3)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // 3-byte chunks: a single 'hello' block re-chunks to 'hel' + 'lo' (2 chunks).
+        $store = new ObjectStoreBucket($client, $client->jetStream(), 'assets', 3);
+        $blocks = ['hello'];
+        $index = 0;
+        $stored = $store->putStream('big.txt', static function () use (&$index, $blocks): ?string {
+            return $blocks[$index++] ?? null;
+        })->await();
+
+        self::assertSame(5, $stored->size);
+        self::assertSame(2, $stored->chunks);
+        self::assertSame($this->digestOf('hello'), $stored->digest);
+
+        $writes = implode('||', $transport->writes);
+        self::assertSame(2, substr_count($writes, 'PUB $O.assets.C.' . $stored->nuid . ' '));
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('big.txt'), $writes);
+    }
+
     /**
      * Verifies an empty object stores zero chunks and publishes no chunk message (only meta).
      */

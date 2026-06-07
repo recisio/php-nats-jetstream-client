@@ -178,6 +178,10 @@ were all verified working and are unchanged.
   Live-updates-only semantics are unchanged.
 - `[feature]` `JetStreamContext::streamSequenceOf()` returns the stream sequence of a
   JetStream-delivered message (from its `$JS.ACK` reply).
+- `[feature]` `ObjectStoreBucket::putStream()` uploads an object from a producer callback
+  without holding the whole payload in memory (the streaming counterpart to
+  `getToCallback()`): blocks of any size are re-chunked to `chunkSize`, published in bounded
+  in-flight windows, and the SHA-256 digest is computed incrementally.
 - `[feature]` Object Store `watch()` now delivers updates through a JetStream push consumer
   (consistent with KeyValue `watch()`) and exposes each update's stream sequence via the new
   `ObjectInfo::$revision` field. Previously it used a plain core subscription that carried no

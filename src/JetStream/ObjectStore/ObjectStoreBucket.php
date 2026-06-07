@@ -166,6 +166,96 @@ final class ObjectStoreBucket
     }
 
     /**
+     * Stores an object by pulling its bytes from a producer callback, so the whole payload need not
+     * be held in memory at once (the streaming counterpart to getToCallback()). The producer returns
+     * successive data blocks of any size and null when the object is complete; the bytes are
+     * re-chunked to chunkSize, published in bounded in-flight windows, and the SHA-256 digest is
+     * computed incrementally. Memory is bounded to roughly chunkSize plus the pipeline window.
+     *
+     * @param callable(): ?string $producer Returns the next data block, or null at end of stream.
+     * @param array<string,string> $metadata
+     * @return Future<ObjectInfo>
+     */
+    public function putStream(string $name, callable $producer, array $metadata = []): Future
+    {
+        return async(function () use ($name, $producer, $metadata): ObjectInfo {
+            $this->assertValidName($name);
+
+            // Run the previous-revision lookup concurrently with the upload (only needed for purge).
+            $previousFuture = $this->lookupExisting($name);
+
+            $nuid = $this->nuid();
+            $chunkSubject = $this->chunkSubjectForNuid($nuid);
+            $hashContext = hash_init('sha256');
+            $totalSize = 0;
+            $chunks = 0;
+            $buffer = '';
+            /** @var list<Future<\IDCT\NATS\JetStream\Models\PubAck>> $pending */
+            $pending = [];
+
+            $publishChunk = function (string $chunk) use (&$pending, &$chunks, $chunkSubject): void {
+                $pending[] = $this->jetStream->publish($chunkSubject, $chunk);
+                ++$chunks;
+
+                if (count($pending) >= self::UPLOAD_PIPELINE_DEPTH) {
+                    Future\await($pending);
+                    $pending = [];
+                }
+            };
+
+            while (true) {
+                $block = $producer();
+                if ($block === null) {
+                    break;
+                }
+
+                if ($block === '') {
+                    continue;
+                }
+
+                hash_update($hashContext, $block);
+                $totalSize += strlen($block);
+                $buffer .= $block;
+
+                while (strlen($buffer) >= $this->chunkSize) {
+                    $publishChunk(substr($buffer, 0, $this->chunkSize));
+                    $buffer = substr($buffer, $this->chunkSize);
+                }
+            }
+
+            if ($buffer !== '') {
+                $publishChunk($buffer);
+            }
+
+            if ($pending !== []) {
+                Future\await($pending);
+            }
+
+            $info = [
+                'name' => $name,
+                'bucket' => $this->bucket,
+                'nuid' => $nuid,
+                'size' => $totalSize,
+                'chunks' => $chunks,
+                'digest' => 'SHA-256=' . $this->base64Url(hash_final($hashContext, true)),
+                'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
+                'deleted' => false,
+                'options' => ['max_chunk_size' => $this->chunkSize],
+                'metadata' => $metadata,
+            ];
+
+            $this->publishMeta($name, $info);
+
+            $previous = $previousFuture->await();
+            if ($previous !== null && $previous->nuid !== '' && $previous->nuid !== $nuid) {
+                $this->purgeChunks($previous->nuid);
+            }
+
+            return ObjectInfo::fromArray($this->bucket, $info);
+        });
+    }
+
+    /**
      * Retrieves object metadata and payload.
      *
      * @return Future<ObjectData|null>

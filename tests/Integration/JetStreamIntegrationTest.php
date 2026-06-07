@@ -331,6 +331,42 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
+     * Verifies putStream() uploads from a producer callback (memory-bounded), re-chunking blocks of
+     * varying size, and round-trips intact (exact bytes + internal digest verification on download).
+     */
+    public function testJetStreamObjectStorePutStreamRoundTrip(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'ps' . strtolower(bin2hex(random_bytes(2)));
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $store = new ObjectStoreBucket($client, $client->jetStream(), $bucket, 64);
+        $store->create()->await();
+
+        // Blocks of varying size (none aligned to the 64-byte chunk size) exercise re-chunking.
+        $blocks = [bin2hex(random_bytes(150)), bin2hex(random_bytes(200)), bin2hex(random_bytes(174))];
+        $expected = implode('', $blocks);
+        $index = 0;
+
+        $info = $store->putStream('stream.bin', static function () use (&$index, $blocks): ?string {
+            return $blocks[$index++] ?? null;
+        })->await();
+
+        self::assertSame(strlen($expected), $info->size);
+        self::assertGreaterThan(1, $info->chunks);
+
+        $data = $store->get('stream.bin')->await();
+        self::assertNotNull($data);
+        self::assertSame($expected, $data->data);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies stream list API includes newly created streams.
      */
     public function testJetStreamListStreams(): void
