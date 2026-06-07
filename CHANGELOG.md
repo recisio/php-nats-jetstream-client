@@ -24,6 +24,10 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` KeyValue `getAll()` now paginates the STREAM.INFO subjects map (via `offset`) instead
+  of reading a single page, so a bucket with more keys than the server's subjects-map cap is no longer
+  silently truncated (mirroring Object Store `list()`), and it now throws on a STREAM.INFO API error
+  instead of swallowing it into an empty result.
 - `[bugfix]` Single-record Direct Get reads now fall back to the leader `STREAM.MSG.GET` path
   when Direct Get is unavailable (a stream with `allow_direct` disabled, or an older server). The
   no-responders error is translated to a clear `JetStreamException` (code 503); KeyValue `get()` and

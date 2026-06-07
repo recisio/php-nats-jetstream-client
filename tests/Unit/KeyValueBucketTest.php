@@ -244,9 +244,11 @@ final class KeyValueBucketTest extends TestCase
      */
     public function testGetAll(): void
     {
-        $streamInfo = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":4,"bytes":256,"subjects":{"$KV.cfg.username":2,"$KV.cfg.email":2}}}';
-        // getAll() reads each key concurrently via Direct Get: subjects enumerate as [username, email]
-        // (sids 2, 3). Direct Get returns the raw value as the body with Nats-* + KV-Operation headers.
+        // STREAM.INFO subjects map is paginated: page 1 lists both keys, an empty page 2 ends the loop.
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":4,"bytes":256,"subjects":{"$KV.cfg.username":2,"$KV.cfg.email":2}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"messages":4,"bytes":256,"subjects":{}}}';
+        // getAll() then reads each key concurrently via Direct Get: subjects enumerate as
+        // [username, email] (sids 3, 4). Direct Get returns the raw value as the body with Nats-* headers.
         $usernameHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.username\r\nNats-Sequence: 3\r\nKV-Operation: PURGE\r\n\r\n";
         $emailHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.email\r\nNats-Sequence: 4\r\n\r\n";
         $emailBody = 'b@example.com';
@@ -257,9 +259,10 @@ final class KeyValueBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),       // STREAM.INFO subjects
-            sprintf("HMSG _INBOX.b 2 %d %d\r\n%s\r\n", $uh, $uh, $usernameHdrs),            // username -> PURGE (skipped)
-            sprintf("HMSG _INBOX.c 3 %d %d\r\n%s%s\r\n", $eh, $et, $emailHdrs, $emailBody), // email -> value
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),   // STREAM.INFO page 1 (sid 1)
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),   // STREAM.INFO page 2 empty (sid 2)
+            sprintf("HMSG _INBOX.b 3 %d %d\r\n%s\r\n", $uh, $uh, $usernameHdrs),                  // username -> PURGE (skipped)
+            sprintf("HMSG _INBOX.c 4 %d %d\r\n%s%s\r\n", $eh, $et, $emailHdrs, $emailBody),       // email -> value
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -510,7 +513,8 @@ final class KeyValueBucketTest extends TestCase
     public function testGetAllSkipsKeysThatReturnNotFound(): void
     {
         // A key whose Direct Get races a deletion/expiry returns 404; getAll must skip it, not fail.
-        $streamInfo = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":2,"bytes":64,"subjects":{"$KV.cfg.gone":1,"$KV.cfg.theme":1}}}';
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":2,"bytes":64,"subjects":{"$KV.cfg.gone":1,"$KV.cfg.theme":1}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"messages":2,"bytes":64,"subjects":{}}}';
         $notFound = "NATS/1.0 404 Message Not Found\r\nStatus: 404\r\n\r\n";
         $themeHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.theme\r\nNats-Sequence: 7\r\n\r\n";
         $themeBody = 'dark';
@@ -521,9 +525,10 @@ final class KeyValueBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),       // STREAM.INFO subjects
-            sprintf("HMSG _INBOX.b 2 %d %d\r\n%s\r\n", $nf, $nf, $notFound),                // gone -> 404 (skipped)
-            sprintf("HMSG _INBOX.c 3 %d %d\r\n%s%s\r\n", $th, $tt, $themeHdrs, $themeBody), // theme -> value
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),   // STREAM.INFO page 1 (sid 1)
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),   // STREAM.INFO page 2 empty (sid 2)
+            sprintf("HMSG _INBOX.b 3 %d %d\r\n%s\r\n", $nf, $nf, $notFound),                      // gone -> 404 (skipped)
+            sprintf("HMSG _INBOX.c 4 %d %d\r\n%s%s\r\n", $th, $tt, $themeHdrs, $themeBody),       // theme -> value
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -532,6 +537,26 @@ final class KeyValueBucketTest extends TestCase
         $all = $client->jetStream()->keyValue('cfg')->getAll()->await();
 
         self::assertSame(['theme' => 'dark'], $all);
+    }
+
+    public function testGetAllThrowsOnStreamInfoApiError(): void
+    {
+        // A STREAM.INFO API error must surface, not be swallowed into an empty result.
+        $error = '{"error":{"code":404,"description":"stream not found"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($error), $error),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('stream not found');
+
+        $client->jetStream()->keyValue('cfg')->getAll()->await();
     }
 
     public function testGetStatusFallsBackLastSequenceToMessagesWhenMissing(): void

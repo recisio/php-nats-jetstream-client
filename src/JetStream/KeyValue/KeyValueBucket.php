@@ -399,18 +399,48 @@ final class KeyValueBucket
     private function requestStreamInfoWithSubjects(): array
     {
         $subject = JetStreamApi::STREAM_INFO_PREFIX . $this->streamName();
-        $payload = json_encode(['subjects_filter' => $this->subjectPrefix() . '>'], JSON_THROW_ON_ERROR);
-        $message = $this->client->request($subject, $payload)->await();
 
-        $data = $this->decodeReply($message->payload);
+        // The STREAM.INFO subjects map is server-capped, so a bucket with many keys must be enumerated
+        // across pages (offset) or getAll() would silently truncate. The no-new-subjects guard also
+        // terminates safely against a server that ignores `offset`.
+        $collected = [];
+        $offset = 0;
 
-        /** @var array<string,mixed> $state */
-        $state = is_array($data['state'] ?? null) ? $data['state'] : [];
+        do {
+            $payload = json_encode([
+                'subjects_filter' => $this->subjectPrefix() . '>',
+                'offset' => $offset,
+            ], JSON_THROW_ON_ERROR);
+            $data = $this->decodeReply($this->client->request($subject, $payload)->await()->payload);
 
-        /** @var array<string,int> $subjects */
-        $subjects = is_array($state['subjects'] ?? null) ? $state['subjects'] : [];
+            /** @var array<string,mixed>|null $error */
+            $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+            if ($error !== null) {
+                throw new JetStreamException(
+                    (string) ($error['description'] ?? 'JetStream API error'),
+                    (int) ($error['code'] ?? 0),
+                );
+            }
 
-        return ['subjects' => $subjects];
+            /** @var array<string,mixed> $state */
+            $state = is_array($data['state'] ?? null) ? $data['state'] : [];
+
+            /** @var array<string,int> $subjects */
+            $subjects = is_array($state['subjects'] ?? null) ? $state['subjects'] : [];
+
+            $newCount = 0;
+            foreach ($subjects as $name => $count) {
+                $name = (string) $name;
+                if (!isset($collected[$name])) {
+                    $collected[$name] = (int) $count;
+                    ++$newCount;
+                }
+            }
+
+            $offset += count($subjects);
+        } while ($subjects !== [] && $newCount > 0);
+
+        return ['subjects' => $collected];
     }
 
     /**
