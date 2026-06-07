@@ -63,6 +63,8 @@ final class NatsConnection
     private int $outstandingPings = 0;
     private ?string $pingTimerId = null;
     private bool $drainFlushPending = false;
+    /** Set while flush() awaits its PONG; cleared by the PONG handler. */
+    private bool $flushPending = false;
     /**
      * In-progress reconnect, so concurrent callers wait for it instead of starting a second one.
      *
@@ -316,6 +318,43 @@ final class NatsConnection
 
             $this->transport->write($this->codec->encodeUnsubscribe($sid, $maxMessages))->await();
             $this->dropSubscriptionState($sid);
+        });
+    }
+
+    /**
+     * Flushes the outbound buffer and waits for the server to round-trip a PONG, confirming the server
+     * has processed everything written so far. Useful to ensure a SUBSCRIBE is registered server-side
+     * before relying on it (e.g. before publishing a request to a freshly-subscribed responder).
+     * Bounded by the configured request timeout.
+     *
+     * @return Future<void>
+     */
+    public function flush(): Future
+    {
+        return async(function (): void {
+            if ($this->state !== ConnectionState::Open) {
+                throw new ConnectionException('Connection is not open');
+            }
+
+            $this->flushPending = true;
+            $this->transport->write($this->codec->encodePing())->await();
+
+            $cancellation = new TimeoutCancellation(max(0.1, $this->options->requestTimeoutMs / 1000));
+            try {
+                while ($this->flushPending) {
+                    $frames = $this->processIncoming($cancellation)->await();
+
+                    // A read that produced no complete frame must not busy-spin: yield so the deadline
+                    // can fire (processIncoming() returns 0 synchronously on an empty read).
+                    if ($frames === 0 && $this->flushPending) {
+                        delay(0.001, cancellation: $cancellation);
+                    }
+                }
+            } catch (CancelledException) {
+                throw new TimeoutException('Flush timed out waiting for server PONG');
+            } finally {
+                $this->flushPending = false;
+            }
         });
     }
 
@@ -909,6 +948,7 @@ final class NatsConnection
         if ($frame->type === ProtocolFrameType::Pong) {
             $this->outstandingPings = 0;
             $this->drainFlushPending = false;
+            $this->flushPending = false;
 
             return;
         }

@@ -16,6 +16,7 @@ final class ServiceEndpoint
      * @param string $subject NATS subject subscribed by this endpoint.
      * @param ?string $queueGroup Optional queue group for shared subscription dispatch.
      * @param array<string,mixed>|null $schema Optional request schema for validator hooks.
+     * @param array<string,string> $metadata Optional per-endpoint metadata advertised in INFO.
      * @param int $requests Runtime counter of handled requests.
      * @param int $errors Runtime counter of handler/validation errors.
      * @param ?string $lastError Most recent endpoint error message.
@@ -27,6 +28,8 @@ final class ServiceEndpoint
         public readonly ?string $queueGroup,
         /** @var array<string,mixed>|null */
         public readonly ?array $schema = null,
+        /** @var array<string,string> */
+        public readonly array $metadata = [],
         public int $requests = 0,
         public int $errors = 0,
         public ?string $lastError = null,

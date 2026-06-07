@@ -1318,6 +1318,24 @@ final class NatsConnectionTest extends TestCase
         self::assertSame(['start:A', 'end:A', 'start:B', 'end:B'], $log);
     }
 
+    public function testFlushSendsPingAndResolvesOnPong(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",   // connect handshake PONG
+            "PONG\r\n",   // the flush() PONG
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $connection->flush()->await();
+
+        // flush() wrote a PING and resolved once the server's PONG round-tripped.
+        self::assertContains("PING\r\n", $transport->writes);
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
     public function testDrainedSubscriptionQueuesAreNotRetained(): void
     {
         $transport = new FakeTransport([

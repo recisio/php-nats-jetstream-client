@@ -24,6 +24,16 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[feature]` Added `flush()` (on `NatsClient`/`NatsConnection`): sends a PING and waits for the
+  server's PONG, confirming the server has processed everything written so far (e.g. a SUBSCRIBE
+  before publishing a dependent request). Bounded by the request timeout.
+- `[feature]` Service endpoints accept optional per-endpoint `metadata` (`addEndpoint(..., metadata:)`),
+  advertised in the `$SRV.INFO` response per the NATS micro spec.
+- `[bugfix]` The protocol parser now rejects a size/sid token that would overflow a PHP int (which
+  `(int)` silently saturates to `PHP_INT_MAX`) as a `ProtocolException`.
+- `[bugfix]` `NkeySeedSigner` now zeroes the raw seed and key-pair buffers (`sodium_memzero`) once the
+  Ed25519 key is derived; `ProtocolCodec` fails fast if a configured nkey does not match the seed
+  signer's public key. The service `started` timestamp now carries sub-second precision.
 - `[bugfix]` `ObjectStoreBucket::putStream()` no longer recopies the buffer tail per chunk (O(n^2)
   for a producer block much larger than `chunkSize`); it advances a read offset and compacts once per
   block. The constructor now rejects a non-positive `chunkSize` (which made `put()`/`putStream()` loop

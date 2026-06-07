@@ -90,6 +90,27 @@ final class ServiceTest extends TestCase
     /**
      * Verifies ping/info/stats discovery replies are published.
      */
+    public function testInfoIncludesEndpointMetadata(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG \$SRV.INFO.echo 5 _INBOX.info 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0', 'Echo service')
+            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, metadata: ['team' => 'core']);
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        // The INFO response advertises the per-endpoint metadata (NATS micro spec).
+        self::assertStringContainsString('"metadata":{"team":"core"}', implode('', $transport->writes));
+    }
+
     public function testDiscoveryReplies(): void
     {
         $transport = new FakeTransport([

@@ -39,9 +39,14 @@ final class NkeySeedSigner implements NonceSignerInterface
             $keyPair = sodium_crypto_sign_seed_keypair($rawSeed);
             $this->secretKey = sodium_crypto_sign_secretkey($keyPair);
             $this->publicKeyRaw = sodium_crypto_sign_publickey($keyPair);
+            // Wipe the combined key-pair buffer; the secret key is retained (readonly) for re-auth.
+            sodium_memzero($keyPair);
         } catch (\SodiumException $e) {
             throw new NatsException('Failed to derive Ed25519 key pair from NKey seed', 0, $e);
         }
+
+        // Best-effort defense in depth: zero the raw seed once the key pair has been derived from it.
+        sodium_memzero($rawSeed);
     }
 
     /**

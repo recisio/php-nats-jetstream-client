@@ -255,6 +255,13 @@ final class ProtocolParser
             throw new ProtocolException(sprintf('Invalid %s in frame line: %s', $field, $line));
         }
 
+        // Reject values that would overflow a PHP int (which (int) silently saturates to PHP_INT_MAX),
+        // so a bogus size/sid is a clear protocol error rather than a corrupted-but-accepted value.
+        $maxLen = strlen((string) PHP_INT_MAX);
+        if (strlen($value) > $maxLen || (strlen($value) === $maxLen && $value > (string) PHP_INT_MAX)) {
+            throw new ProtocolException(sprintf('%s out of range in frame line: %s', $field, $line));
+        }
+
         return (int) $value;
     }
 

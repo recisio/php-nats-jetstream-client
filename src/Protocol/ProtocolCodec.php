@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IDCT\NATS\Protocol;
 
 use Composer\InstalledVersions;
+use IDCT\NATS\Auth\NkeySeedSigner;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Exception\ProtocolException;
@@ -78,6 +79,16 @@ final class ProtocolCodec
             }
 
             $payload['sig'] = $options->nonceSigner->sign($serverNonce);
+        }
+
+        // Catch a copy/paste mismatch locally: if a seed signer is configured alongside an explicit
+        // nkey, the nkey must equal the public key the seed derives — otherwise the server would reject
+        // the handshake with an opaque auth error.
+        if ($options->nkey !== null && $options->nkey !== ''
+            && $options->nonceSigner instanceof NkeySeedSigner
+            && $options->nonceSigner->publicKey() !== $options->nkey
+        ) {
+            throw new ProtocolException('Configured nkey does not match the public key derived from the NKey seed');
         }
 
         return sprintf("CONNECT %s\r\n", json_encode($payload, JSON_THROW_ON_ERROR));

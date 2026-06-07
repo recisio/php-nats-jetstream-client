@@ -14,6 +14,15 @@ final class ProtocolParserTest extends TestCase
     /**
      * Verifies parser recognizes line-based control frames in sequence.
      */
+    public function testRejectsOverflowingSizeField(): void
+    {
+        $parser = new ProtocolParser();
+
+        // A 20-digit size exceeds PHP_INT_MAX; (int) would silently saturate, so it must be rejected.
+        $this->expectException(ProtocolException::class);
+        $parser->push("MSG updates 1 99999999999999999999\r\n");
+    }
+
     public function testParsesControlFrames(): void
     {
         $parser = new ProtocolParser();

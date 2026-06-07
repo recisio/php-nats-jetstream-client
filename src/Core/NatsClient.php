@@ -159,6 +159,18 @@ final class NatsClient
     }
 
     /**
+     * Flushes outbound writes and waits for the server's PONG, confirming the server has processed
+     * everything sent so far (e.g. a SUBSCRIBE before a dependent request). Bounded by the request
+     * timeout.
+     *
+     * @return Future<void>
+     */
+    public function flush(): Future
+    {
+        return $this->connection->flush();
+    }
+
+    /**
      * Returns the current connection state (Open, Connecting, Draining, Closed, ...).
      */
     public function state(): ConnectionState

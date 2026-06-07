@@ -74,7 +74,8 @@ final class Service
         }
 
         $this->id = bin2hex(random_bytes(8));
-        $this->startedAt = gmdate('Y-m-d\TH:i:s\Z');
+        // RFC3339 with microseconds, matching the Go/JS micro clients' sub-second precision.
+        $this->startedAt = (new \DateTimeImmutable())->format('Y-m-d\TH:i:s.u\Z');
     }
 
     /**
@@ -82,8 +83,9 @@ final class Service
      *
      * @param callable(NatsMessage):(string|array<string,mixed>|null)|ServiceEndpointHandlerInterface|class-string<ServiceEndpointHandlerInterface>|object $handler
      * @param array<string,mixed>|null $schema Optional JSON Schema for the endpoint.
+     * @param array<string,string> $metadata Optional per-endpoint metadata advertised in $SRV.INFO.
      */
-    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = self::DEFAULT_QUEUE_GROUP, ?array $schema = null): self
+    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = self::DEFAULT_QUEUE_GROUP, ?array $schema = null, array $metadata = []): self
     {
         // Per the NATS micro spec endpoints share a queue group ("q" by default) so multiple
         // service instances load-balance requests. Pass null or '' to opt out (fan-out: every
@@ -103,7 +105,7 @@ final class Service
         }
 
         $resolvedQueueGroup = ($queueGroup === null || $queueGroup === '') ? null : $queueGroup;
-        $endpoint = new ServiceEndpoint($name, $subject, $resolvedQueueGroup, $schema);
+        $endpoint = new ServiceEndpoint($name, $subject, $resolvedQueueGroup, $schema, $metadata);
         $this->endpoints[$subject] = $endpoint;
         $this->handlers[$subject] = $this->resolveHandler($handler);
 
@@ -595,6 +597,7 @@ final class Service
                     'name' => $endpoint->name,
                     'subject' => $endpoint->subject,
                     'queue_group' => $endpoint->queueGroup,
+                    'metadata' => $endpoint->metadata,
                 ];
             }
 
