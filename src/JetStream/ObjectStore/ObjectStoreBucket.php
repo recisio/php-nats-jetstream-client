@@ -350,18 +350,23 @@ final class ObjectStoreBucket
                 $message = $this->jetStream
                     ->directGetLastMessageForSubject($this->streamName(), $this->chunkSubjectForNuid($info->nuid))
                     ->await();
+
+                hash_update($hashContext, $message->payload);
+                $onChunk($message->payload);
+
+                return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
             } catch (JetStreamException $e) {
                 if ($e->getCode() === 404) {
                     throw new JetStreamException('Incomplete object download: expected 1 chunks, received 0');
                 }
 
-                throw $e;
+                if ($e->getCode() !== 503) {
+                    throw $e;
+                }
+
+                // Direct Get unavailable (allow_direct disabled / legacy stream): fall through to the
+                // ephemeral-consumer path below. The await threw before hashing, so the digest is clean.
             }
-
-            hash_update($hashContext, $message->payload);
-            $onChunk($message->payload);
-
-            return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
         }
 
         $remaining = $expected;
@@ -496,6 +501,12 @@ final class ObjectStoreBucket
             } catch (JetStreamException $e) {
                 if ($e->getCode() === 404) {
                     return null;
+                }
+
+                if ($e->getCode() === 503) {
+                    // Direct Get unavailable (allow_direct disabled / legacy stream); fall back to the
+                    // leader STREAM.MSG.GET path so reads still work on interop buckets.
+                    return $this->fetchInfo($name, false);
                 }
 
                 throw $e;

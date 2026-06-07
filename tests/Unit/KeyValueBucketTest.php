@@ -35,6 +35,37 @@ final class KeyValueBucketTest extends TestCase
         return sprintf("HMSG _INBOX.x %d %d %d\r\n%s\r\n", $sid, $h, $h, $hdrs);
     }
 
+    public function testGetFallsBackToStreamMessageWhenDirectGetUnavailable(): void
+    {
+        // Direct Get -> 503 no-responders (allow_direct disabled / interop bucket); get() must fall
+        // back to the leader STREAM.MSG.GET path and still return the value.
+        $envelope = sprintf(
+            '{"message":{"subject":"$KV.cfg.theme","seq":9,"data":"%s"}}',
+            base64_encode('blue'),
+        );
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->kvDirectStatus(1, 503, 'No Responders'),                          // Direct Get (sid 1)
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($envelope), $envelope),    // STREAM.MSG.GET fallback (sid 2)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->get('theme')->await();
+
+        self::assertNotNull($entry);
+        self::assertSame('blue', $entry->value);
+        self::assertSame('PUT', $entry->operation);
+        self::assertSame(9, $entry->revision);
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('PUB $JS.API.DIRECT.GET.KV_cfg', $writes);
+        self::assertStringContainsString('PUB $JS.API.STREAM.MSG.GET.KV_cfg', $writes);
+    }
+
     /**
      * Verifies KV bucket create/delete map to KV stream lifecycle APIs.
      */

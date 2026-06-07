@@ -592,6 +592,32 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertStringContainsString('"offset":2', $writes);
     }
 
+    public function testInfoFallsBackToStreamMessageWhenDirectGetUnavailable(): void
+    {
+        // Direct Get -> 503 no-responders (allow_direct disabled / interop bucket); info() must fall
+        // back to the leader STREAM.MSG.GET path and still return the metadata.
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 503, 'No Responders'),                       // Direct Get (sid 1)
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($meta), $meta),            // STREAM.MSG.GET fallback (sid 2)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+
+        self::assertNotNull($info);
+        self::assertSame('doc.txt', $info->name);
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('$JS.API.DIRECT.GET.OBJ_assets', $writes);
+        self::assertStringContainsString('$JS.API.STREAM.MSG.GET.OBJ_assets', $writes);
+    }
+
     /**
      * Verifies info returns null when JetStream reports the object metadata is not found.
      */

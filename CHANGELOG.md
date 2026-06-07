@@ -24,6 +24,12 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Single-record Direct Get reads now fall back to the leader `STREAM.MSG.GET` path
+  when Direct Get is unavailable (a stream with `allow_direct` disabled, or an older server). The
+  no-responders error is translated to a clear `JetStreamException` (code 503); KeyValue `get()` and
+  Object Store `info()`/`get()` (single-chunk fast path) then retry on the leader, so reads keep
+  working on interop buckets (e.g. created by the `nats` CLI without `allow_direct`) instead of
+  surfacing an opaque error.
 - `[bugfix]` Ordered-consumer gap detection and `streamSequenceOf()` (used for KV/Object Store
   revision) now parse the 11-token domain-qualified ACK reply subject
   (`$JS.ACK.<domain>.<account>.<stream>...` without the trailing random token), not just the 9- and

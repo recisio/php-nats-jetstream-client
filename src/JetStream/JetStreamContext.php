@@ -12,6 +12,7 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
+use IDCT\NATS\Exception\NatsException;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
 use IDCT\NATS\JetStream\Models\AccountInfo;
@@ -321,7 +322,26 @@ final class JetStreamContext
     {
         return async(function () use ($stream, $body): NatsMessage {
             $json = json_encode($body, JSON_THROW_ON_ERROR);
-            $message = $this->client->request(JetStreamApi::STREAM_DIRECT_GET_PREFIX . $stream, $json)->await();
+
+            try {
+                $message = $this->client->request(JetStreamApi::STREAM_DIRECT_GET_PREFIX . $stream, $json)->await();
+            } catch (JetStreamException $e) {
+                throw $e;
+            } catch (NatsException $e) {
+                // No DIRECT.GET responder => the stream has allow_direct disabled, or the server does
+                // not support Direct Get. Surface a clear, catchable 503 so callers can fall back to
+                // the leader STREAM.MSG.GET path instead of leaking an opaque no-responders error.
+                if (str_contains($e->getMessage(), 'No responders')) {
+                    throw new JetStreamException(
+                        'JetStream Direct Get is unavailable on stream ' . $stream
+                        . ' (enable allow_direct on the stream, or use a server that supports Direct Get)',
+                        503,
+                        $e,
+                    );
+                }
+
+                throw $e;
+            }
 
             $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
 

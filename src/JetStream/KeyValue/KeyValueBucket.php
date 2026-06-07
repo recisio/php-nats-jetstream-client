@@ -163,6 +163,12 @@ final class KeyValueBucket
                     return null;
                 }
 
+                if ($e->getCode() === 503) {
+                    // Direct Get unavailable (allow_direct disabled / legacy stream); fall back to the
+                    // leader STREAM.MSG.GET path so reads still work on interop buckets.
+                    return $this->getViaStreamMessage($key);
+                }
+
                 throw $e;
             }
 
@@ -170,14 +176,67 @@ final class KeyValueBucket
             $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
             $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
 
-            return new KeyValueEntry(
-                bucket: $this->bucket,
-                key: $key,
-                value: $operation === 'DEL' || $operation === 'PURGE' ? null : $message->payload,
-                operation: $operation,
-                revision: $revision,
-            );
+            return $this->buildEntry($key, $message->payload, $operation, $revision);
         });
+    }
+
+    private function buildEntry(string $key, string $value, string $operation, ?int $revision): KeyValueEntry
+    {
+        return new KeyValueEntry(
+            bucket: $this->bucket,
+            key: $key,
+            value: $operation === 'DEL' || $operation === 'PURGE' ? null : $value,
+            operation: $operation,
+            revision: $revision,
+        );
+    }
+
+    /**
+     * Leader STREAM.MSG.GET fallback for get() when Direct Get is unavailable (allow_direct disabled
+     * or a server without Direct Get support). Returns null when the key does not exist.
+     */
+    private function getViaStreamMessage(string $key): ?KeyValueEntry
+    {
+        $subject = JetStreamApi::STREAM_MSG_GET_PREFIX . $this->streamName();
+        $payload = json_encode(['last_by_subj' => $this->subjectForKey($key)], JSON_THROW_ON_ERROR);
+        $data = $this->decodeReply($this->client->request($subject, $payload)->await()->payload);
+
+        /** @var array<string,mixed>|null $error */
+        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+        if ($error !== null) {
+            $code = (int) ($error['code'] ?? 0);
+            if ($code === 404) {
+                return null;
+            }
+
+            throw new JetStreamException((string) ($error['description'] ?? 'JetStream API error'), $code);
+        }
+
+        /** @var array<string,mixed>|null $message */
+        $message = is_array($data['message'] ?? null) ? $data['message'] : null;
+        if ($message === null) {
+            return null;
+        }
+
+        $encoded = (string) ($message['data'] ?? '');
+        $value = $encoded === '' ? '' : base64_decode($encoded, true);
+        if ($value === false) {
+            throw new JetStreamException('Malformed KV payload for key ' . $key);
+        }
+
+        $headers = [];
+        $encodedHeaders = (string) ($message['hdrs'] ?? '');
+        if ($encodedHeaders !== '') {
+            $rawHeaders = base64_decode($encodedHeaders, true);
+            if ($rawHeaders !== false) {
+                $headers = NatsHeaders::fromWireBlock($rawHeaders);
+            }
+        }
+
+        $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+        $revision = isset($message['seq']) ? (int) $message['seq'] : null;
+
+        return $this->buildEntry($key, $value, $operation, $revision);
     }
 
     /**
