@@ -478,18 +478,23 @@ final class ObjectStoreBucketTest extends TestCase
         $logoExtra = ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')];
         $oldExtra = ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true];
 
+        $emptyPage = '{"state":{"subjects":{}}}';
+
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            // list(): subjects enumeration (sid 1), then a concurrent Direct Get per meta subject
-            // (logo -> sid 2, old -> sid 3).
+            // list(): paginated enumeration — page 1 (sid 1) returns the subjects, the empty page 2
+            // (sid 2) terminates the loop — then a concurrent Direct Get per meta subject (logo ->
+            // sid 3, old -> sid 4).
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
-            $this->directMetaReply('logo.txt', $logoExtra, 2),
-            $this->directMetaReply('old.txt', $oldExtra, 3),
-            // list(includeDeleted: true): same enumeration (sid 4) then Direct Gets (sid 5, 6).
-            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
-            $this->directMetaReply('logo.txt', $logoExtra, 5),
-            $this->directMetaReply('old.txt', $oldExtra, 6),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($emptyPage), $emptyPage),
+            $this->directMetaReply('logo.txt', $logoExtra, 3),
+            $this->directMetaReply('old.txt', $oldExtra, 4),
+            // list(includeDeleted: true): same again — pages (sid 5, 6) then Direct Gets (sid 7, 8).
+            sprintf("MSG _INBOX.e 5 %d\r\n%s\r\n", strlen((string) $streamInfo), (string) $streamInfo),
+            sprintf("MSG _INBOX.f 6 %d\r\n%s\r\n", strlen($emptyPage), $emptyPage),
+            $this->directMetaReply('logo.txt', $logoExtra, 7),
+            $this->directMetaReply('old.txt', $oldExtra, 8),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -506,6 +511,43 @@ final class ObjectStoreBucketTest extends TestCase
         $writes = implode('', $transport->writes);
         self::assertStringContainsString('"subjects_filter":"$O.assets.M.>"', $writes);
         self::assertStringContainsString('$JS.API.DIRECT.GET.OBJ_assets', $writes);
+    }
+
+    public function testListPaginatesAcrossSubjectPages(): void
+    {
+        // The subjects map is server-capped, so a large bucket is enumerated across pages. Here each
+        // object arrives on its own page; list() must collect both (not truncate to the first page).
+        $page1 = (string) json_encode(['state' => ['subjects' => ['$O.assets.M.' . $this->encodeName('a.txt') => 1]]], JSON_THROW_ON_ERROR);
+        $page2 = (string) json_encode(['state' => ['subjects' => ['$O.assets.M.' . $this->encodeName('b.txt') => 1]]], JSON_THROW_ON_ERROR);
+        $emptyPage = '{"state":{"subjects":{}}}';
+        $extra = ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')];
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($page1), $page1),           // page 1 (sid 1): a.txt
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($page2), $page2),           // page 2 (sid 2): b.txt
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($emptyPage), $emptyPage),   // page 3 (sid 3): empty -> stop
+            $this->directMetaReply('a.txt', $extra, 4),
+            $this->directMetaReply('b.txt', $extra, 5),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $objects = $client->jetStream()->objectStore('assets')->list()->await();
+
+        // Both objects are returned (one came from page 2 — the old single-page code would miss it).
+        self::assertCount(2, $objects);
+        $names = array_map(static fn ($o): string => $o->name, $objects);
+        sort($names);
+        self::assertSame(['a.txt', 'b.txt'], $names);
+
+        // Verify three STREAM.INFO pages were requested at increasing offsets.
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('"offset":0', $writes);
+        self::assertStringContainsString('"offset":1', $writes);
+        self::assertStringContainsString('"offset":2', $writes);
     }
 
     /**
@@ -718,8 +760,9 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),  // metaSubjects() (sid 1)
-            $this->directStatusReply(2, 500, 'boom'),                                 // Direct Get -> non-404 error
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo),  // metaSubjects() page 1 (sid 1)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen('{"state":{"subjects":{}}}'), '{"state":{"subjects":{}}}'), // terminator page (sid 2)
+            $this->directStatusReply(3, 500, 'boom'),                                 // Direct Get -> non-404 error
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -789,9 +832,10 @@ final class ObjectStoreBucketTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo), // metaSubjects() (sid 1)
-            $this->directStatusReply(2, 404, 'message not found'),                    // gone.txt -> 404 (skipped)
-            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 3), // logo.txt -> present
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo), // metaSubjects() page 1 (sid 1)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen('{"state":{"subjects":{}}}'), '{"state":{"subjects":{}}}'), // terminator page (sid 2)
+            $this->directStatusReply(3, 404, 'message not found'),                    // gone.txt -> 404 (skipped)
+            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 4), // logo.txt -> present
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);

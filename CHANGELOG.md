@@ -24,6 +24,11 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Object Store `list()` now paginates the meta-subject enumeration (via the
+  STREAM.INFO `offset`) instead of reading a single page, so a bucket with more objects
+  than the server's subjects-map cap is no longer silently truncated. The loop terminates
+  on the first empty/duplicate page, so it is safe even against a server that ignores
+  `offset`.
 - `[bugfix]` `NatsHeaders::toWireBlock()` now rejects an empty/blank header name or one
   containing whitespace or a colon (previously only CR/LF were rejected, so a bad name
   silently produced a malformed/mutated block), and trims surrounding whitespace from

@@ -645,27 +645,51 @@ final class ObjectStoreBucket
     private function metaSubjects(): array
     {
         $apiSubject = JetStreamApi::STREAM_INFO_PREFIX . $this->streamName();
-        $payload = json_encode(['subjects_filter' => $this->metaPrefix() . '>'], JSON_THROW_ON_ERROR);
-        $message = $this->client->request($apiSubject, $payload)->await();
 
-        /** @var array<string,mixed> $data */
-        $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+        // The STREAM.INFO subjects map is capped by the server, so a bucket with many objects must be
+        // enumerated across pages (offset) — otherwise list() would silently truncate. The
+        // no-new-subjects guard terminates safely even against a server that ignores `offset` (it
+        // then returns the whole first page and the second page adds nothing).
+        $collected = [];
+        $offset = 0;
 
-        /** @var array<string,mixed>|null $error */
-        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
-        if ($error !== null) {
-            throw new JetStreamException(
-                (string) ($error['description'] ?? 'JetStream API error'),
-                (int) ($error['code'] ?? 0),
-            );
-        }
+        do {
+            $payload = json_encode([
+                'subjects_filter' => $this->metaPrefix() . '>',
+                'offset' => $offset,
+            ], JSON_THROW_ON_ERROR);
+            $message = $this->client->request($apiSubject, $payload)->await();
 
-        /** @var array<string,mixed> $state */
-        $state = is_array($data['state'] ?? null) ? $data['state'] : [];
-        /** @var array<string,int> $subjects */
-        $subjects = is_array($state['subjects'] ?? null) ? $state['subjects'] : [];
+            /** @var array<string,mixed> $data */
+            $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
 
-        return array_map('strval', array_keys($subjects));
+            /** @var array<string,mixed>|null $error */
+            $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+            if ($error !== null) {
+                throw new JetStreamException(
+                    (string) ($error['description'] ?? 'JetStream API error'),
+                    (int) ($error['code'] ?? 0),
+                );
+            }
+
+            /** @var array<string,mixed> $state */
+            $state = is_array($data['state'] ?? null) ? $data['state'] : [];
+            /** @var array<string,int> $subjects */
+            $subjects = is_array($state['subjects'] ?? null) ? $state['subjects'] : [];
+
+            $page = array_map('strval', array_keys($subjects));
+            $newCount = 0;
+            foreach ($page as $subject) {
+                if (!isset($collected[$subject])) {
+                    $collected[$subject] = true;
+                    ++$newCount;
+                }
+            }
+
+            $offset += count($page);
+        } while ($page !== [] && $newCount > 0);
+
+        return array_keys($collected);
     }
 
     /**
