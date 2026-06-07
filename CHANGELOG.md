@@ -24,6 +24,12 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` A JetStream flow-control STALL heartbeat is now answered. The server leaves the message
+  reply empty for a stall and puts the flow-control reply subject in the `Nats-Consumer-Stalled`
+  header value; the client previously detected the stall but published to the empty reply, so the
+  ack never reached the server and a throttled ordered/flow-controlled consumer could stall
+  indefinitely with no error surfaced. The normal `$JS.FC.` flow-control-request reply path is
+  unchanged.
 - `[bugfix]` Subscription dispatch is now non-reentrant per SID. If a handler awaits on the
   connection (e.g. an ordered consumer recreating itself during gap recovery), a heartbeat tick
   or a nested `request()` self-pump could previously re-enter the per-SID drain and deliver that

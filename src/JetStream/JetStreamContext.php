@@ -944,12 +944,21 @@ final class JetStreamContext
             $normalizedDescription = preg_replace('/\s+/', ' ', $description) ?: '';
             $replyTo = $message->replyTo ?? '';
 
-            $isFlowControl = $normalizedDescription === 'flowcontrol request'
-                || str_starts_with($replyTo, '$JS.FC.')
-                || array_key_exists('Nats-Consumer-Stalled', $headers);
+            // A flow-control REQUEST carries its reply subject in the message reply ($JS.FC.*). A
+            // stalled idle heartbeat instead carries the flow-control reply subject in the
+            // Nats-Consumer-Stalled header VALUE and leaves the message reply empty — answer that one,
+            // otherwise the server never gets its ack and keeps the consumer stalled (delivery hangs).
+            $stalledReply = (string) ($headers['Nats-Consumer-Stalled'] ?? '');
 
-            if ($isFlowControl && $replyTo !== '') {
-                $this->client->publish($replyTo, '')->await();
+            if ($stalledReply !== '') {
+                $this->client->publish($stalledReply, '')->await();
+            } else {
+                $isFlowControl = $normalizedDescription === 'flowcontrol request'
+                    || str_starts_with($replyTo, '$JS.FC.');
+
+                if ($isFlowControl && $replyTo !== '') {
+                    $this->client->publish($replyTo, '')->await();
+                }
             }
 
             // Status 100 control messages are not user payload deliveries.

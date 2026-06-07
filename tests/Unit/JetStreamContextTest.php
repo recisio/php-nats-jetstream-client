@@ -616,6 +616,52 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies a stalled idle heartbeat is answered on the Nats-Consumer-Stalled subject (not the
+     * empty message reply), so the server's flow-control stall is cleared instead of hanging.
+     */
+    public function testSubscribePushConsumerAnswersStalledHeartbeat(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC","deliver_subject":"deliver.proc"}}';
+        // Status-100 heartbeat with NO message reply; the FC reply subject is in the header value.
+        $stalledHeaders = NatsHeaders::toWireBlock([
+            'Status' => '100',
+            'Description' => 'Idle Heartbeat',
+            'Nats-Consumer-Stalled' => 'stall.reply',
+        ]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+            sprintf(
+                "HMSG deliver.proc 2 %d %d\r\n%s\r\n", // no reply subject
+                strlen($stalledHeaders),
+                strlen($stalledHeaders),
+                $stalledHeaders,
+            ),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $handled = false;
+        $client->jetStream()->subscribePushConsumer(
+            'ORDERS',
+            'PROC',
+            static function () use (&$handled): void {
+                $handled = true;
+            },
+            'deliver.proc',
+            'orders.*',
+        )->await();
+
+        $client->processIncoming()->await();
+
+        self::assertFalse($handled); // not a user payload delivery
+        self::assertStringContainsString("PUB stall.reply 0\r\n\r\n", implode('', $transport->writes));
+    }
+
+    /**
      * Verifies heartbeat control messages are ignored and not forwarded to user handlers.
      */
     public function testSubscribePushConsumerIgnoresHeartbeat(): void
