@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Protocol;
 
+use Composer\InstalledVersions;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Exception\ProtocolException;
@@ -16,6 +17,9 @@ use IDCT\NATS\Exception\ProtocolException;
  */
 final class ProtocolCodec
 {
+    /** Reported in CONNECT when the installed package version cannot be resolved at runtime. */
+    private const FALLBACK_CLIENT_VERSION = '1.0.1';
+
     /**
      * Builds the CONNECT frame payload for the initial client handshake.
      */
@@ -23,7 +27,7 @@ final class ProtocolCodec
     {
         $payload = [
             'lang' => 'php',
-            'version' => '0.1.0-dev',
+            'version' => self::clientVersion(),
             'protocol' => 1,
             'verbose' => $options->verbose,
             'pedantic' => $options->pedantic,
@@ -77,6 +81,27 @@ final class ProtocolCodec
         }
 
         return sprintf("CONNECT %s\r\n", json_encode($payload, JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * Resolves the client library version to advertise in CONNECT (shown in server `connz`/
+     * monitoring), preferring the installed Composer package version and falling back to a constant
+     * when package metadata is unavailable (e.g. running from source).
+     */
+    private static function clientVersion(): string
+    {
+        if (class_exists(InstalledVersions::class)) {
+            try {
+                $version = InstalledVersions::getPrettyVersion('idct/php-nats-jetstream-client');
+                if ($version !== null && $version !== '') {
+                    return $version;
+                }
+            } catch (\OutOfBoundsException) {
+                // Package not registered with Composer's runtime metadata; fall back below.
+            }
+        }
+
+        return self::FALLBACK_CLIENT_VERSION;
     }
 
     /**

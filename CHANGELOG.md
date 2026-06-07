@@ -24,6 +24,9 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` The CONNECT frame now advertises the resolved client library version (from the
+  installed Composer package, with a constant fallback) instead of the stale hardcoded
+  `0.1.0-dev`, so server `connz`/monitoring attributes traffic to the correct version.
 - `[bugfix]` Ephemeral push consumers (KeyValue/Object Store `watch()`, ordered consumer)
   now set an `inactive_threshold`, so the server reaps them once the subscription ends
   instead of leaking server-side consumers when a long-running app re-subscribes. An active

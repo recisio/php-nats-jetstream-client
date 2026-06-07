@@ -26,6 +26,15 @@ final class ProtocolCodecTest extends TestCase
         self::assertStringContainsString('"name":"test-client"', $result);
     }
 
+    public function testEncodeConnectAdvertisesResolvedClientVersion(): void
+    {
+        $result = (new ProtocolCodec())->encodeConnect(new NatsOptions());
+
+        // The CONNECT version is sourced from the installed package, not the old hardcoded literal.
+        self::assertMatchesRegularExpression('/"version":"[^"]+"/', $result);
+        self::assertStringNotContainsString('0.1.0-dev', $result);
+    }
+
     /**
      * Verifies CONNECT encoding includes username/password fields.
      */
