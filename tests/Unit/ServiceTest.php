@@ -321,6 +321,11 @@ final class ServiceTest extends TestCase
         self::assertStringContainsString('Internal server error', $writes);
         self::assertStringNotContainsString('secret-dsn', $writes);
 
+        // Micro-spec error headers are present so a generic client can detect the failure.
+        self::assertStringContainsString('HPUB _INBOX.req ', $writes);
+        self::assertStringContainsString('Nats-Service-Error:Internal server error', $writes);
+        self::assertStringContainsString('Nats-Service-Error-Code:500', $writes);
+
         // The real detail is still available to the operator server-side (lastError / STATS).
         $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
         self::assertSame('secret-dsn user:pass@db-host', $endpoint['last_error'] ?? null);

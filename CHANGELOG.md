@@ -24,6 +24,11 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Microservice endpoint error replies now carry the NATS micro-spec `Nats-Service-Error`
+  and `Nats-Service-Error-Code` reply headers (400 for validation, 500 for handler errors), so a
+  generic client (Go `micro`, `nats` CLI) detects the failure by header instead of treating the
+  header-less JSON error body as success. The description is collapsed to a single line so a crafted
+  message cannot break header framing; the JSON error body is unchanged.
 - `[bugfix]` KeyValue `getAll()` now paginates the STREAM.INFO subjects map (via `offset`) instead
   of reading a single page, so a bucket with more keys than the server's subjects-map cap is no longer
   silently truncated (mirroring Object Store `list()`), and it now throws on a STREAM.INFO API error

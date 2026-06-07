@@ -195,13 +195,17 @@ final class Service
                                         'error' => $validationError,
                                     ]);
 
-                                    $this->publishResponse($message->replyTo, $this->errorPayload(
-                                        code: 'VALIDATION_ERROR',
-                                        message: $validationError,
-                                        correlationId: is_string($context['correlation_id'] ?? null)
-                                            ? $context['correlation_id']
-                                            : null,
-                                    ));
+                                    $this->publishResponse(
+                                        $message->replyTo,
+                                        $this->errorPayload(
+                                            code: 'VALIDATION_ERROR',
+                                            message: $validationError,
+                                            correlationId: is_string($context['correlation_id'] ?? null)
+                                                ? $context['correlation_id']
+                                                : null,
+                                        ),
+                                        $this->serviceErrorHeaders('400', $validationError),
+                                    );
 
                                     // Emit the terminal request_end on the rejection path too, so an
                                     // observer that opened a span/timer/gauge on request_start does not
@@ -213,6 +217,8 @@ final class Service
                                     return;
                                 }
                             }
+
+                            $errorHeaders = null;
 
                             try {
                                 $response = ($this->handlers[$subject])($message);
@@ -235,6 +241,7 @@ final class Service
                                         ? $context['correlation_id']
                                         : null,
                                 );
+                                $errorHeaders = $this->serviceErrorHeaders('500', 'Internal server error');
                             } finally {
                                 $duration = (int) max(0, hrtime(true) - $started);
                                 $endpoint->processingTimeNs += $duration;
@@ -248,7 +255,7 @@ final class Service
                                 return;
                             }
 
-                            $this->publishResponse($message->replyTo, $response);
+                            $this->publishResponse($message->replyTo, $response, $errorHeaders);
                         },
                         $endpoint->queueGroup,
                     )->await();
@@ -454,19 +461,41 @@ final class Service
     /**
      * @param string|array<string,mixed> $response
      */
-    private function publishResponse(?string $replyTo, string|array $response): void
+    /**
+     * @param string|array<string,mixed> $response
+     * @param array<string,string>|null $errorHeaders NATS micro error headers (Nats-Service-Error[-Code])
+     */
+    private function publishResponse(?string $replyTo, string|array $response, ?array $errorHeaders = null): void
     {
         if ($replyTo === null || $replyTo === '') {
             return;
         }
 
-        if (is_array($response)) {
-            $this->client->publish($replyTo, json_encode($response, JSON_THROW_ON_ERROR))->await();
+        $body = is_array($response) ? json_encode($response, JSON_THROW_ON_ERROR) : $response;
+
+        // The NATS micro spec signals endpoint failures via reply HEADERS, so a generic client
+        // (Go micro, nats CLI) can detect the error without parsing the JSON body.
+        if ($errorHeaders !== null && $errorHeaders !== []) {
+            $this->client->publishWithHeaders($replyTo, $body, $errorHeaders)->await();
 
             return;
         }
 
-        $this->client->publish($replyTo, $response)->await();
+        $this->client->publish($replyTo, $body)->await();
+    }
+
+    /**
+     * Builds the micro-spec error reply headers. The description is collapsed to a single line because
+     * header values cannot contain CR/LF — a crafted handler/validation message must not break framing.
+     *
+     * @return array<string,string>
+     */
+    private function serviceErrorHeaders(string $code, string $message): array
+    {
+        return [
+            'Nats-Service-Error' => trim(preg_replace('/\s+/', ' ', $message) ?? $message),
+            'Nats-Service-Error-Code' => $code,
+        ];
     }
 
     /**
