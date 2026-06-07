@@ -24,6 +24,12 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Reconnect no longer deadlocks when a subscription handler publishes during recovery.
+  Subscription-replay (`drainImmediateServerFrames`) previously delivered buffered messages to user
+  callbacks while still inside the reconnect critical section; a callback that published and hit a
+  write failure re-entered `recoverConnection()` and awaited the in-progress reconnect, hanging the
+  recovery fiber. Buffered messages are now delivered after recovery completes (outside the critical
+  section), so such a callback starts a fresh recovery instead of deadlocking.
 - `[bugfix]` Microservice endpoint error replies now carry the NATS micro-spec `Nats-Service-Error`
   and `Nats-Service-Error-Code` reply headers (400 for validation, 500 for handler errors), so a
   generic client (Go `micro`, `nats` CLI) detects the failure by header instead of treating the

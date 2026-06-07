@@ -586,6 +586,46 @@ final class NatsConnectionTest extends TestCase
         self::assertSame("SUB updates 1\r\n", $transport->writes[5]);
     }
 
+    public function testCallbackMayPublishDuringPostReconnectDeliveryWithoutDeadlock(): void
+    {
+        // A message buffered during reconnect replay is now delivered AFTER recovery exits its critical
+        // section (not inside it). So a handler that publishes when invoked completes normally instead of
+        // re-entering recoverConnection() and deadlocking on the in-progress reconnect.
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__THROW__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    "MSG updates 1 5\r\nhello\r\n", // buffered during replay
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $options = new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 3, reconnectDelayMs: 1, reconnectJitterMs: 0, pingIntervalSeconds: 0);
+        $connection = new NatsConnection($options, $transport);
+        $connection->connect()->await();
+
+        $received = [];
+        $connection->subscribe('updates', static function (NatsMessage $message) use (&$received, $connection): void {
+            $received[] = $message->payload;
+            // Publishing from within the post-reconnect delivery must not deadlock.
+            $connection->publish('ack.' . $message->payload, 'ok')->await();
+        })->await();
+
+        $connection->processIncoming()->await();
+
+        self::assertSame(['hello'], $received);
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertStringContainsString('PUB ack.hello 2', implode('', $transport->writes));
+    }
+
     public function testProcessIncomingRecoversOnPeerEof(): void
     {
         // A graceful peer close (EOF), not a thrown read error, must still trigger reconnect + replay.

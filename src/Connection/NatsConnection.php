@@ -656,6 +656,13 @@ final class NatsConnection
         } finally {
             $this->reconnecting = null;
         }
+
+        // Deliver any messages buffered during subscription replay now that recovery has finished and
+        // we are OUT of the critical section: `reconnecting` is cleared, so a callback that publishes
+        // and hits a write failure starts a fresh recovery instead of deadlocking on the in-progress
+        // one, and the per-sid dispatch guard keeps it non-reentrant. (Only reached on success; the
+        // catch above rethrows on failure.)
+        $this->drainAllPending();
     }
 
     /**
@@ -716,6 +723,12 @@ final class NatsConnection
      *
      * This is primarily used during reconnect subscription replay so prompt `-ERR`
      * responses do not leave the connection open with silently rejected subscriptions.
+     *
+     * It deliberately does NOT drain message deliveries to user callbacks: this runs inside the
+     * reconnect critical section (with state already Open and `reconnecting` set), and a callback that
+     * publishes and hits a write failure would re-enter recoverConnection(), await the in-progress
+     * reconnect deferred, and deadlock. Message frames captured here are buffered via handleFrame() and
+     * delivered by the normal processIncoming()/heartbeat drain once recovery has completed.
      */
     private function drainImmediateServerFrames(): void
     {
@@ -741,8 +754,6 @@ final class NatsConnection
 
                 $this->handleFrame($frame);
             }
-
-            $this->drainAllPending();
         }
     }
 
