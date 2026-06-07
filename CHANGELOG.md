@@ -145,6 +145,11 @@ were all verified working and are unchanged.
   Live-updates-only semantics are unchanged.
 - `[feature]` `JetStreamContext::streamSequenceOf()` returns the stream sequence of a
   JetStream-delivered message (from its `$JS.ACK` reply).
+- `[feature]` Object Store `watch()` now delivers updates through a JetStream push consumer
+  (consistent with KeyValue `watch()`) and exposes each update's stream sequence via the new
+  `ObjectInfo::$revision` field. Previously it used a plain core subscription that carried no
+  sequence/revision. Live-updates-only semantics (`deliver_policy=new`, ack-free) are
+  unchanged; `$revision` is `null` on `ObjectInfo`s from `get()`/`info()`/`list()`.
 - `[bugfix]` `Service::stop()` now tolerates a closed/lost connection: it unsubscribes
   each endpoint best-effort and always clears its subscription state, instead of
   aborting on the first failure (which leaked the remaining subscriptions and broke a

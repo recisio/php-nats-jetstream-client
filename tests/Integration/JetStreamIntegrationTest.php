@@ -1073,6 +1073,47 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
+     * Verifies Object Store watch() delivers live updates over a JetStream push consumer and exposes
+     * each update's stream sequence as the ObjectInfo revision.
+     */
+    public function testJetStreamObjectStoreWatchDeliversUpdatesWithRevision(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'ow' . strtolower(bin2hex(random_bytes(2)));
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $seen = null;
+        $sid = $store->watch(static function (\IDCT\NATS\JetStream\ObjectStore\ObjectInfo $info) use (&$seen): void {
+            $seen = $info;
+        })->await();
+
+        $store->put('logo.txt', 'hello-object')->await();
+
+        $cancellation = new TimeoutCancellation(5.0);
+        try {
+            while ($seen === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        self::assertNotNull($seen);
+        self::assertSame('logo.txt', $seen->name);
+        self::assertNotNull($seen->revision);
+        self::assertGreaterThan(0, $seen->revision);
+
+        $client->unsubscribe($sid)->await();
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies stream retention/storage/discard policy options persist after create.
      */
     public function testJetStreamStreamPoliciesPersist(): void

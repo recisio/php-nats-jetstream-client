@@ -441,17 +441,28 @@ final class ObjectStoreBucket
     public function watch(callable $handler, string $pattern = '>'): Future
     {
         return async(function () use ($handler, $pattern): int {
-            return $this->client->subscribe($this->metaPrefix() . $pattern, function (NatsMessage $message) use ($handler): void {
-                $metadata = json_decode($message->payload, true);
-                if (!is_array($metadata)) {
-                    // Tolerate a malformed meta delivery instead of throwing out of the dispatch loop,
-                    // which would abort delivery of buffered frames for other subscriptions too.
-                    return;
-                }
+            $filter = $this->metaPrefix() . $pattern;
 
-                /** @var array<string,mixed> $metadata */
-                $handler(ObjectInfo::fromArray($this->bucket, $metadata));
-            })->await();
+            // Deliver via a JetStream push consumer (not a plain core subscription) so each update
+            // carries its stream sequence, exposed as the ObjectInfo revision — consistent with the
+            // KeyValue watch(). deliver_policy=new keeps live-updates-only semantics; the read is
+            // ack-free.
+            return $this->jetStream->subscribeEphemeralPushConsumer(
+                $this->streamName(),
+                function (NatsMessage $message) use ($handler): void {
+                    $metadata = json_decode($message->payload, true);
+                    if (!is_array($metadata)) {
+                        // Tolerate a malformed meta delivery instead of throwing out of the dispatch
+                        // loop, which would abort delivery of buffered frames for other subscriptions.
+                        return;
+                    }
+
+                    /** @var array<string,mixed> $metadata */
+                    $handler(ObjectInfo::fromArray($this->bucket, $metadata, $this->jetStream->streamSequenceOf($message)));
+                },
+                filterSubject: $filter,
+                consumerOptions: ['deliver_policy' => 'new', 'ack_policy' => 'none'],
+            )->await();
         });
     }
 

@@ -21,6 +21,7 @@ final class ObjectInfo
      * @param bool $deleted Whether this metadata represents a deleted tombstone.
      * @param string $nuid Object NUID; chunks are stored under `$O.<bucket>.C.<nuid>` (official layout).
      * @param array<string,string> $metadata
+     * @param ?int $revision Stream sequence of this metadata record when known (e.g. from watch()); null otherwise.
      */
     public function __construct(
         public readonly string $bucket,
@@ -32,12 +33,13 @@ final class ObjectInfo
         public readonly bool $deleted,
         public readonly string $nuid,
         public readonly array $metadata = [],
+        public readonly ?int $revision = null,
     ) {}
 
     /**
      * @param array<string,mixed> $data
      */
-    public static function fromArray(string $bucket, array $data): self
+    public static function fromArray(string $bucket, array $data, ?int $revision = null): self
     {
         /** @var array<string,string> $metadata */
         $metadata = is_array($data['metadata'] ?? null) ? array_map('strval', $data['metadata']) : [];
@@ -52,6 +54,7 @@ final class ObjectInfo
             deleted: (bool) ($data['deleted'] ?? false),
             nuid: (string) ($data['nuid'] ?? ''),
             metadata: $metadata,
+            revision: $revision,
         );
     }
 }

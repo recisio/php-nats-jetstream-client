@@ -584,10 +584,15 @@ final class ObjectStoreBucketTest extends TestCase
             'deleted' => false,
         ], JSON_THROW_ON_ERROR);
 
+        // watch() runs over a JetStream push consumer: create it (sid 1), then the update is delivered
+        // on the deliver inbox (sid 2) carrying its stream sequence in the $JS.ACK reply -> revision.
+        $createReply = '{"stream_name":"OBJ_assets","name":"OBJWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG \$O.assets.M.%s 1 %d\r\n%s\r\n", $enc, strlen((string) $metadata), (string) $metadata),
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            sprintf("MSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.1.7.1.0.0 %d\r\n%s\r\n", $enc, strlen((string) $metadata), (string) $metadata),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -598,13 +603,19 @@ final class ObjectStoreBucketTest extends TestCase
             $seen = $info;
         })->await();
 
-        self::assertSame(1, $sid);
+        self::assertSame(2, $sid);
         self::assertSame(1, $client->processIncoming()->await());
         self::assertInstanceOf(ObjectInfo::class, $seen);
         /** @var ObjectInfo $seenInfo */
         $seenInfo = $seen;
         self::assertSame('logo.txt', $seenInfo->name);
         self::assertSame('wnuid1', $seenInfo->nuid);
+        // The revision is the delivery's stream sequence (from the $JS.ACK reply).
+        self::assertSame(7, $seenInfo->revision);
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"new"', $writes);
+        self::assertStringContainsString('"ack_policy":"none"', $writes);
     }
 
     public function testWatchToleratesMalformedMetadataAndKeepsDispatching(): void
@@ -619,13 +630,16 @@ final class ObjectStoreBucketTest extends TestCase
             'digest' => $this->digestOf('hello'),
         ], JSON_THROW_ON_ERROR);
 
+        $createReply = '{"stream_name":"OBJ_assets","name":"OBJWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            // A malformed (non-JSON) meta delivery must be skipped, not throw out of the dispatch loop.
-            sprintf("MSG \$O.assets.M.%s 1 %d\r\n%s\r\n", $enc, strlen('not-json'), 'not-json'),
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            // A malformed (non-JSON) meta delivery (sid 2) must be skipped, not throw out of the loop.
+            sprintf("MSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.1.5.1.0.0 %d\r\n%s\r\n", $enc, strlen('not-json'), 'not-json'),
             // A subsequent valid meta on the same subscription is still delivered.
-            sprintf("MSG \$O.assets.M.%s 1 %d\r\n%s\r\n", $enc, strlen((string) $valid), (string) $valid),
+            sprintf("MSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.2.6.2.0.0 %d\r\n%s\r\n", $enc, strlen((string) $valid), (string) $valid),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
