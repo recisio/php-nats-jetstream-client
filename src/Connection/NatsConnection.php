@@ -49,6 +49,17 @@ final class NatsConnection
     private array $subscriptionMeta = [];
     /** @var array<int, SplQueue<NatsMessage>> */
     private array $pendingMessages = [];
+    /**
+     * SIDs whose queue is currently being delivered. A subscription handler may await on the
+     * connection (e.g. an ordered consumer recreating itself), which suspends the dispatch fiber
+     * with readInProgress already cleared; a heartbeat tick or nested request() self-pump would then
+     * re-enter the drain for the SAME sid and deliver its next message on top of the suspended one.
+     * This per-sid guard makes same-sid delivery non-reentrant (FIFO preserved — the suspended loop
+     * resumes and continues), while leaving OTHER sids deliverable so nested requests still complete.
+     *
+     * @var array<int, true>
+     */
+    private array $dispatchingSids = [];
     private int $outstandingPings = 0;
     private ?string $pingTimerId = null;
     private bool $drainFlushPending = false;
@@ -1223,23 +1234,36 @@ final class NatsConnection
             return;
         }
 
-        $queue = $this->pendingMessages[$sid];
-
-        while (!$queue->isEmpty()) {
-            if (!array_key_exists($sid, $this->subscriptions)) {
-                break;
-            }
-
-            /** @var NatsMessage $message */
-            $message = $queue->dequeue();
-            $this->subscriptions[$sid]($message);
+        if (isset($this->dispatchingSids[$sid])) {
+            // Already delivering this sid further up the stack (a handler awaited and suspended). Do
+            // not re-enter: the suspended loop resumes and drains whatever we enqueued meanwhile, so
+            // ordering holds and a handler is never invoked on top of itself.
+            return;
         }
 
-        if ($queue->isEmpty()) {
-            // Don't retain a drained (empty) queue: keep drainAllPending()'s per-chunk scan
-            // proportional to the subscriptions that actually have pending messages, not every
-            // subscription that has ever received one.
-            unset($this->pendingMessages[$sid]);
+        $this->dispatchingSids[$sid] = true;
+
+        try {
+            $queue = $this->pendingMessages[$sid];
+
+            while (!$queue->isEmpty()) {
+                if (!array_key_exists($sid, $this->subscriptions)) {
+                    break;
+                }
+
+                /** @var NatsMessage $message */
+                $message = $queue->dequeue();
+                $this->subscriptions[$sid]($message);
+            }
+
+            if ($queue->isEmpty()) {
+                // Don't retain a drained (empty) queue: keep drainAllPending()'s per-chunk scan
+                // proportional to the subscriptions that actually have pending messages, not every
+                // subscription that has ever received one.
+                unset($this->pendingMessages[$sid]);
+            }
+        } finally {
+            unset($this->dispatchingSids[$sid]);
         }
     }
 

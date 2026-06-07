@@ -24,6 +24,14 @@ were all verified working and are unchanged.
 
 ### Fixed
 
+- `[bugfix]` Subscription dispatch is now non-reentrant per SID. If a handler awaits on the
+  connection (e.g. an ordered consumer recreating itself during gap recovery), a heartbeat tick
+  or a nested `request()` self-pump could previously re-enter the per-SID drain and deliver that
+  subscription's next message on top of the still-suspended handler — corrupting ordered-consumer
+  recovery state (stale by-reference sequence/consumer-name → duplicate `deleteConsumer`/recreate)
+  and causing overlapping/duplicate delivery. Delivery for a SID in flight is now deferred until
+  the suspended handler returns (FIFO preserved); other SIDs stay deliverable so nested requests
+  still complete.
 - `[bugfix]` The CONNECT frame now advertises the resolved client library version (from the
   installed Composer package, with a constant fallback) instead of the stale hardcoded
   `0.1.0-dev`, so server `connz`/monitoring attributes traffic to the correct version.

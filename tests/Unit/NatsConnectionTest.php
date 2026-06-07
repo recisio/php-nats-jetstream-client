@@ -1244,6 +1244,40 @@ final class NatsConnectionTest extends TestCase
         self::assertStringContainsString("PING\r\n", $writes);
     }
 
+    public function testSubscriptionDispatchIsNotReentrantWhenHandlerAwaits(): void
+    {
+        // First message's handler awaits a request() on the same connection. That request self-pumps
+        // processIncoming(), which reads the SECOND message for the same sid and tries to drain it.
+        // Without the per-sid re-entrancy guard the second handler would fire on top of the suspended
+        // first one (log: start:A, start:B, end:B, end:A); with it, B waits for A to finish.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG events 1 1\r\nA\r\n",       // first delivery (sid 1)
+            "MSG events 1 1\r\nB\r\n",       // second delivery (sid 1), read during the awaited request
+            "MSG _INBOX.r 2 1\r\nR\r\n",     // the awaited request's reply (inbox sid 2)
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $log = [];
+        $first = true;
+        $connection->subscribe('events', function (NatsMessage $message) use (&$log, &$first, $connection): void {
+            $tag = $message->payload;
+            $log[] = 'start:' . $tag;
+            if ($first) {
+                $first = false;
+                $connection->request('svc', 'x', 1000)->await();
+            }
+            $log[] = 'end:' . $tag;
+        })->await();
+
+        $connection->processIncoming()->await();
+
+        self::assertSame(['start:A', 'end:A', 'start:B', 'end:B'], $log);
+    }
+
     public function testDrainedSubscriptionQueuesAreNotRetained(): void
     {
         $transport = new FakeTransport([
