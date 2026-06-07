@@ -27,6 +27,10 @@ were all verified working and are unchanged.
 - `[bugfix]` The CONNECT frame now advertises the resolved client library version (from the
   installed Composer package, with a constant fallback) instead of the stale hardcoded
   `0.1.0-dev`, so server `connz`/monitoring attributes traffic to the correct version.
+- `[bugfix]` Object Store `get()`/`getToCallback()` now fetch a single-chunk object with one
+  Direct Get on its chunk subject, instead of creating, pulling from, and deleting a transient
+  ephemeral consumer — turning the common small-object download from 4 round-trips into 1 (plus
+  the metadata read). Multi-chunk objects still use the batched pull-consumer path.
 - `[bugfix]` Object Store `put()` and `delete()` now run the previous-revision lookup
   concurrently with the chunk upload / tombstone publish, awaiting it only just before the
   best-effort chunk purge it feeds. Previously the lookup was a serial round-trip on the

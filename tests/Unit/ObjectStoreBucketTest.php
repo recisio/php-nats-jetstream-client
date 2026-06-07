@@ -70,6 +70,15 @@ final class ObjectStoreBucketTest extends TestCase
         return sprintf("HMSG _INBOX.x %d %d %d\r\n%s%s\r\n", $sid, $h, $h + strlen($body), $hdrs, $body);
     }
 
+    /** Builds a Direct Get reply (HMSG) for a single object chunk (raw bytes body on the NUID subject). */
+    private function directChunkReply(string $nuid, string $payload, int $sid): string
+    {
+        $hdrs = "NATS/1.0\r\nNats-Stream: OBJ_assets\r\nNats-Subject: \$O.assets.C.{$nuid}\r\nNats-Sequence: 3\r\n\r\n";
+        $h = strlen($hdrs);
+
+        return sprintf("HMSG _INBOX.x %d %d %d\r\n%s%s\r\n", $sid, $h, $h + strlen($payload), $hdrs, $payload);
+    }
+
     /**
      * Converts a metaGetResponse() STREAM.MSG.GET envelope into the equivalent Direct Get reply
      * (HMSG with the raw meta JSON as the body), as info()/get()/getToCallback() now read it.
@@ -235,16 +244,11 @@ final class ObjectStoreBucketTest extends TestCase
             'chunks' => 1,
             'digest' => $this->digestOf('hello'),
         ]);
-        $consumer = '{"stream_name":"OBJ_assets","name":"EPH1","config":{"ack_policy":"explicit"}}';
-        $deleteConsumer = '{"success":true}';
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            $this->directReplyFromEnvelope($meta, 1),                          // info()
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),                  // create ephemeral consumer
-            "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",                                              // chunk delivery (no reply -> no ack)
-            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),      // delete consumer
+            $this->directReplyFromEnvelope($meta, 1),     // info() (Direct Get)
+            $this->directChunkReply($nuid, 'hello', 2),   // single-chunk fast path (Direct Get on the NUID subject)
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -257,8 +261,10 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertSame('doc.txt', $fetched->info->name);
         self::assertSame($nuid, $fetched->info->nuid);
 
+        // The single chunk is fetched via Direct Get on its NUID subject (no ephemeral consumer).
         $writes = implode('||', $transport->writes);
-        self::assertStringContainsString('"filter_subject":"$O.assets.C.' . $nuid . '"', $writes);
+        self::assertStringContainsString('"last_by_subj":"$O.assets.C.' . $nuid . '"', $writes);
+        self::assertStringNotContainsString('CONSUMER.CREATE', $writes);
     }
 
     public function testGetVerifiesUnpaddedBase64UrlDigest(): void
@@ -270,16 +276,12 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertNotSame($unpadded, $this->digestOf('hello')); // guard: the fixture is actually unpadded
 
         $meta = $this->metaGetResponse('doc.txt', ['nuid' => $nuid, 'size' => 5, 'chunks' => 1, 'digest' => $unpadded]);
-        $consumer = '{"stream_name":"OBJ_assets","name":"EPH1","config":{"ack_policy":"explicit"}}';
-        $deleteConsumer = '{"success":true}';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
             $this->directReplyFromEnvelope($meta, 1),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
-            "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",
-            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
+            $this->directChunkReply($nuid, 'hello', 2),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -303,16 +305,11 @@ final class ObjectStoreBucketTest extends TestCase
             'chunks' => 1,
             'digest' => $this->digestOf('hello world'),
         ]);
-        $consumer = '{"stream_name":"OBJ_assets","name":"EPH2","config":{"ack_policy":"explicit"}}';
-        $deleteConsumer = '{"success":true}';
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
             $this->directReplyFromEnvelope($meta, 1),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
-            "MSG _INBOX.JS.FETCH.c 3 11\r\nCORRUPTED!!\r\n",
-            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
+            $this->directChunkReply($nuid, 'CORRUPTED!!', 2), // body does not match the metadata digest
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -335,16 +332,11 @@ final class ObjectStoreBucketTest extends TestCase
             'chunks' => 1,
             'digest' => $this->digestOf('hello'),
         ]);
-        $consumer = '{"stream_name":"OBJ_assets","name":"EPH3","config":{"ack_policy":"explicit"}}';
-        $deleteConsumer = '{"success":true}';
-
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
             $this->directReplyFromEnvelope($meta, 1),
-            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($consumer), $consumer),
-            "MSG _INBOX.JS.FETCH.c 3 5\r\nhello\r\n",
-            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),
+            $this->directChunkReply($nuid, 'hello', 2),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -929,7 +921,7 @@ final class ObjectStoreBucketTest extends TestCase
      */
     public function testGetStopsOnPullTimeoutAndFailsCompleteness(): void
     {
-        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuidto01', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuidto01', 'size' => 5, 'chunks' => 2, 'digest' => $this->digestOf('hello')]);
         $consumer = '{"stream_name":"OBJ_assets","name":"EPHTO","config":{"ack_policy":"none"}}';
         $deleteConsumer = '{"success":true}';
         $status = "NATS/1.0 408 Request Timeout\r\nStatus: 408\r\nDescription: Request Timeout\r\n\r\n";
@@ -988,7 +980,7 @@ final class ObjectStoreBucketTest extends TestCase
      */
     public function testGetRethrowsNonTimeoutPullError(): void
     {
-        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuiderr01', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')]);
+        $meta = $this->metaGetResponse('doc.txt', ['nuid' => 'nuiderr01', 'size' => 5, 'chunks' => 2, 'digest' => $this->digestOf('hello')]);
         $consumer = '{"stream_name":"OBJ_assets","name":"EPHERR","config":{"ack_policy":"explicit"}}';
         $deleteConsumer = '{"success":true}';
         $status = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\nDescription: Consumer Deleted\r\n\r\n";

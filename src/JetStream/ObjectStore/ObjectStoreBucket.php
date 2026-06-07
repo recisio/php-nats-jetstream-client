@@ -252,6 +252,28 @@ final class ObjectStoreBucket
             return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
         }
 
+        // Fast path for a single-chunk object (the common case for small objects): the lone chunk is
+        // the only message on its NUID subject, so fetch it with one Direct Get instead of creating,
+        // pulling from, and deleting a transient ephemeral consumer (4 round-trips -> 1).
+        if ($expected === 1) {
+            try {
+                $message = $this->jetStream
+                    ->directGetLastMessageForSubject($this->streamName(), $this->chunkSubjectForNuid($info->nuid))
+                    ->await();
+            } catch (JetStreamException $e) {
+                if ($e->getCode() === 404) {
+                    throw new JetStreamException('Incomplete object download: expected 1 chunks, received 0');
+                }
+
+                throw $e;
+            }
+
+            hash_update($hashContext, $message->payload);
+            $onChunk($message->payload);
+
+            return 'SHA-256=' . $this->base64Url(hash_final($hashContext, true));
+        }
+
         $remaining = $expected;
         $received = 0;
 
