@@ -13,7 +13,7 @@ use function Amp\async;
 
 /**
  * Builder for an atomic (all-or-nothing) JetStream publish batch (ADR-50, NATS 2.12). The target
- * stream must be created with `allow_atomic_publish` enabled.
+ * stream must be created with `allow_atomic` enabled.
  *
  * Messages are staged with `add()` and sent on `commit()`: every message carries a shared
  * `Nats-Batch-Id` and an incrementing `Nats-Batch-Sequence`; the final message carries
@@ -102,7 +102,7 @@ final class BatchPublisher
             $lastIndex = $total - 1;
 
             // Per ADR-50 the batch START (sequence 1) is a request: the server replies with a zero-byte
-            // ack on success or an error if the batch is rejected (e.g. allow_atomic_publish disabled),
+            // ack on success or an error if the batch is rejected (e.g. allow_atomic disabled),
             // so the client learns immediately instead of blindly publishing the whole batch. For a
             // single-message batch the lone message is both start and commit (handled below).
             if ($total > 1) {

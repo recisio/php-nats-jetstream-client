@@ -1563,4 +1563,76 @@ final class JetStreamIntegrationTest extends TestCase
         $js->deleteStream($stream)->await();
         $client->disconnect()->await();
     }
+
+    /**
+     * Verifies atomic batch publish (ADR-50, issue #8) commits all messages and parses the batch ack
+     * against a live 2.12 server. The stream config field is `allow_atomic`.
+     */
+    public function testJetStreamAtomicBatchPublish(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.batch';
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subject], ['allow_atomic' => true])->await();
+
+        $ack = $js->batch()
+            ->add($subject, 'a')
+            ->add($subject, 'b')
+            ->add($subject, 'c')
+            ->commit()
+            ->await();
+
+        self::assertSame(3, $ack->batchCount);
+        self::assertNotNull($ack->batchId);
+
+        $info = $js->getStream($stream)->await();
+        /** @var array<string,mixed> $state */
+        $state = is_array($info->raw['state'] ?? null) ? $info->raw['state'] : [];
+        self::assertSame(3, (int) ($state['messages'] ?? 0));
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies batched / multi Direct Get (ADR-31, issue #13) returns multiple messages in a single
+     * request against a live server.
+     */
+    public function testJetStreamBatchedDirectGet(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $prefix = 'it.' . strtolower($stream);
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream($stream, [$prefix . '.>'], ['allow_direct' => true])->await();
+
+        foreach (['a', 'b', 'c'] as $k) {
+            $js->publish($prefix . '.' . $k, 'val-' . $k)->await();
+        }
+
+        // multi_last: the latest message per subject, in one request.
+        $latest = $js->directGetLastForSubjects($stream, [$prefix . '.a', $prefix . '.b', $prefix . '.c'])->await();
+        self::assertCount(3, $latest);
+
+        // batched get over a sequence range.
+        $all = $js->directGetBatch($stream, ['seq' => 1, 'batch' => 10])->await();
+        self::assertCount(3, $all);
+        $payloads = array_map(static fn (NatsMessage $m): string => $m->payload, $all);
+        sort($payloads);
+        self::assertSame(['val-a', 'val-b', 'val-c'], $payloads);
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
 }
