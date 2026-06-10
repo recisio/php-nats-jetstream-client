@@ -192,6 +192,383 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies createConsumer sends filter_subjects (and omits the singular filter_subject) when an
+     * array of filters is supplied via options (issue #10).
+     */
+    public function testCreateConsumerWithFilterSubjects(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['filter_subjects' => ['orders.eu.>', 'orders.us.>']])->await();
+
+        self::assertStringContainsString('"filter_subjects":["orders.eu.>","orders.us.>"]', $transport->writes[3]);
+        self::assertStringNotContainsString('"filter_subject"', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies combining a single filter subject with filter_subjects is rejected before dispatch.
+     */
+    public function testCreateConsumerRejectsBothFilterForms(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Use either a single filter subject or filter_subjects, not both');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', 'orders.*', ['filter_subjects' => ['orders.eu.>']])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies a filter_subjects array containing an empty subject is rejected before dispatch.
+     */
+    public function testCreateConsumerRejectsEmptyFilterSubjectEntry(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('filter_subjects must contain only non-empty subject strings');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['filter_subjects' => ['orders.eu.>', '']])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies the mutual-exclusion guard also fires when the singular filter_subject is smuggled in
+     * via the options bag alongside filter_subjects (issue #10).
+     */
+    public function testCreateConsumerRejectsFilterSubjectInOptionsConflict(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Use either a single filter subject or filter_subjects, not both');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, [
+                'filter_subject' => 'orders.eu.>',
+                'filter_subjects' => ['orders.us.>'],
+            ])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies an empty filter subject is rejected uniformly on the ephemeral path too (issue #10).
+     */
+    public function testCreateEphemeralConsumerRejectsEmptyFilterSubject(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Consumer filter subject must not be empty');
+
+        try {
+            $client->jetStream()->createEphemeralConsumer('ORDERS', '')->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies filter_subjects flows through the push-consumer create path too (issue #10).
+     */
+    public function testCreatePushConsumerWithFilterSubjects(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->createPushConsumer('ORDERS', 'PROC', '_INBOX.deliver', null, [
+            'filter_subjects' => ['orders.eu.>', 'orders.us.>'],
+        ])->await();
+
+        self::assertStringContainsString('"filter_subjects":["orders.eu.>","orders.us.>"]', $transport->writes[3]);
+        self::assertStringNotContainsString('"filter_subject"', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies createConsumer validates and forwards priority-group config (issue #7).
+     */
+    public function testCreateConsumerWithPriorityGroups(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->createConsumer('ORDERS', 'PROC', null, [
+            'priority_groups' => ['g1'],
+            'priority_policy' => 'pinned_client',
+        ])->await();
+
+        self::assertStringContainsString('"priority_groups":["g1"]', $transport->writes[3]);
+        self::assertStringContainsString('"priority_policy":"pinned_client"', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies an invalid priority policy is rejected before dispatch.
+     */
+    public function testCreateConsumerRejectsInvalidPriorityPolicy(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('priority_policy must be one of');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['priority_policy' => 'bogus'])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies the pull request carries the priority/group fields (issue #7).
+     */
+    public function testFetchBatchWithPullOptions(): void
+    {
+        $msg = '{"event":"x"}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg), $msg),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 2500, [
+            'group' => 'g1',
+            'min_pending' => 5,
+            'max_bytes' => 1048576,
+            'no_wait' => true,
+        ])->await();
+
+        $written = $transport->writes[3];
+        self::assertStringContainsString('"group":"g1"', $written);
+        self::assertStringContainsString('"min_pending":5', $written);
+        self::assertStringContainsString('"max_bytes":1048576', $written);
+        self::assertStringContainsString('"no_wait":true', $written);
+    }
+
+    /**
+     * Verifies an out-of-range pull priority is rejected before dispatch.
+     */
+    public function testFetchBatchRejectsInvalidPriority(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Pull priority must be an integer between 0 and 9');
+
+        try {
+            $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 2500, ['priority' => 10])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies unpinConsumer issues the UNPIN request with the group (issue #7).
+     */
+    public function testUnpinConsumer(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen('{}'), '{}'),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ok = $client->jetStream()->unpinConsumer('ORDERS', 'PROC', 'g1')->await();
+
+        self::assertTrue($ok);
+        self::assertStringContainsString('$JS.API.CONSUMER.UNPIN.ORDERS.PROC', $transport->writes[3]);
+        self::assertStringContainsString('"group":"g1"', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies pinIdOf extracts the Nats-Pin-Id header (issue #7).
+     */
+    public function testPinIdOf(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $pinned = new NatsMessage(
+            subject: 'orders.created',
+            sid: 1,
+            replyTo: null,
+            payload: 'x',
+            rawHeaders: "NATS/1.0\r\nNats-Pin-Id: pin-123\r\n\r\n",
+        );
+        $plain = new NatsMessage('orders.created', 1, null, 'x', null);
+
+        self::assertSame('pin-123', $js->pinIdOf($pinned));
+        self::assertNull($js->pinIdOf($plain));
+    }
+
+    /**
+     * Verifies a batched Direct Get collects multiple replies and stops at the 204 EOB (issue #13).
+     */
+    public function testDirectGetBatchCollectsUntilEob(): void
+    {
+        $h1 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.a\r\nNats-Sequence: 5\r\n\r\n";
+        $b1 = 'aaa';
+        $h2 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.b\r\nNats-Sequence: 6\r\n\r\n";
+        $b2 = 'bbb';
+        $eob = "NATS/1.0 204 EOB\r\n\r\n";
+        $h3 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.c\r\nNats-Sequence: 7\r\n\r\n";
+        $b3 = 'ccc';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h1), strlen($h1) + strlen($b1), $h1, $b1),
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h2), strlen($h2) + strlen($b2), $h2, $b2),
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s\r\n", strlen($eob), strlen($eob), $eob),
+            // A frame AFTER the EOB must NOT be consumed: if termination were broken the loop would
+            // read this and return 3 messages.
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $messages = $client->jetStream()->directGetBatch('ORDERS', ['batch' => 10])->await();
+
+        self::assertCount(2, $messages);
+        self::assertSame('aaa', $messages[0]->payload);
+        self::assertSame('orders.a', $messages[0]->subject);
+        self::assertSame('bbb', $messages[1]->payload);
+        self::assertSame('orders.b', $messages[1]->subject);
+        self::assertStringContainsString('$JS.API.DIRECT.GET.ORDERS', $transport->writes[3]);
+        self::assertStringContainsString('"batch":10', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies directGetLastForSubjects sends multi_last and terminates on Nats-Num-Pending: 0.
+     */
+    public function testDirectGetLastForSubjects(): void
+    {
+        $h1 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.a\r\nNats-Sequence: 5\r\n\r\n";
+        $b1 = 'aaa';
+        $h2 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.b\r\nNats-Sequence: 6\r\nNats-Num-Pending: 0\r\n\r\n";
+        $b2 = 'bbb';
+        // A frame after the Nats-Num-Pending:0 terminator must NOT be consumed.
+        $h3 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.c\r\nNats-Sequence: 7\r\n\r\n";
+        $b3 = 'ccc';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h1), strlen($h1) + strlen($b1), $h1, $b1),
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h2), strlen($h2) + strlen($b2), $h2, $b2),
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', ['orders.a', 'orders.b'])->await();
+
+        self::assertCount(2, $messages);
+        self::assertStringContainsString('"multi_last":["orders.a","orders.b"]', $transport->writes[3]);
+        self::assertStringContainsString('"batch":2', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a batched Direct Get error status surfaces as a JetStreamException (issue #13).
+     */
+    public function testDirectGetBatchSurfacesError(): void
+    {
+        $err = "NATS/1.0 408 Request Timeout\r\n\r\n";
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s\r\n", strlen($err), strlen($err), $err),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionCode(408);
+
+        $client->jetStream()->directGetBatch('ORDERS', ['batch' => 10])->await();
+    }
+
+    /**
      * Verifies JetStream publish returns stream/sequence acknowledgment.
      */
     public function testPublishWithAck(): void
@@ -313,7 +690,7 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
-     * Verifies non-@at schedule expressions are rejected before request dispatch.
+     * Verifies malformed schedule expressions are rejected before request dispatch.
      */
     public function testPublishScheduledRejectsUnsupportedPattern(): void
     {
@@ -326,18 +703,389 @@ final class JetStreamContextTest extends TestCase
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
-        $this->expectExceptionMessage('Only @at schedule expressions are currently supported');
+        $this->expectExceptionMessage('Unsupported schedule expression');
 
         try {
             $client->jetStream()->publishScheduled(
                 'schedules.orders.one',
                 'events.orders',
                 '{"event":"scheduled"}',
-                '@every 10s',
+                'not-a-schedule',
             )->await();
         } finally {
             self::assertCount(2, $transport->writes);
         }
+    }
+
+    /**
+     * Verifies a recurring "@every" schedule emits the scheduler headers, including the optional
+     * source and rollup headers.
+     */
+    public function testPublishScheduledEveryWithSourceAndRollup(): void
+    {
+        $ackPayload = '{"stream":"SCHED","seq":9,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publishScheduled(
+            'schedules.heartbeat',
+            'events.heartbeat',
+            '{"event":"tick"}',
+            Schedule::every('1h'),
+            source: 'cluster-a',
+            rollup: true,
+        )->await();
+
+        self::assertStringContainsString('Nats-Schedule:@every 1h', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Schedule-Target:events.heartbeat', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Schedule-Source:cluster-a', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Schedule-Rollup:sub', $transport->writes[3]);
+        self::assertStringNotContainsString('Nats-Schedule-Time-Zone', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a cron schedule emits the cron expression plus the time-zone header.
+     */
+    public function testPublishScheduledCronWithTimeZone(): void
+    {
+        $ackPayload = '{"stream":"SCHED","seq":10,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publishScheduled(
+            'schedules.report',
+            'events.report',
+            '{"event":"daily"}',
+            Schedule::cron('0 0 0 * * *'),
+            timeZone: 'Europe/Warsaw',
+        )->await();
+
+        self::assertStringContainsString('Nats-Schedule:0 0 0 * * *', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Schedule-Time-Zone:Europe/Warsaw', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a predefined alias schedule (ADR-51) reaches the wire and may carry a time zone.
+     */
+    public function testPublishScheduledPredefinedAlias(): void
+    {
+        $ackPayload = '{"stream":"SCHED","seq":11,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publishScheduled(
+            'schedules.report',
+            'events.report',
+            '{"event":"daily"}',
+            Schedule::predefined('daily'),
+            timeZone: 'Europe/Warsaw',
+        )->await();
+
+        self::assertStringContainsString('Nats-Schedule:@daily', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Schedule-Time-Zone:Europe/Warsaw', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies an @at schedule with a numeric RFC3339 offset (not just "Z") reaches the wire.
+     */
+    public function testPublishScheduledAtWithTimezoneOffset(): void
+    {
+        $ackPayload = '{"stream":"SCHED","seq":12,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publishScheduled(
+            'schedules.orders.one',
+            'events.orders',
+            '{"event":"scheduled"}',
+            '@at 2030-01-01T02:00:00+02:00',
+        )->await();
+
+        self::assertStringContainsString('Nats-Schedule:@at 2030-01-01T02:00:00+02:00', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a time zone supplied with a non-cron schedule is rejected before dispatch.
+     */
+    public function testPublishScheduledRejectsTimeZoneForNonCron(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Nats-Schedule-Time-Zone is only valid for cron');
+
+        try {
+            $client->jetStream()->publishScheduled(
+                'schedules.heartbeat',
+                'events.heartbeat',
+                '{"event":"tick"}',
+                Schedule::every('1h'),
+                timeZone: 'Europe/Warsaw',
+            )->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies publish with a de-duplication id emits the Nats-Msg-Id header (issue #11).
+     */
+    public function testPublishWithMsgId(): void
+    {
+        $ackPayload = '{"stream":"ORDERS","seq":43,"duplicate":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ack = $client->jetStream()->publish('orders.created', '{"id":1}', msgId: 'order-1')->await();
+
+        self::assertTrue($ack->duplicate);
+        self::assertStringStartsWith('HPUB orders.created _INBOX.', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Msg-Id:order-1', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies publish with an integer TTL emits Nats-TTL in seconds (issue #4).
+     */
+    public function testPublishWithTtlSeconds(): void
+    {
+        $ackPayload = '{"stream":"ORDERS","seq":44,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publish('orders.created', '{"id":1}', ttl: 30)->await();
+
+        self::assertStringStartsWith('HPUB orders.created _INBOX.', $transport->writes[3]);
+        self::assertStringContainsString('Nats-TTL:30s', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies the "never" TTL passes through unchanged.
+     */
+    public function testPublishWithTtlNever(): void
+    {
+        $ackPayload = '{"stream":"ORDERS","seq":45,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publish('orders.created', '{"id":1}', ttl: 'never')->await();
+
+        self::assertStringContainsString('Nats-TTL:never', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies an invalid (sub-second / zero) TTL is rejected before dispatch.
+     */
+    public function testPublishRejectsZeroTtl(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Per-message TTL must be at least 1 second');
+
+        try {
+            $client->jetStream()->publish('orders.created', '{"id":1}', ttl: 0)->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies an empty Nats-Msg-Id is rejected before dispatch.
+     */
+    public function testPublishRejectsEmptyMsgId(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Nats-Msg-Id must not be empty');
+
+        try {
+            $client->jetStream()->publish('orders.created', '{"id":1}', msgId: '')->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies incrementCounter emits Nats-Incr and returns the new value (issue #9).
+     */
+    public function testIncrementCounter(): void
+    {
+        $ackPayload = '{"stream":"COUNTERS","seq":1,"val":"5"}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $value = $client->jetStream()->incrementCounter('counters.visits', '+5')->await();
+
+        self::assertSame('5', $value);
+        self::assertStringStartsWith('HPUB counters.visits _INBOX.', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Incr:+5', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a counter value beyond PHP_INT_MAX is preserved as an exact string.
+     */
+    public function testIncrementCounterPreservesBigValue(): void
+    {
+        // Unquoted JSON number beyond PHP_INT_MAX: only JSON_BIGINT_AS_STRING preserves it exactly,
+        // so this payload makes that flag load-bearing (a quoted string would pass regardless).
+        $ackPayload = '{"stream":"COUNTERS","seq":2,"val":99999999999999999999}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $value = $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
+
+        self::assertSame('99999999999999999999', $value);
+    }
+
+    /**
+     * Verifies a malformed counter delta is rejected before dispatch.
+     */
+    public function testIncrementCounterRejectsMalformedDelta(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Counter increment must be an integer string');
+
+        try {
+            $client->jetStream()->incrementCounter('counters.visits', '5x')->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies counterValue reads the latest value via Direct Get (issue #9).
+     */
+    public function testCounterValue(): void
+    {
+        $hdrs = "NATS/1.0\r\nNats-Stream: COUNTERS\r\nNats-Subject: counters.visits\r\nNats-Sequence: 7\r\n\r\n";
+        $body = '{"val":"42"}';
+        $h = strlen($hdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.a 1 %d %d\r\n%s%s\r\n", $h, $h + strlen($body), $hdrs, $body),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $value = $client->jetStream()->counterValue('COUNTERS', 'counters.visits')->await();
+
+        self::assertSame('42', $value);
+        self::assertStringStartsWith('PUB $JS.API.DIRECT.GET.COUNTERS _INBOX.', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies counterValue returns "0" for a counter with no stored message.
+     */
+    public function testCounterValueMissingReturnsZero(): void
+    {
+        $hdrs = "NATS/1.0 404 Message Not Found\r\n\r\n";
+        $h = strlen($hdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.a 1 %d %d\r\n%s\r\n", $h, $h, $hdrs),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $value = $client->jetStream()->counterValue('COUNTERS', 'counters.visits')->await();
+
+        self::assertSame('0', $value);
     }
 
     /**
