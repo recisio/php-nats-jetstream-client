@@ -11,6 +11,7 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
+use IDCT\NATS\Exception\UnsupportedFeatureException;
 use IDCT\NATS\JetStream\Configuration\StreamSource;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\JetStreamContext;
@@ -653,6 +654,37 @@ final class JetStreamContextTest extends TestCase
         )->await();
 
         self::assertStringContainsString('"allow_msg_schedules":true', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a version-gated config field rejected by an older server surfaces as a typed
+     * UnsupportedFeatureException carrying the feature, required version, and the server's reported
+     * version (from the INFO handshake) — without any per-request version probe.
+     */
+    public function testUnsupportedFeatureRaisesTypedExceptionWithServerVersion(): void
+    {
+        $errorPayload = '{"error":{"code":400,"description":"invalid JSON: json: unknown field \"allow_atomic\""}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.10.5","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        try {
+            $client->jetStream()->createStream('S', ['s.>'], ['allow_atomic' => true])->await();
+            self::fail('Expected UnsupportedFeatureException');
+        } catch (UnsupportedFeatureException $e) {
+            self::assertSame('allow_atomic', $e->feature);
+            self::assertSame('2.12', $e->requiredVersion);
+            self::assertSame('2.10.5', $e->serverVersion);
+            self::assertSame(400, $e->getCode());
+            // Still catchable as a JetStreamException (subclass).
+            self::assertInstanceOf(JetStreamException::class, $e);
+        }
     }
 
     /**
