@@ -622,6 +622,75 @@ final class ObjectStoreBucket
     }
 
     /**
+     * Updates an object's metadata (rename and/or replace its metadata bag) WITHOUT re-uploading its
+     * bytes — the stored chunks are referenced by NUID, which is preserved. Mirrors nats.go
+     * `ObjectStore.UpdateMeta` / nats.java `ObjectStore.updateMeta` (#28).
+     *
+     * On rename the new meta is written under the new name and the old name is tombstoned (its chunks
+     * are NOT purged — they now belong to the renamed object). Renaming onto an existing live object is
+     * rejected.
+     *
+     * @param string|null               $newName  New object name, or null to keep the current name.
+     * @param array<string,string>|null $metadata Replacement metadata bag, or null to keep the current one.
+     * @return Future<ObjectInfo>
+     */
+    public function updateMeta(string $name, ?string $newName = null, ?array $metadata = null): Future
+    {
+        return async(function () use ($name, $newName, $metadata): ObjectInfo {
+            $this->assertValidName($name);
+
+            $existing = $this->info($name)->await();
+            if ($existing === null || $existing->deleted) {
+                throw new JetStreamException('Object not found: ' . $name, 404);
+            }
+
+            $isRename = $newName !== null && $newName !== $name;
+            if ($isRename) {
+                $this->assertValidName($newName);
+                $clash = $this->info($newName)->await();
+                if ($clash !== null && !$clash->deleted) {
+                    throw new JetStreamException('Cannot rename to an existing object: ' . $newName);
+                }
+            }
+
+            $targetName = $newName ?? $name;
+            $info = [
+                'name' => $targetName,
+                'bucket' => $this->bucket,
+                'nuid' => $existing->nuid,
+                'size' => $existing->size,
+                'chunks' => $existing->chunks,
+                'digest' => $existing->digest,
+                'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
+                'deleted' => false,
+                'options' => ['max_chunk_size' => $this->chunkSize],
+                'metadata' => $metadata ?? $existing->metadata,
+            ];
+
+            $this->publishMeta($targetName, $info);
+
+            if ($isRename) {
+                // Tombstone the old name so it no longer resolves; the chunks stay (same NUID, now
+                // owned by the renamed object), so this must NOT purge chunks like delete() does.
+                $this->publishMeta($name, [
+                    'name' => $name,
+                    'bucket' => $this->bucket,
+                    'nuid' => '',
+                    'size' => 0,
+                    'chunks' => 0,
+                    'digest' => '',
+                    'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
+                    'deleted' => true,
+                    'options' => ['max_chunk_size' => $this->chunkSize],
+                    'metadata' => [],
+                ]);
+            }
+
+            return ObjectInfo::fromArray($this->bucket, $info);
+        });
+    }
+
+    /**
      * Watches metadata subjects and emits object metadata updates.
      *
      * @param callable(ObjectInfo):void $handler

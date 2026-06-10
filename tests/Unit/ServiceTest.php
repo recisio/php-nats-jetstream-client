@@ -318,6 +318,39 @@ final class ServiceTest extends TestCase
         self::assertSame($stats['started'] ?? null, $statsAgain['started'] ?? null);
     }
 
+    public function testHandlerCanRespondWithCustomServiceError(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.echo 13 _INBOX.req 4\r\nboom\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static function (NatsMessage $message): string {
+                throw new \IDCT\NATS\Services\ServiceError(429, 'Rate limited', '{"retry_after":5}');
+            });
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        // The handler's chosen code/description appear in the micro-spec error headers (not 500/generic).
+        self::assertStringContainsString('Nats-Service-Error:Rate limited', $writes);
+        self::assertStringContainsString('Nats-Service-Error-Code:429', $writes);
+        // The custom body is delivered verbatim.
+        self::assertStringContainsString('{"retry_after":5}', $writes);
+        self::assertStringNotContainsString('Internal server error', $writes);
+
+        // The error is counted and recorded with the handler's description.
+        $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
+        self::assertSame(1, $endpoint['num_errors'] ?? null);
+        self::assertSame('Rate limited', $endpoint['last_error'] ?? null);
+    }
+
     public function testHandlerErrorResponseDoesNotLeakExceptionMessage(): void
     {
         $transport = new FakeTransport([

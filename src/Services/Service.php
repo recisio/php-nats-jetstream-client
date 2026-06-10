@@ -224,6 +224,28 @@ final class Service
 
                             try {
                                 $response = ($this->handlers[$subject])($message);
+                            } catch (ServiceError $serviceError) {
+                                // The handler explicitly chose to fail with a custom code/description
+                                // (and optional body). Honor it verbatim — this is a deliberate error
+                                // reply, not an internal fault, so the chosen detail IS sent to the caller.
+                                $endpoint->errors++;
+                                $endpoint->lastError = $serviceError->description;
+                                $this->notifyObservers('request_error', $endpoint, $message, $context + [
+                                    'code' => $serviceError->serviceErrorCode,
+                                    'error' => $serviceError->description,
+                                ]);
+
+                                $response = $serviceError->body ?? $this->errorPayload(
+                                    code: $serviceError->serviceErrorCode,
+                                    message: $serviceError->description,
+                                    correlationId: is_string($context['correlation_id'] ?? null)
+                                        ? $context['correlation_id']
+                                        : null,
+                                );
+                                $errorHeaders = $this->serviceErrorHeaders(
+                                    $serviceError->serviceErrorCode,
+                                    $serviceError->description,
+                                );
                             } catch (\Throwable $e) {
                                 $endpoint->errors++;
                                 $endpoint->lastError = $e->getMessage();
