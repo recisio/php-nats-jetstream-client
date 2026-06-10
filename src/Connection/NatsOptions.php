@@ -51,6 +51,14 @@ final class NatsOptions
       * @param NonceSignerInterface|null $nonceSigner Signer used to produce Ed25519 signatures for server nonce challenges.
       * @param int $maxPendingMessagesPerSubscription In-memory per-subscription queue cap used by slow-consumer handling.
       * @param SlowConsumerPolicy $slowConsumerPolicy Strategy applied when per-subscription pending queue reaches capacity.
+      * @param (\Closure(\IDCT\NATS\Connection\Enum\ConnectionEvent,?\Throwable):void)|null $connectionListener
+      *        Optional callback invoked on connection lifecycle transitions (connected, disconnected,
+      *        reconnected, closed, discovered-servers, lame-duck). Exceptions thrown by the listener are
+      *        swallowed so a faulty handler cannot break the connection runtime.
+      * @param (\Closure(\Throwable):void)|null $errorListener Optional callback invoked on asynchronous
+      *        errors that do not surface to a specific caller: slow-consumer drops, recoverable server
+      *        `-ERR` frames, and transport read failures that trigger reconnect. Exceptions thrown by the
+      *        listener are swallowed.
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -84,6 +92,8 @@ final class NatsOptions
         public readonly ?NonceSignerInterface $nonceSigner = null,
         public readonly int $maxPendingMessagesPerSubscription = 1_024,
         public readonly SlowConsumerPolicy $slowConsumerPolicy = SlowConsumerPolicy::DropOldest,
+        public readonly ?\Closure $connectionListener = null,
+        public readonly ?\Closure $errorListener = null,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

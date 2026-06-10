@@ -10,6 +10,7 @@ use Amp\CompositeCancellation;
 use Amp\DeferredFuture;
 use Amp\Future;
 use Amp\TimeoutCancellation;
+use IDCT\NATS\Connection\Enum\ConnectionEvent;
 use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Core\Inbox;
@@ -73,6 +74,22 @@ final class NatsConnection
     private ?DeferredFuture $reconnecting = null;
     /** Guards against two overlapping socket reads (user read vs heartbeat self-read). */
     private bool $readInProgress = false;
+    /**
+     * Publish callback bound onto every delivered {@see NatsMessage} so it can reply to its own
+     * reply subject via {@see NatsMessage::respond()}. Built once and reused for all messages.
+     *
+     * @var \Closure(string,string,array<string,string>|null):Future<void>
+     */
+    private readonly \Closure $messageResponder;
+    /** Whether a LameDuck event has already been emitted for the current server, to avoid repeats. */
+    private bool $lameDuckAnnounced = false;
+    /**
+     * The last set of discovered cluster endpoints, so a DiscoveredServers event fires only when the
+     * advertised `connect_urls` actually change.
+     *
+     * @var list<string>
+     */
+    private array $knownConnectUrls = [];
 
     /**
      * Creates a connection runtime with transport and protocol dependencies.
@@ -88,6 +105,11 @@ final class NatsConnection
         private readonly ProtocolCodec $codec = new ProtocolCodec(),
     ) {
         $this->parser = new ProtocolParser();
+        $this->messageResponder = function (string $subject, string $payload, ?array $headers): Future {
+            return $headers === null
+                ? $this->publish($subject, $payload)
+                : $this->publishWithHeaders($subject, $payload, $headers);
+        };
     }
 
     /**
@@ -120,6 +142,7 @@ final class NatsConnection
 
             try {
                 $this->connectOnce();
+                $this->emitEvent(ConnectionEvent::Connected);
             } catch (\Throwable $e) {
                 if ($this->options->reconnectEnabled && $this->options->maxReconnectAttempts > 0) {
                     $this->recoverConnection();
@@ -128,6 +151,7 @@ final class NatsConnection
                 }
 
                 $this->state = ConnectionState::Closed;
+                $this->emitEvent(ConnectionEvent::Closed, $e);
                 throw new ConnectionException($e->getMessage(), (int) $e->getCode(), $e);
             }
         });
@@ -144,6 +168,7 @@ final class NatsConnection
             $this->cancelPingTimer();
             $this->transport->close()->await();
             $this->state = ConnectionState::Closed;
+            $this->emitEvent(ConnectionEvent::Closed);
         });
     }
 
@@ -387,11 +412,12 @@ final class NatsConnection
                 $chunk = $this->transport->readLine($cancellation)->await();
             } catch (CancelledException $cancelledException) {
                 throw $cancelledException;
-            } catch (\Throwable) {
+            } catch (\Throwable $readError) {
                 // During drain() a read failure means the flush is finished, not a fault to recover
                 // from: recovering would reconnect and re-SUBscribe the very subscriptions drain()
                 // just UNSUBbed (and could re-deliver). Treat it as end-of-flush instead.
                 if ($this->state !== ConnectionState::Draining) {
+                    $this->emitError($readError);
                     $this->recoverConnection();
                 }
 
@@ -566,6 +592,156 @@ final class NatsConnection
     }
 
     /**
+     * Sends a single request and collects MULTIPLE replies (scatter-gather), terminating on the
+     * first of: {@see $maxResponses} collected, a no-responders (503) sentinel, the per-message
+     * stall interval elapsing, or the total timeout.
+     *
+     * @param array<string,string>|null $headers Optional request headers (null = plain PUB).
+     * @param int|null $maxResponses Stop after this many replies (null = unbounded, bounded only by time).
+     * @param int|null $totalTimeoutMs Overall budget in ms (null = the configured request timeout).
+     * @param int|null $stallMs If set, stop once this long passes after the most recent reply.
+     * @param Cancellation|null $cancellation Optional external cancellation token.
+     * @return Future<list<NatsMessage>>
+     */
+    public function requestMany(
+        string $subject,
+        string $payload,
+        ?array $headers = null,
+        ?int $maxResponses = null,
+        ?int $totalTimeoutMs = null,
+        ?int $stallMs = null,
+        ?Cancellation $cancellation = null,
+    ): Future {
+        return async(function () use ($subject, $payload, $headers, $maxResponses, $totalTimeoutMs, $stallMs, $cancellation): array {
+            $this->validateSubject($subject);
+
+            if ($maxResponses !== null && $maxResponses < 1) {
+                throw new \InvalidArgumentException('maxResponses must be at least 1 when provided');
+            }
+            if ($stallMs !== null && $stallMs <= 0) {
+                throw new \InvalidArgumentException('stallMs must be greater than zero when provided');
+            }
+
+            return $this->requestManyInternal($subject, $payload, $headers, $maxResponses, $totalTimeoutMs, $stallMs, $cancellation);
+        });
+    }
+
+    /**
+     * Executes the scatter-gather collection loop.
+     *
+     * @param array<string,string>|null $headers
+     * @return list<NatsMessage>
+     */
+    private function requestManyInternal(
+        string $subject,
+        string $payload,
+        ?array $headers,
+        ?int $maxResponses,
+        ?int $totalTimeoutMs,
+        ?int $stallMs,
+        ?Cancellation $cancellation,
+    ): array {
+        if ($this->state !== ConnectionState::Open) {
+            throw new ConnectionException('Connection is not open');
+        }
+
+        $totalMs = $totalTimeoutMs ?? $this->options->requestTimeoutMs;
+        if ($totalMs <= 0) {
+            throw new TimeoutException('Request timeout must be greater than zero');
+        }
+
+        $inbox = Inbox::generate($this->options->inboxPrefix);
+        /** @var list<NatsMessage> $messages */
+        $messages = [];
+        $lastAt = null;
+        $noResponders = false;
+
+        $sid = $this->subscribe($inbox, function (NatsMessage $message) use (&$messages, &$lastAt, &$noResponders): void {
+            if ($this->isNoRespondersStatus($message)) {
+                // The server's 503 sentinel: no service is listening. Stop immediately with whatever
+                // (typically nothing) was collected.
+                $noResponders = true;
+
+                return;
+            }
+
+            $messages[] = $message;
+            $lastAt = microtime(true);
+        })->await();
+
+        try {
+            if ($headers === null) {
+                $this->publish($subject, $payload, $inbox)->await();
+            } else {
+                $this->publishWithHeaders($subject, $payload, $headers, $inbox)->await();
+            }
+
+            $deadline = microtime(true) + $totalMs / 1000;
+            $totalCancellation = new TimeoutCancellation($totalMs / 1000);
+            $waitCancellation = $cancellation === null
+                ? $totalCancellation
+                : new CompositeCancellation($cancellation, $totalCancellation);
+
+            while (true) {
+                if ($noResponders) {
+                    break;
+                }
+
+                if ($maxResponses !== null && count($messages) >= $maxResponses) {
+                    break;
+                }
+
+                $now = microtime(true);
+
+                // Stall: stop once the gap since the last reply exceeds the configured interval.
+                if ($stallMs !== null && $lastAt !== null && ($now - $lastAt) * 1000 >= $stallMs) {
+                    break;
+                }
+
+                $remainingTotal = $deadline - $now;
+                if ($remainingTotal <= 0 || $waitCancellation->isRequested()) {
+                    if ($cancellation !== null && $cancellation->isRequested()) {
+                        throw new CancelledException();
+                    }
+
+                    break;
+                }
+
+                // Wake at the earlier of the total deadline and the next stall checkpoint, so the
+                // stall interval is honored even while the socket is idle.
+                $slice = $remainingTotal;
+                if ($stallMs !== null && $lastAt !== null) {
+                    $slice = min($slice, $stallMs / 1000 - ($now - $lastAt));
+                }
+                $sliceCancellation = new CompositeCancellation(
+                    $waitCancellation,
+                    new TimeoutCancellation(max(0.001, $slice)),
+                );
+
+                try {
+                    $frames = $this->processIncoming($sliceCancellation)->await();
+                } catch (CancelledException $e) {
+                    if ($cancellation !== null && $cancellation->isRequested()) {
+                        throw $e;
+                    }
+
+                    // Slice or total deadline fired during the read; loop to re-evaluate the
+                    // termination conditions (stall/total) at the top.
+                    continue;
+                }
+
+                if ($frames === 0) {
+                    delay(0.001);
+                }
+            }
+
+            return $messages;
+        } finally {
+            $this->cleanupRequestSubscription($sid);
+        }
+    }
+
+    /**
      * Checks whether a response message carries a 503 No Responders status.
      */
     private function isNoRespondersStatus(NatsMessage $message): bool
@@ -715,10 +891,12 @@ final class NatsConnection
     {
         if (!$this->options->reconnectEnabled) {
             $this->state = ConnectionState::Closed;
+            $this->emitEvent(ConnectionEvent::Closed);
             throw new ConnectionException('Reconnect is disabled');
         }
 
         $this->cancelPingTimer();
+        $this->emitEvent(ConnectionEvent::Disconnected);
 
         $maxAttempts = max(1, $this->options->maxReconnectAttempts);
         $lastError = null;
@@ -733,6 +911,7 @@ final class NatsConnection
             try {
                 $this->connectOnce();
                 $this->resubscribeAll();
+                $this->emitEvent(ConnectionEvent::Reconnected);
 
                 return;
             } catch (\Throwable $e) {
@@ -743,6 +922,7 @@ final class NatsConnection
         }
 
         $this->state = ConnectionState::Closed;
+        $this->emitEvent(ConnectionEvent::Closed, $lastError);
         throw new ConnectionException(
             'Reconnect attempts exhausted',
             0,
@@ -955,6 +1135,7 @@ final class NatsConnection
 
         if ($frame->type === ProtocolFrameType::Info && $frame->infoPayload !== null) {
             $this->serverInfo = $this->decodeServerInfoPayload($frame->infoPayload);
+            $this->handleServerInfoUpdate();
 
             return;
         }
@@ -962,6 +1143,10 @@ final class NatsConnection
         if ($frame->type === ProtocolFrameType::Err) {
             $error = $frame->error ?? 'unknown';
             if ($this->isRecoverableServerError($error)) {
+                // Non-fatal server error (e.g. a per-subscription permissions violation): surface it
+                // to the async error listener instead of tearing down the connection.
+                $this->emitError(new NatsException('Server sent recoverable error frame: ' . $error));
+
                 return;
             }
 
@@ -981,6 +1166,7 @@ final class NatsConnection
                 replyTo: $frame->replyTo,
                 payload: $payload,
                 rawHeaders: $rawHeaders,
+                responder: $this->messageResponder,
             );
 
             $this->enqueueMessage($sid, $message);
@@ -1027,10 +1213,16 @@ final class NatsConnection
         if ($queue->count() >= $limit) {
             if ($this->options->slowConsumerPolicy === SlowConsumerPolicy::DropOldest) {
                 $queue->dequeue();
+                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped oldest message'));
             } elseif ($this->options->slowConsumerPolicy === SlowConsumerPolicy::DropNewest) {
+                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped newest message'));
+
                 return;
             } else {
-                throw new ConnectionException('Subscription queue overflow for sid ' . $sid);
+                $overflow = new ConnectionException('Subscription queue overflow for sid ' . $sid);
+                $this->emitError($overflow);
+
+                throw $overflow;
             }
         }
 
@@ -1218,6 +1410,63 @@ final class NatsConnection
         if ($this->pingTimerId !== null) {
             EventLoop::cancel($this->pingTimerId);
             $this->pingTimerId = null;
+        }
+    }
+
+    /**
+     * Invokes the configured connection lifecycle listener, swallowing any exception it raises so a
+     * faulty handler cannot wedge the connection runtime.
+     */
+    private function emitEvent(ConnectionEvent $event, ?\Throwable $error = null): void
+    {
+        $listener = $this->options->connectionListener;
+        if ($listener === null) {
+            return;
+        }
+
+        try {
+            $listener($event, $error);
+        } catch (\Throwable) {
+            // A throwing listener must never break connection handling.
+        }
+    }
+
+    /**
+     * Invokes the configured asynchronous-error listener, swallowing any exception it raises.
+     */
+    private function emitError(\Throwable $error): void
+    {
+        $listener = $this->options->errorListener;
+        if ($listener === null) {
+            return;
+        }
+
+        try {
+            $listener($error);
+        } catch (\Throwable) {
+            // A throwing listener must never break connection handling.
+        }
+    }
+
+    /**
+     * Reacts to an async INFO update by emitting discovery / lame-duck lifecycle events when the
+     * advertised cluster topology or shutdown state changes.
+     */
+    private function handleServerInfoUpdate(): void
+    {
+        $info = $this->serverInfo;
+        if ($info === null) {
+            return;
+        }
+
+        if ($info->lameDuckMode && !$this->lameDuckAnnounced) {
+            $this->lameDuckAnnounced = true;
+            $this->emitEvent(ConnectionEvent::LameDuck);
+        }
+
+        if ($info->connectUrls !== [] && $info->connectUrls !== $this->knownConnectUrls) {
+            $this->knownConnectUrls = $info->connectUrls;
+            $this->emitEvent(ConnectionEvent::DiscoveredServers);
         }
     }
 

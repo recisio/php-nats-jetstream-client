@@ -21,6 +21,10 @@ final class ServerInfo
      * @param string|null $nonce Optional nonce challenge from INFO used for JWT/NKey signature auth.
      * @param bool $tlsRequired Whether the server requires a TLS upgrade (`tls_required`).
      * @param bool $tlsAvailable Whether the server offers an optional TLS upgrade (`tls_available`).
+     * @param bool $lameDuckMode Whether the server has entered lame-duck mode (`ldm`); set in an async
+     *                           INFO update when the server is shutting down gracefully.
+     * @param list<string> $connectUrls Additional server endpoints advertised by the cluster
+     *                                   (`connect_urls`) for client-side discovery/failover.
      */
     public function __construct(
         public readonly string $serverId,
@@ -32,6 +36,8 @@ final class ServerInfo
         public readonly ?string $nonce = null,
         public readonly bool $tlsRequired = false,
         public readonly bool $tlsAvailable = false,
+        public readonly bool $lameDuckMode = false,
+        public readonly array $connectUrls = [],
     ) {}
 
     /**
@@ -41,6 +47,15 @@ final class ServerInfo
      */
     public static function fromInfoPayload(array $payload): self
     {
+        $connectUrls = [];
+        if (isset($payload['connect_urls']) && is_array($payload['connect_urls'])) {
+            foreach ($payload['connect_urls'] as $url) {
+                if (is_string($url) && $url !== '') {
+                    $connectUrls[] = $url;
+                }
+            }
+        }
+
         return new self(
             serverId: (string) ($payload['server_id'] ?? ''),
             serverName: (string) ($payload['server_name'] ?? ''),
@@ -51,6 +66,8 @@ final class ServerInfo
             nonce: isset($payload['nonce']) ? (string) $payload['nonce'] : null,
             tlsRequired: (bool) ($payload['tls_required'] ?? false),
             tlsAvailable: (bool) ($payload['tls_available'] ?? false),
+            lameDuckMode: (bool) ($payload['ldm'] ?? false),
+            connectUrls: $connectUrls,
         );
     }
 }

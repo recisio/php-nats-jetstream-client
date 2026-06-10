@@ -211,6 +211,29 @@ final class NatsClient
     }
 
     /**
+     * Sends one request and collects multiple replies (scatter-gather), terminating on the first of:
+     * {@see $maxResponses} replies, a no-responders sentinel, the per-message {@see $stallMs} gap, or
+     * the total timeout. Mirrors nats.go `RequestMany` / nats.java `Connection.requestMany`.
+     *
+     * @param array<string,string>|null $headers Optional request headers (null = plain request).
+     * @param int|null $maxResponses Stop after this many replies (null = time-bounded only).
+     * @param int|null $totalTimeoutMs Overall budget in ms (null = configured request timeout).
+     * @param int|null $stallMs Stop once this long passes with no new reply (null = disabled).
+     * @return Future<list<NatsMessage>>
+     */
+    public function requestMany(
+        string $subject,
+        string $payload,
+        ?array $headers = null,
+        ?int $maxResponses = null,
+        ?int $totalTimeoutMs = null,
+        ?int $stallMs = null,
+        ?Cancellation $cancellation = null,
+    ): Future {
+        return $this->connection->requestMany($subject, $payload, $headers, $maxResponses, $totalTimeoutMs, $stallMs, $cancellation);
+    }
+
+    /**
      * Returns server capabilities advertised during the INFO handshake.
      */
     public function serverInfo(): ?ServerInfo
