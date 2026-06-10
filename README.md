@@ -26,6 +26,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 
 - [Installation](#installation)
 - [Features](#features)
+- [NATS Server Version Requirements](#nats-server-version-requirements)
 - [TODO](#todo)
 - [Usage](#usage)
 - [Authentication Options](#authentication-options)
@@ -104,9 +105,41 @@ Current functionality includes:
 - Stream mirroring and sourcing configuration helpers (`StreamSource`)
 - Republish and subject transform configuration helpers (`Republish`, `SubjectTransform`)
 
-Current scheduling note: scheduled messages are implemented with NATS scheduler headers and currently accept only `@at` expressions.
+Scheduling note: scheduled messages use the NATS scheduler headers (ADR-51) and accept `@at`, `@every`, 6-field cron, and the predefined aliases (`@daily`, `@hourly`, …). Build expressions with `IDCT\\NATS\\JetStream\\Schedule::at(...)`, `Schedule::atTimestamp(...)`, `Schedule::every(...)`, `Schedule::cron(...)`, or `Schedule::predefined(...)`. The target stream must be created with `allow_msg_schedules` (NATS 2.12+).
 
-Use `IDCT\\NATS\\JetStream\\Schedule::at(...)` or `Schedule::atTimestamp(...)` to generate valid `@at` expressions.
+## NATS Server Version Requirements
+
+Most of this library works against any JetStream-enabled server. Some features depend on newer NATS
+server versions; the table below lists the minimum version per feature. **You do not need to check the
+version yourself** — if you use a feature against a server that is too old, the request fails fast with
+an `IDCT\NATS\Exception\UnsupportedFeatureException` (a subclass of `JetStreamException`) carrying the
+feature name, the required version, and the version the server reported. The check is reactive (derived
+from the server's own error response), so there is no per-request version probe.
+
+| Feature | API | Min NATS | Server config / header |
+| --- | --- | --- | --- |
+| Multi-subject consumer filters | `createConsumer(..., ['filter_subjects' => [...]])` | 2.10 | `filter_subjects` |
+| Per-message / KV TTL | `publish(..., ttl:)`, `KeyValueBucket::put/delete/purge(..., ttl:)` | 2.11 | `allow_msg_ttl`, `Nats-TTL` |
+| Subject delete markers | KV/Object Store `watch()`/`get()` (handled automatically) | 2.11 | `subject_delete_marker_ttl`, `Nats-Marker-Reason` |
+| Pull priority groups | `fetchBatch(..., $pull)`, `PullConsumerIterator::setGroup/setPriority/...`, `unpinConsumer()` | 2.11 (`prioritized` 2.12) | `priority_groups`/`priority_policy`, `Nats-Pin-Id` |
+| Batched / multi Direct Get | `directGetBatch()`, `directGetLastForSubjects()` | 2.11 | `allow_direct` |
+| Scheduled publishing (`@every`/cron/aliases) | `publishScheduled()`, `Schedule::every/cron/predefined` | 2.12 | `allow_msg_schedules`, `Nats-Schedule*` |
+| Atomic batch publish | `batch()` → `BatchPublisher` | 2.12 | `allow_atomic`, `Nats-Batch-*` |
+| Distributed counter CRDT | `incrementCounter()`, `counterValue()` | 2.12 | `allow_msg_counter`, `Nats-Incr` |
+| Publish de-duplication | `publish(..., msgId:)` | 2.2 | `Nats-Msg-Id` |
+
+```php
+use IDCT\NATS\Exception\UnsupportedFeatureException;
+
+try {
+    $js->batch()->add('orders.created', $payload)->commit()->await();
+} catch (UnsupportedFeatureException $e) {
+    // e.g. "The "allow_atomic" feature requires NATS server 2.12+, but the connected server reports 2.10.5."
+    echo "{$e->feature} needs NATS {$e->requiredVersion}; server is {$e->serverVersion}\n";
+}
+```
+
+You can also query the requirement programmatically: `IDCT\NATS\JetStream\FeatureSupport::requiredVersion('allow_atomic')` returns `"2.12"`.
 
 ## TODO
 

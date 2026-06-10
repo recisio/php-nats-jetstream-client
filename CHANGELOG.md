@@ -17,6 +17,22 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-10
+
+### Added
+
+- `[feature]` Server-version awareness for version-gated features. Each feature's minimum NATS version
+  is documented (PHPDoc `Requires NATS X.Y+` notes + a compatibility table in the README) and exposed
+  programmatically via the new `IDCT\NATS\JetStream\FeatureSupport` registry
+  (`FeatureSupport::requiredVersion('allow_atomic')` → `"2.12"`).
+- `[feature]` New `IDCT\NATS\Exception\UnsupportedFeatureException` (a subclass of `JetStreamException`).
+  When a JetStream request fails because the connected server is too old for a feature (the server
+  rejects the config field with `unknown field "X"`), the client now raises this typed exception
+  carrying the feature, the required version, and the server's reported version — instead of an opaque
+  error. The detection is **reactive** (derived from the server's own response on failure); there is no
+  per-request version probe. `JetStreamException` is no longer `final` so it can be specialized
+  (existing `catch (JetStreamException)` handlers are unaffected).
+
 ## [2.1.1] - 2026-06-10
 
 Verification pass for the 2.1.0 roadmap features against a live NATS 2.12.9 server.

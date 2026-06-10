@@ -56,6 +56,8 @@ final class JetStreamContext
      * Starts an atomic (all-or-nothing) publish batch (ADR-50). The target stream must be created with
      * `allow_atomic` enabled. Pass a batch id (1..64 chars) to use your own, or omit it for a
      * generated one.
+     *
+     * Requires NATS server 2.12+. On an older server `commit()` throws an UnsupportedFeatureException.
      */
     public function batch(?string $batchId = null): BatchPublisher
     {
@@ -445,6 +447,8 @@ final class JetStreamContext
      * terminated by an end-of-batch marker (a 204 status, or a final message carrying
      * `Nats-Num-Pending: 0`). The wait is bounded by `$expiresMs` so a silent server cannot hang it.
      *
+     * Requires NATS server 2.11+ and a stream created with `allow_direct`.
+     *
      * @param array<string,mixed> $body Direct Get batch request body (e.g. `batch`, `multi_last`, `seq`, `up_to_seq`).
      * @return Future<list<NatsMessage>>
      */
@@ -531,6 +535,9 @@ final class JetStreamContext
 
     /**
      * Creates or updates a durable consumer for a stream.
+     *
+     * Version-gated `$options`: `filter_subjects` requires NATS 2.10+, `priority_groups`/
+     * `priority_policy` require 2.11+. An older server rejects these with an UnsupportedFeatureException.
      *
      * @param array<string,mixed> $options Additional consumer config fields (max_deliver, ack_wait, etc.).
      * @return Future<ConsumerInfo>
@@ -903,7 +910,8 @@ final class JetStreamContext
      * Optional headers can be attached: arbitrary `$headers`, a `$msgId` for server-side
      * de-duplication within the stream's `duplicate_window` (emitted as `Nats-Msg-Id`), and a per-
      * message `$ttl` (emitted as `Nats-TTL`; requires the stream to be created with `allow_msg_ttl`).
-     * The TTL accepts an integer number of seconds, a Go duration string, or "never".
+     * The TTL accepts an integer number of seconds, a Go duration string, or "never". `$msgId` works on
+     * NATS 2.2+; `$ttl` requires NATS 2.11+ (the `allow_msg_ttl` stream create call fails on older servers).
      *
      * @param array<string,string> $headers Additional message headers.
      * @param string|null          $msgId   Optional de-duplication id (`Nats-Msg-Id`).
@@ -941,6 +949,8 @@ final class JetStreamContext
      * must be created with `allow_msg_schedules` enabled (and `allow_msg_ttl` when a schedule TTL is
      * used). The schedule expression may be `@at <RFC3339>`, `@every <duration>`, or a 6-field cron
      * expression — build it with the {@see Schedule} helper.
+     *
+     * Requires NATS server 2.12+.
      *
      * @param string      $schedule    Schedule expression (@at / @every / cron).
      * @param string|null $scheduleTtl Optional Nats-Schedule-TTL (requires `allow_msg_ttl` on the stream).
@@ -1007,9 +1017,10 @@ final class JetStreamContext
         /** @var array<string,mixed>|null $error */
         $error = is_array($data['error'] ?? null) ? $data['error'] : null;
         if ($error !== null) {
-            $description = (string) ($error['description'] ?? 'JetStream publish error');
-            $code = (int) ($error['code'] ?? 0);
-            throw new JetStreamException($description, $code);
+            $this->throwApiError(
+                (string) ($error['description'] ?? 'JetStream publish error'),
+                (int) ($error['code'] ?? 0),
+            );
         }
 
         return PubAck::fromArray($data);
@@ -1020,6 +1031,8 @@ final class JetStreamContext
      * be created with `allow_msg_counter` enabled. The delta is a signed or unsigned integer string
      * (e.g. "+5", "-3", "10"); the returned new total is also a string so arbitrary-precision values
      * are preserved (PHP int / JSON number precision is insufficient for large counters).
+     *
+     * Requires NATS server 2.12+.
      *
      * @return Future<string> The new counter value.
      */
@@ -1078,9 +1091,10 @@ final class JetStreamContext
         /** @var array<string,mixed>|null $error */
         $error = is_array($data['error'] ?? null) ? $data['error'] : null;
         if ($error !== null) {
-            $description = (string) ($error['description'] ?? 'JetStream counter error');
-            $code = (int) ($error['code'] ?? 0);
-            throw new JetStreamException($description, $code);
+            $this->throwApiError(
+                (string) ($error['description'] ?? 'JetStream counter error'),
+                (int) ($error['code'] ?? 0),
+            );
         }
 
         $val = $data['val'] ?? null;
@@ -1118,6 +1132,9 @@ final class JetStreamContext
      * `no_wait`. When a consumer is pinned, the first delivered message carries a `Nats-Pin-Id` header
      * (read it with {@see pinIdOf()}); a stale pin id yields a 423 status surfaced as a
      * JetStreamException with code 423.
+     *
+     * The priority-group `$pull` fields require NATS server 2.11+ (the `prioritized` policy 2.12+);
+     * a plain `{batch, expires}` fetch works on any JetStream server.
      *
      * @param array<string,mixed> $pull Optional pull-request fields.
      * @return Future<list<NatsMessage>>
@@ -1523,12 +1540,32 @@ final class JetStreamContext
         /** @var array<string,mixed>|null $error */
         $error = is_array($data['error'] ?? null) ? $data['error'] : null;
         if ($error !== null) {
-            $description = (string) ($error['description'] ?? 'JetStream API error');
-            $code = (int) ($error['code'] ?? 0);
-            throw new JetStreamException($description, $code);
+            $this->throwApiError(
+                (string) ($error['description'] ?? 'JetStream API error'),
+                (int) ($error['code'] ?? 0),
+            );
         }
 
         return $data;
+    }
+
+    /**
+     * Raises a JetStream API error, upgrading it to an {@see \IDCT\NATS\Exception\UnsupportedFeatureException}
+     * when the server's response shows the failure is a version-gated feature this server is too old for
+     * (e.g. an `unknown field "allow_atomic"` rejection). Reactive only — no per-request version probe.
+     */
+    private function throwApiError(string $description, int $code): never
+    {
+        throw FeatureSupport::unsupportedFromApiError($description, $code, $this->serverVersion())
+            ?? new JetStreamException($description, $code);
+    }
+
+    /**
+     * The connected server's reported version (from the INFO handshake), or null when unknown.
+     */
+    private function serverVersion(): ?string
+    {
+        return $this->client->serverInfo()?->version;
     }
 
     /**
