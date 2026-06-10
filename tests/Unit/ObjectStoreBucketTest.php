@@ -787,6 +787,50 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertSame(['wnuid2'], $seen);
     }
 
+    /**
+     * Verifies watch() skips a server delete-marker (Nats-Marker-Reason) instead of surfacing it as a
+     * bogus ObjectInfo, while still delivering a subsequent valid metadata update (issue #5).
+     */
+    public function testWatchSkipsDeleteMarker(): void
+    {
+        $enc = $this->encodeName('logo.txt');
+        $valid = json_encode([
+            'name' => 'logo.txt',
+            'bucket' => 'assets',
+            'nuid' => 'wnuid3',
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ], JSON_THROW_ON_ERROR);
+
+        $createReply = '{"stream_name":"OBJ_assets","name":"OBJWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+        $markerHdrs = "NATS/1.0\r\nNats-Marker-Reason: MaxAge\r\n\r\n";
+        $mh = strlen($markerHdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            // A server delete-marker (sid 2) must be skipped, not surfaced as an ObjectInfo.
+            sprintf("HMSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.1.5.1.0.0 %d %d\r\n%s\r\n", $enc, $mh, $mh, $markerHdrs),
+            // A subsequent valid meta on the same subscription is still delivered.
+            sprintf("MSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.2.6.2.0.0 %d\r\n%s\r\n", $enc, strlen((string) $valid), (string) $valid),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $seen = [];
+        $client->jetStream()->objectStore('assets')->watch(static function (ObjectInfo $info) use (&$seen): void {
+            $seen[] = $info->nuid;
+        })->await();
+
+        $client->processIncoming()->await();
+        $client->processIncoming()->await();
+
+        self::assertSame(['wnuid3'], $seen);
+    }
+
     public function testBucketSubjectHelpers(): void
     {
         $transport = new FakeTransport([

@@ -53,6 +53,20 @@ final class JetStreamContext
     }
 
     /**
+     * Starts an atomic (all-or-nothing) publish batch (ADR-50). The target stream must be created with
+     * `allow_atomic_publish` enabled. Pass a batch id (1..64 chars) to use your own, or omit it for a
+     * generated one.
+     */
+    public function batch(?string $batchId = null): BatchPublisher
+    {
+        if ($batchId !== null && ($batchId === '' || strlen($batchId) > 64)) {
+            throw new JetStreamException('Batch id must be between 1 and 64 characters');
+        }
+
+        return new BatchPublisher($this->client, $batchId ?? bin2hex(random_bytes(16)));
+    }
+
+    /**
      * Retrieves account-wide JetStream metrics and limits.
      *
      * @return Future<AccountInfo>
@@ -391,6 +405,119 @@ final class JetStreamContext
     }
 
     /**
+     * Fetches the latest message for each of several subjects in a single batched Direct Get request
+     * (ADR-31 `multi_last`), instead of one Direct Get per subject. Requires the stream to be created
+     * with `allow_direct` and a server that supports batched Direct Get (NATS 2.11+).
+     *
+     * @param list<string> $subjects
+     * @return Future<list<NatsMessage>>
+     */
+    public function directGetLastForSubjects(string $stream, array $subjects, int $expiresMs = 5000): Future
+    {
+        return async(function () use ($stream, $subjects, $expiresMs): array {
+            if ($subjects === []) {
+                return [];
+            }
+
+            return $this->directGetBatch(
+                $stream,
+                ['multi_last' => $subjects, 'batch' => count($subjects)],
+                $expiresMs,
+            )->await();
+        });
+    }
+
+    /**
+     * Issues a batched / multi Direct Get request (ADR-31) and collects the multi-response stream into
+     * a list of messages. The server streams one reply per matched message to a private inbox,
+     * terminated by an end-of-batch marker (a 204 status, or a final message carrying
+     * `Nats-Num-Pending: 0`). The wait is bounded by `$expiresMs` so a silent server cannot hang it.
+     *
+     * @param array<string,mixed> $body Direct Get batch request body (e.g. `batch`, `multi_last`, `seq`, `up_to_seq`).
+     * @return Future<list<NatsMessage>>
+     */
+    public function directGetBatch(string $stream, array $body, int $expiresMs = 5000): Future
+    {
+        return async(function () use ($stream, $body, $expiresMs): array {
+            if ($expiresMs <= 0) {
+                throw new JetStreamException('Direct Get batch expiresMs must be greater than zero');
+            }
+
+            $json = json_encode($body, JSON_THROW_ON_ERROR);
+            $subject = JetStreamApi::STREAM_DIRECT_GET_PREFIX . $stream;
+            $inbox = Inbox::generate('_INBOX.JS.DGET');
+
+            $messages = [];
+            $done = false;
+            /** @var array{code:int,description:string}|null $error */
+            $error = null;
+
+            $sid = $this->client->subscribe($inbox, static function (NatsMessage $msg) use (&$messages, &$done, &$error): void {
+                $headers = NatsHeaders::fromWireBlock($msg->rawHeaders);
+                $status = (int) ($headers['Status'] ?? 0);
+
+                // End-of-batch marker (204), with no payload — the stream is complete.
+                if ($status === 204) {
+                    $done = true;
+
+                    return;
+                }
+
+                if ($status >= 400) {
+                    $error = [
+                        'code' => $status,
+                        'description' => trim((string) ($headers['Description'] ?? '')),
+                    ];
+                    $done = true;
+
+                    return;
+                }
+
+                $messages[] = new NatsMessage(
+                    subject: $headers['Nats-Subject'] ?? $msg->subject,
+                    sid: 0,
+                    replyTo: null,
+                    payload: $msg->payload,
+                    rawHeaders: $msg->rawHeaders,
+                );
+
+                // Some server versions mark the final data message with Nats-Num-Pending: 0 rather than
+                // a separate 204; treat that as completion too.
+                if (($headers['Nats-Num-Pending'] ?? null) === '0') {
+                    $done = true;
+                }
+            })->await();
+
+            try {
+                $this->client->publish($subject, $json, $inbox)->await();
+
+                $waitCancellation = new TimeoutCancellation(($expiresMs + 1000) / 1000);
+                try {
+                    while (!$done) {
+                        $frames = $this->client->processIncoming($waitCancellation)->await();
+                        if ($frames === 0) {
+                            delay(0.001, cancellation: $waitCancellation);
+                        }
+                    }
+                } catch (CancelledException) {
+                    // Deadline reached; return whatever was collected (or surface a captured error).
+                }
+            } finally {
+                $this->client->unsubscribe($sid)->await();
+            }
+
+            if ($error !== null) {
+                throw new JetStreamException(
+                    $error['description'] !== '' ? $error['description'] : 'JetStream direct get batch error',
+                    $error['code'],
+                );
+            }
+
+            return $messages;
+        });
+    }
+
+    /**
      * Creates or updates a durable consumer for a stream.
      *
      * @param array<string,mixed> $options Additional consumer config fields (max_deliver, ack_wait, etc.).
@@ -405,10 +532,8 @@ final class JetStreamContext
 
             $config = $this->applyDefaultAckPolicy($options);
             $config['durable_name'] = $consumer;
-
-            if ($filterSubject !== null) {
-                $config['filter_subject'] = $filterSubject;
-            }
+            $config = $this->applyFilterSubjects($config, $filterSubject);
+            $this->assertValidPriorityConfig($config);
 
             $response = $this->requestJson(
                 JetStreamApi::CONSUMER_CREATE_PREFIX . $stream . '.' . $consumer,
@@ -429,10 +554,8 @@ final class JetStreamContext
     {
         return async(function () use ($stream, $filterSubject, $options): ConsumerInfo {
             $config = $this->applyDefaultAckPolicy($options);
-
-            if ($filterSubject !== null && $filterSubject !== '') {
-                $config['filter_subject'] = $filterSubject;
-            }
+            $config = $this->applyFilterSubjects($config, $filterSubject);
+            $this->assertValidPriorityConfig($config);
 
             $response = $this->requestJson(
                 JetStreamApi::CONSUMER_CREATE_PREFIX . $stream,
@@ -460,10 +583,7 @@ final class JetStreamContext
             $config = $this->applyDefaultAckPolicy($options);
             $config['durable_name'] = $consumer;
             $config['deliver_subject'] = $deliverSubject;
-
-            if ($filterSubject !== null && $filterSubject !== '') {
-                $config['filter_subject'] = $filterSubject;
-            }
+            $config = $this->applyFilterSubjects($config, $filterSubject);
 
             $response = $this->requestJson(
                 JetStreamApi::CONSUMER_CREATE_PREFIX . $stream . '.' . $consumer,
@@ -489,10 +609,7 @@ final class JetStreamContext
         return async(function () use ($stream, $deliverSubject, $filterSubject, $options): ConsumerInfo {
             $config = $this->applyDefaultAckPolicy($options);
             $config['deliver_subject'] = $deliverSubject;
-
-            if ($filterSubject !== null && $filterSubject !== '') {
-                $config['filter_subject'] = $filterSubject;
-            }
+            $config = $this->applyFilterSubjects($config, $filterSubject);
 
             // Have the server reap this ephemeral consumer once it has no interest (e.g. after the
             // caller unsubscribes, or an ordered consumer is recreated/abandoned), so long-running
@@ -709,6 +826,41 @@ final class JetStreamContext
     }
 
     /**
+     * Clears the active client pin for a priority group (ADR-42 `pinned_client` policy), so another
+     * client can take over the pin on its next pull.
+     *
+     * @return Future<bool>
+     */
+    public function unpinConsumer(string $stream, string $consumer, string $group): Future
+    {
+        return async(function () use ($stream, $consumer, $group): bool {
+            if ($group === '') {
+                throw new JetStreamException('Priority group must not be empty');
+            }
+
+            $response = $this->requestJson(
+                JetStreamApi::CONSUMER_UNPIN_PREFIX . $stream . '.' . $consumer,
+                ['group' => $group],
+            );
+
+            return (bool) ($response['success'] ?? true);
+        });
+    }
+
+    /**
+     * Returns the pinned-client id (`Nats-Pin-Id`) carried by the first message delivered to a newly
+     * pinned client (ADR-42), or null when the message has no pin id. Pass it back as the `id` pull
+     * field on subsequent fetches to retain the pin.
+     */
+    public function pinIdOf(NatsMessage $message): ?string
+    {
+        $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+        $pinId = (string) ($headers['Nats-Pin-Id'] ?? '');
+
+        return $pinId === '' ? null : $pinId;
+    }
+
+    /**
      * Issues a JetStream API request, translating a no-responders error into a JetStreamException
      * (code 503) so callers catching JetStreamException are not surprised by a bare NatsException
      * (e.g. publishing to a subject not bound to any stream, or with JetStream disabled).
@@ -738,37 +890,55 @@ final class JetStreamContext
     }
 
     /**
-     * Publishes to a stream subject and returns JetStream publish acknowledgment.
+     * Publishes to a stream subject and returns the JetStream publish acknowledgment.
      *
+     * Optional headers can be attached: arbitrary `$headers`, a `$msgId` for server-side
+     * de-duplication within the stream's `duplicate_window` (emitted as `Nats-Msg-Id`), and a per-
+     * message `$ttl` (emitted as `Nats-TTL`; requires the stream to be created with `allow_msg_ttl`).
+     * The TTL accepts an integer number of seconds, a Go duration string, or "never".
+     *
+     * @param array<string,string> $headers Additional message headers.
+     * @param string|null          $msgId   Optional de-duplication id (`Nats-Msg-Id`).
+     * @param int|string|null      $ttl     Optional per-message TTL (`Nats-TTL`).
      * @return Future<PubAck>
      */
-    public function publish(string $subject, string $payload): Future
-    {
-        return async(function () use ($subject, $payload): PubAck {
-            $message = $this->jsRequest($subject, $payload);
+    public function publish(
+        string $subject,
+        string $payload,
+        array $headers = [],
+        ?string $msgId = null,
+        int|string|null $ttl = null,
+    ): Future {
+        return async(function () use ($subject, $payload, $headers, $msgId, $ttl): PubAck {
+            if ($msgId !== null) {
+                if ($msgId === '') {
+                    throw new JetStreamException('Nats-Msg-Id must not be empty');
+                }
 
-            try {
-                /** @var array<string,mixed> $data */
-                $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
-            } catch (\JsonException $e) {
-                throw new JetStreamException('Malformed JetStream publish ack: ' . $e->getMessage(), 0, $e);
+                $headers['Nats-Msg-Id'] = $msgId;
             }
 
-            /** @var array<string,mixed>|null $error */
-            $error = is_array($data['error'] ?? null) ? $data['error'] : null;
-            if ($error !== null) {
-                $description = (string) ($error['description'] ?? 'JetStream publish error');
-                $code = (int) ($error['code'] ?? 0);
-                throw new JetStreamException($description, $code);
+            if ($ttl !== null) {
+                $headers['Nats-TTL'] = MessageTtl::format($ttl);
             }
 
-            return PubAck::fromArray($data);
+            $message = $this->jsRequest($subject, $payload, $headers === [] ? null : $headers);
+
+            return $this->parsePublishAck($message);
         });
     }
 
     /**
-     * Publishes a scheduled message using NATS 2.12 scheduler headers.
+     * Publishes a scheduled message using the NATS 2.12 scheduler headers (ADR-51). The target stream
+     * must be created with `allow_msg_schedules` enabled (and `allow_msg_ttl` when a schedule TTL is
+     * used). The schedule expression may be `@at <RFC3339>`, `@every <duration>`, or a 6-field cron
+     * expression — build it with the {@see Schedule} helper.
      *
+     * @param string      $schedule    Schedule expression (@at / @every / cron).
+     * @param string|null $scheduleTtl Optional Nats-Schedule-TTL (requires `allow_msg_ttl` on the stream).
+     * @param string|null $source      Optional Nats-Schedule-Source identifier.
+     * @param string|null $timeZone    Optional IANA time zone, valid for cron schedules only.
+     * @param bool        $rollup      When true, emits Nats-Schedule-Rollup: sub (one active schedule per subject).
      * @return Future<PubAck>
      */
     public function publishScheduled(
@@ -777,9 +947,16 @@ final class JetStreamContext
         string $payload,
         string $schedule,
         ?string $scheduleTtl = null,
+        ?string $source = null,
+        ?string $timeZone = null,
+        bool $rollup = false,
     ): Future {
-        return async(function () use ($scheduleSubject, $targetSubject, $payload, $schedule, $scheduleTtl): PubAck {
+        return async(function () use ($scheduleSubject, $targetSubject, $payload, $schedule, $scheduleTtl, $source, $timeZone, $rollup): PubAck {
             $this->assertSupportedSchedulePattern($schedule);
+
+            if ($timeZone !== null && $timeZone !== '' && !$this->isCronSchedule($schedule)) {
+                throw new JetStreamException('Nats-Schedule-Time-Zone is only valid for cron schedule expressions');
+            }
 
             $headers = [
                 'Nats-Schedule' => $schedule,
@@ -790,36 +967,136 @@ final class JetStreamContext
                 $headers['Nats-Schedule-TTL'] = $scheduleTtl;
             }
 
-            $message = $this->jsRequest($scheduleSubject, $payload, $headers);
-
-            try {
-                /** @var array<string,mixed> $data */
-                $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
-            } catch (\JsonException $e) {
-                throw new JetStreamException('Malformed JetStream publish ack: ' . $e->getMessage(), 0, $e);
+            if ($source !== null && $source !== '') {
+                $headers['Nats-Schedule-Source'] = $source;
             }
 
-            /** @var array<string,mixed>|null $error */
-            $error = is_array($data['error'] ?? null) ? $data['error'] : null;
-            if ($error !== null) {
-                $description = (string) ($error['description'] ?? 'JetStream schedule publish error');
-                $code = (int) ($error['code'] ?? 0);
-                throw new JetStreamException($description, $code);
+            if ($timeZone !== null && $timeZone !== '') {
+                $headers['Nats-Schedule-Time-Zone'] = $timeZone;
             }
 
-            return PubAck::fromArray($data);
+            if ($rollup) {
+                $headers['Nats-Schedule-Rollup'] = 'sub';
+            }
+
+            return $this->parsePublishAck($this->jsRequest($scheduleSubject, $payload, $headers));
         });
+    }
+
+    /**
+     * Parses a JetStream publish acknowledgement payload into a typed PubAck, mapping a malformed body
+     * or an embedded API error to a JetStreamException.
+     */
+    private function parsePublishAck(NatsMessage $message): PubAck
+    {
+        try {
+            /** @var array<string,mixed> $data */
+            $data = json_decode($message->payload, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new JetStreamException('Malformed JetStream publish ack: ' . $e->getMessage(), 0, $e);
+        }
+
+        /** @var array<string,mixed>|null $error */
+        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+        if ($error !== null) {
+            $description = (string) ($error['description'] ?? 'JetStream publish error');
+            $code = (int) ($error['code'] ?? 0);
+            throw new JetStreamException($description, $code);
+        }
+
+        return PubAck::fromArray($data);
+    }
+
+    /**
+     * Atomically increments a distributed counter on a stream subject (ADR-49). The target stream must
+     * be created with `allow_msg_counter` enabled. The delta is a signed or unsigned integer string
+     * (e.g. "+5", "-3", "10"); the returned new total is also a string so arbitrary-precision values
+     * are preserved (PHP int / JSON number precision is insufficient for large counters).
+     *
+     * @return Future<string> The new counter value.
+     */
+    public function incrementCounter(string $subject, string $delta): Future
+    {
+        return async(function () use ($subject, $delta): string {
+            $delta = trim($delta);
+            if (preg_match('/^[+-]?\d+$/', $delta) !== 1) {
+                throw new JetStreamException('Counter increment must be an integer string (e.g. "+5", "-3", "10")');
+            }
+
+            $message = $this->jsRequest($subject, '', ['Nats-Incr' => $delta]);
+
+            return $this->parseCounterValue($message->payload);
+        });
+    }
+
+    /**
+     * Reads the current value of a distributed counter via Direct Get (last message on the subject).
+     * Returns "0" when the counter has no stored message yet. The value is returned as a string to
+     * preserve arbitrary precision.
+     *
+     * @return Future<string> The current counter value, or "0" if absent.
+     */
+    public function counterValue(string $stream, string $subject): Future
+    {
+        return async(function () use ($stream, $subject): string {
+            try {
+                $message = $this->directGetLastMessageForSubject($stream, $subject)->await();
+            } catch (JetStreamException $e) {
+                if ($e->getCode() === 404) {
+                    return '0';
+                }
+
+                throw $e;
+            }
+
+            return $this->parseCounterValue($message->payload);
+        });
+    }
+
+    /**
+     * Parses the `{"val":"<bigint>"}` body returned by a counter publish ack or Direct Get, decoding
+     * with JSON_BIGINT_AS_STRING so a large value is never truncated to a float. An embedded API error
+     * is mapped to a JetStreamException.
+     */
+    private function parseCounterValue(string $payload): string
+    {
+        try {
+            /** @var array<string,mixed> $data */
+            $data = json_decode($payload, true, 512, JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING);
+        } catch (\JsonException $e) {
+            throw new JetStreamException('Malformed counter response: ' . $e->getMessage(), 0, $e);
+        }
+
+        /** @var array<string,mixed>|null $error */
+        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+        if ($error !== null) {
+            $description = (string) ($error['description'] ?? 'JetStream counter error');
+            $code = (int) ($error['code'] ?? 0);
+            throw new JetStreamException($description, $code);
+        }
+
+        $val = $data['val'] ?? null;
+        if (is_int($val)) {
+            return (string) $val;
+        }
+
+        if (is_string($val) && $val !== '') {
+            return $val;
+        }
+
+        throw new JetStreamException('Counter response did not include a value');
     }
 
     /**
      * Fetches the next message for a pull consumer.
      *
+     * @param array<string,mixed> $pull Optional pull-request fields (see {@see fetchBatch()}).
      * @return Future<NatsMessage>
      */
-    public function fetchNext(string $stream, string $consumer, int $expiresMs = 3000): Future
+    public function fetchNext(string $stream, string $consumer, int $expiresMs = 3000, array $pull = []): Future
     {
-        return async(function () use ($stream, $consumer, $expiresMs): NatsMessage {
-            $messages = $this->fetchBatch($stream, $consumer, 1, $expiresMs)->await();
+        return async(function () use ($stream, $consumer, $expiresMs, $pull): NatsMessage {
+            $messages = $this->fetchBatch($stream, $consumer, 1, $expiresMs, $pull)->await();
 
             return $messages[0];
         });
@@ -828,11 +1105,18 @@ final class JetStreamContext
     /**
      * Fetches a batch of messages for a pull consumer.
      *
+     * The optional `$pull` array carries ADR-42 priority-group fields and general pull options:
+     * `group`, `id` (pin id), `min_pending`, `min_ack_pending`, `priority` (0-9), `max_bytes`, and
+     * `no_wait`. When a consumer is pinned, the first delivered message carries a `Nats-Pin-Id` header
+     * (read it with {@see pinIdOf()}); a stale pin id yields a 423 status surfaced as a
+     * JetStreamException with code 423.
+     *
+     * @param array<string,mixed> $pull Optional pull-request fields.
      * @return Future<list<NatsMessage>>
      */
-    public function fetchBatch(string $stream, string $consumer, int $batch, int $expiresMs = 3000): Future
+    public function fetchBatch(string $stream, string $consumer, int $batch, int $expiresMs = 3000, array $pull = []): Future
     {
-        return async(function () use ($stream, $consumer, $batch, $expiresMs): array {
+        return async(function () use ($stream, $consumer, $batch, $expiresMs, $pull): array {
             if ($expiresMs <= 0) {
                 throw new JetStreamException('Pull fetch expiresMs must be greater than zero');
             }
@@ -841,10 +1125,7 @@ final class JetStreamContext
                 throw new JetStreamException('Pull fetch batch must be greater than zero');
             }
 
-            $payload = [
-                'batch' => $batch,
-                'expires' => $expiresMs * 1_000_000,
-            ];
+            $payload = $this->buildPullRequest($batch, $expiresMs, $pull);
 
             $subject = JetStreamApi::CONSUMER_MSG_NEXT_PREFIX . $stream . '.' . $consumer;
             $json = json_encode($payload, JSON_THROW_ON_ERROR);
@@ -967,14 +1248,45 @@ final class JetStreamContext
     }
 
     /**
-     * Validates the schedule expression format supported by current server behavior.
+     * Validates the schedule expression format. The NATS scheduler (ADR-51, `allow_msg_schedules`)
+     * accepts three forms in the Nats-Schedule header: a one-shot "@at <RFC3339>", a recurring
+     * "@every <duration>", or a 6-field (seconds-resolution) cron expression.
      */
     private function assertSupportedSchedulePattern(string $schedule): void
     {
-        // NATS server currently supports @at only for scheduled messages.
-        if (!preg_match('/^@at\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $schedule)) {
-            throw new JetStreamException('Only @at schedule expressions are currently supported');
+        $schedule = trim($schedule);
+
+        // @at <RFC3339> (optionally with fractional seconds).
+        if (preg_match('/^@at\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/', $schedule) === 1) {
+            return;
         }
+
+        // @every <duration> (a non-empty interval token; the server validates the exact duration).
+        if (preg_match('/^@every\s+\S+/', $schedule) === 1) {
+            return;
+        }
+
+        // Otherwise it must be a 6-field cron expression (second minute hour dom month dow).
+        $fields = $schedule === '' ? [] : (preg_split('/\s+/', $schedule) ?: []);
+        if (count($fields) === 6) {
+            return;
+        }
+
+        throw new JetStreamException(
+            'Unsupported schedule expression "' . $schedule
+            . '": expected @at <RFC3339>, @every <duration>, or a 6-field cron expression',
+        );
+    }
+
+    /**
+     * Whether a schedule expression is a cron form (i.e. neither @at nor @every). Only cron schedules
+     * may carry a Nats-Schedule-Time-Zone header.
+     */
+    private function isCronSchedule(string $schedule): bool
+    {
+        $schedule = trim($schedule);
+
+        return !str_starts_with($schedule, '@at ') && !str_starts_with($schedule, '@every ');
     }
 
     /**
@@ -1032,6 +1344,114 @@ final class JetStreamContext
             // Status 100 control messages are not user payload deliveries.
             return true;
         });
+    }
+
+    /**
+     * Resolves the consumer filter configuration. A consumer may filter on a single subject (the
+     * `$filterSubject` argument → `filter_subject`) or on multiple subjects (a `filter_subjects` array
+     * supplied via the options → `filter_subjects`), but not both. Validates the array and rejects the
+     * mutually-exclusive combination client-side (issue #10, NATS 2.10+).
+     *
+     * @param array<string,mixed> $config
+     * @return array<string,mixed>
+     */
+    private function applyFilterSubjects(array $config, ?string $filterSubject): array
+    {
+        if (array_key_exists('filter_subjects', $config)) {
+            $subjects = $config['filter_subjects'];
+            if (!is_array($subjects) || $subjects === []) {
+                throw new JetStreamException('filter_subjects must be a non-empty array of subjects');
+            }
+
+            foreach ($subjects as $subject) {
+                if (!is_string($subject) || $subject === '') {
+                    throw new JetStreamException('filter_subjects must contain only non-empty subject strings');
+                }
+            }
+
+            if ($filterSubject !== null) {
+                throw new JetStreamException('Use either a single filter subject or filter_subjects, not both');
+            }
+
+            // Normalize to a positional list so the encoded JSON is a clean array.
+            $config['filter_subjects'] = array_values($subjects);
+
+            return $config;
+        }
+
+        if ($filterSubject !== null && $filterSubject !== '') {
+            $config['filter_subject'] = $filterSubject;
+        }
+
+        return $config;
+    }
+
+    /**
+     * Builds a pull-consumer CONSUMER.MSG.NEXT request body, merging whitelisted ADR-42 priority and
+     * general pull fields onto the mandatory batch/expires. Lightly validates `group` and `priority`;
+     * the server validates the rest.
+     *
+     * @param array<string,mixed> $pull
+     * @return array<string,mixed>
+     */
+    private function buildPullRequest(int $batch, int $expiresMs, array $pull): array
+    {
+        $request = [
+            'batch' => $batch,
+            'expires' => $expiresMs * 1_000_000,
+        ];
+
+        if (isset($pull['group'])) {
+            $group = $pull['group'];
+            if (!is_string($group) || preg_match('/^[A-Za-z0-9\-_\/=]{1,16}$/', $group) !== 1) {
+                throw new JetStreamException('Pull group must be 1..16 characters of [A-Za-z0-9-_/=]');
+            }
+        }
+
+        if (isset($pull['priority'])) {
+            $priority = $pull['priority'];
+            if (!is_int($priority) || $priority < 0 || $priority > 9) {
+                throw new JetStreamException('Pull priority must be an integer between 0 and 9');
+            }
+        }
+
+        foreach (['group', 'id', 'min_pending', 'min_ack_pending', 'priority', 'max_bytes', 'no_wait'] as $field) {
+            if (array_key_exists($field, $pull)) {
+                $request[$field] = $pull[$field];
+            }
+        }
+
+        return $request;
+    }
+
+    /**
+     * Validates ADR-42 priority-group consumer configuration (when present) before a consumer-create
+     * round-trip.
+     *
+     * @param array<string,mixed> $config
+     */
+    private function assertValidPriorityConfig(array $config): void
+    {
+        if (array_key_exists('priority_policy', $config)
+            && !in_array($config['priority_policy'], ['overflow', 'pinned_client', 'prioritized'], true)
+        ) {
+            throw new JetStreamException('priority_policy must be one of: overflow, pinned_client, prioritized');
+        }
+
+        if (!array_key_exists('priority_groups', $config)) {
+            return;
+        }
+
+        $groups = $config['priority_groups'];
+        if (!is_array($groups) || $groups === []) {
+            throw new JetStreamException('priority_groups must be a non-empty array of group names');
+        }
+
+        foreach ($groups as $group) {
+            if (!is_string($group) || preg_match('/^[A-Za-z0-9\-_\/=]{1,16}$/', $group) !== 1) {
+                throw new JetStreamException('priority_groups names must be 1..16 characters of [A-Za-z0-9-_/=]');
+            }
+        }
     }
 
     /**

@@ -221,4 +221,52 @@ final class PullConsumerIteratorTest extends TestCase
         self::assertSame(1, $total);
         self::assertSame(['job-7'], $processed);
     }
+
+    /**
+     * Verifies a stale-pin (423) status drops the pin id and re-pulls without it, capturing the new
+     * pin id from the next delivery (issue #7).
+     */
+    public function testHandleRePinsOnStalePin(): void
+    {
+        $stalePin = "NATS/1.0 423 Nats-Pin-Id Mismatch\r\nStatus: 423\r\n\r\n";
+        $hStale = strlen($stalePin);
+        $body = 'order-9';
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // iter 1 (sid 1): stale pin -> drop pin id and retry without it.
+            sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $hStale, $hStale, $stalePin),
+            // iter 2 (sid 2): re-pinned, a message arrives carrying the new pin id.
+            sprintf(
+                "HMSG _INBOX.JS.FETCH.any 2 \$JS.ACK.ORDERS.PROC.1.1.1.123.0 %d %d\r\nNATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n%s\r\n",
+                strlen("NATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n"),
+                strlen("NATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n") + strlen($body),
+                $body,
+            ),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $processed = [];
+        $total = $client->jetStream()
+            ->pullConsumer('ORDERS', 'PROC')
+            ->setBatching(1)
+            ->setExpiresMs(100)
+            ->setGroup('g1')
+            ->setIterations(2)
+            ->handle(function (NatsMessage $msg, JetStreamContext $js) use (&$processed): void {
+                $processed[] = $msg->payload;
+            })->await();
+
+        self::assertSame(1, $total);
+        self::assertSame(['order-9'], $processed);
+
+        // The first pull carries the group; after the 423 the pin id is cleared and re-pulled.
+        $pullWrites = array_values(array_filter(
+            $transport->writes,
+            static fn (string $w): bool => str_contains($w, 'CONSUMER.MSG.NEXT'),
+        ));
+        self::assertStringContainsString('"group":"g1"', $pullWrites[0]);
+    }
 }

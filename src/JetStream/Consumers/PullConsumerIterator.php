@@ -28,6 +28,15 @@ final class PullConsumerIterator
     private int $batch = 1;
     private int $expiresMs = 3000;
     private ?int $iterations = null;
+    private ?string $group = null;
+    private ?int $priority = null;
+    private ?int $minPending = null;
+    private ?int $minAckPending = null;
+    private ?int $maxBytes = null;
+    private bool $noWait = false;
+
+    /** Runtime pin id captured from the first delivered message of a pinned group. */
+    private ?string $pinId = null;
 
     /**
      * @param JetStreamContext $context JetStream context used to issue pull requests and ACK-related commands.
@@ -86,6 +95,79 @@ final class PullConsumerIterator
     }
 
     /**
+     * Sets the ADR-42 priority group this consumer pulls under (required for priority policies).
+     *
+     * @return $this
+     */
+    public function setGroup(?string $group): self
+    {
+        $this->group = $group;
+
+        return $this;
+    }
+
+    /**
+     * Sets the pull priority (0-9) for a `prioritized` priority policy.
+     *
+     * @return $this
+     */
+    public function setPriority(?int $priority): self
+    {
+        $this->priority = $priority;
+
+        return $this;
+    }
+
+    /**
+     * Sets the `overflow` policy `min_pending` threshold (only pull when at least this many messages
+     * are pending).
+     *
+     * @return $this
+     */
+    public function setMinPending(?int $minPending): self
+    {
+        $this->minPending = $minPending;
+
+        return $this;
+    }
+
+    /**
+     * Sets the `overflow` policy `min_ack_pending` threshold.
+     *
+     * @return $this
+     */
+    public function setMinAckPending(?int $minAckPending): self
+    {
+        $this->minAckPending = $minAckPending;
+
+        return $this;
+    }
+
+    /**
+     * Caps the total bytes returned per pull request.
+     *
+     * @return $this
+     */
+    public function setMaxBytes(?int $maxBytes): self
+    {
+        $this->maxBytes = $maxBytes;
+
+        return $this;
+    }
+
+    /**
+     * Enables `no_wait` mode (return immediately rather than waiting for the expiry).
+     *
+     * @return $this
+     */
+    public function setNoWait(bool $noWait = true): self
+    {
+        $this->noWait = $noWait;
+
+        return $this;
+    }
+
+    /**
      * Returns configured batch size.
      */
     public function getBatching(): int
@@ -130,8 +212,18 @@ final class PullConsumerIterator
                         $this->consumer,
                         $this->batch,
                         $this->expiresMs,
+                        $this->buildPull(),
                     )->await();
                 } catch (JetStreamException $e) {
+                    // A stale pin (423) is never terminal: drop the pin id and re-pull without it so
+                    // the server re-pins this client (or hands the pin to another). Applies in both
+                    // finite and infinite mode.
+                    if ($e->getCode() === 423) {
+                        $this->pinId = null;
+
+                        continue;
+                    }
+
                     // In infinite mode keep polling through routine/transient conditions so a
                     // long-running worker is not killed by a quiet period, backpressure, or a
                     // failover: 404 (no messages) and 408 (request timeout) are routine empty
@@ -149,6 +241,12 @@ final class PullConsumerIterator
                     break;
                 }
 
+                // Capture the pin id from the first message of a newly pinned group so subsequent
+                // pulls retain the pin.
+                if ($this->group !== null && $this->pinId === null && $messages !== []) {
+                    $this->pinId = $this->context->pinIdOf($messages[0]);
+                }
+
                 foreach ($messages as $message) {
                     $handler($message, $this->context);
                     ++$totalProcessed;
@@ -157,6 +255,47 @@ final class PullConsumerIterator
 
             return $totalProcessed;
         });
+    }
+
+    /**
+     * Builds the optional pull-request fields from the configured priority/group options plus the
+     * current pin id.
+     *
+     * @return array<string,mixed>
+     */
+    private function buildPull(): array
+    {
+        $pull = [];
+
+        if ($this->group !== null) {
+            $pull['group'] = $this->group;
+        }
+
+        if ($this->pinId !== null) {
+            $pull['id'] = $this->pinId;
+        }
+
+        if ($this->priority !== null) {
+            $pull['priority'] = $this->priority;
+        }
+
+        if ($this->minPending !== null) {
+            $pull['min_pending'] = $this->minPending;
+        }
+
+        if ($this->minAckPending !== null) {
+            $pull['min_ack_pending'] = $this->minAckPending;
+        }
+
+        if ($this->maxBytes !== null) {
+            $pull['max_bytes'] = $this->maxBytes;
+        }
+
+        if ($this->noWait) {
+            $pull['no_wait'] = true;
+        }
+
+        return $pull;
     }
 
     /**

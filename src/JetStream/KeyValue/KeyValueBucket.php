@@ -11,6 +11,7 @@ use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamApi;
 use IDCT\NATS\JetStream\JetStreamContext;
+use IDCT\NATS\JetStream\MessageTtl;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 
@@ -71,16 +72,19 @@ final class KeyValueBucket
     }
 
     /**
-     * Puts a value for the provided key.
+     * Puts a value for the provided key, optionally with a per-key TTL after which the entry expires
+     * (`Nats-TTL`; requires the bucket/stream to be created with `allow_msg_ttl`). The TTL accepts an
+     * integer number of seconds, a Go duration string, or "never".
      *
+     * @param int|string|null $ttl Optional per-key TTL.
      * @return Future<PubAck>
      */
-    public function put(string $key, string $value): Future
+    public function put(string $key, string $value, int|string|null $ttl = null): Future
     {
-        return async(function () use ($key, $value): PubAck {
+        return async(function () use ($key, $value, $ttl): PubAck {
             $this->assertValidKey($key);
 
-            return $this->jetStream->publish($this->subjectForKey($key), $value)->await();
+            return $this->jetStream->publish($this->subjectForKey($key), $value, ttl: $ttl)->await();
         });
     }
 
@@ -106,38 +110,44 @@ final class KeyValueBucket
     }
 
     /**
-     * Marks a key as deleted.
+     * Marks a key as deleted, optionally with a tombstone TTL after which the delete marker itself
+     * ages out (`Nats-TTL`; requires `allow_msg_ttl` on the bucket/stream).
      *
+     * @param int|string|null $tombstoneTtl Optional TTL for the delete marker.
      * @return Future<PubAck>
      */
-    public function delete(string $key): Future
+    public function delete(string $key, int|string|null $tombstoneTtl = null): Future
     {
-        return async(function () use ($key): PubAck {
+        return async(function () use ($key, $tombstoneTtl): PubAck {
             $this->assertValidKey($key);
 
-            return $this->publishWithHeadersAck(
-                $this->subjectForKey($key),
-                '',
-                ['KV-Operation' => 'DEL'],
-            )->await();
+            $headers = ['KV-Operation' => 'DEL'];
+            if ($tombstoneTtl !== null) {
+                $headers['Nats-TTL'] = MessageTtl::format($tombstoneTtl);
+            }
+
+            return $this->publishWithHeadersAck($this->subjectForKey($key), '', $headers)->await();
         });
     }
 
     /**
-     * Purges key history and writes a purge marker.
+     * Purges key history and writes a purge marker, optionally with a tombstone TTL after which the
+     * purge marker itself ages out (`Nats-TTL`; requires `allow_msg_ttl` on the bucket/stream).
      *
+     * @param int|string|null $tombstoneTtl Optional TTL for the purge marker.
      * @return Future<PubAck>
      */
-    public function purge(string $key): Future
+    public function purge(string $key, int|string|null $tombstoneTtl = null): Future
     {
-        return async(function () use ($key): PubAck {
+        return async(function () use ($key, $tombstoneTtl): PubAck {
             $this->assertValidKey($key);
 
-            return $this->publishWithHeadersAck(
-                $this->subjectForKey($key),
-                '',
-                ['KV-Operation' => 'PURGE', 'Nats-Rollup' => 'sub'],
-            )->await();
+            $headers = ['KV-Operation' => 'PURGE', 'Nats-Rollup' => 'sub'];
+            if ($tombstoneTtl !== null) {
+                $headers['Nats-TTL'] = MessageTtl::format($tombstoneTtl);
+            }
+
+            return $this->publishWithHeadersAck($this->subjectForKey($key), '', $headers)->await();
         });
     }
 
@@ -178,11 +188,27 @@ final class KeyValueBucket
             }
 
             $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
-            $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+            $operation = $this->operationFromHeaders($headers);
             $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
 
             return $this->buildEntry($key, $message->payload, $operation, $revision);
         });
+    }
+
+    /**
+     * Resolves the KV operation for a record. A server-written subject delete-marker
+     * (`Nats-Marker-Reason`: MaxAge/Remove/Purge, ADR-43) carries no `KV-Operation`; it is treated as
+     * a PURGE tombstone so a reader/watcher sees a deletion rather than a live empty value.
+     *
+     * @param array<string,string> $headers
+     */
+    private function operationFromHeaders(array $headers): string
+    {
+        if (($headers['Nats-Marker-Reason'] ?? '') !== '') {
+            return 'PURGE';
+        }
+
+        return strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
     }
 
     private function buildEntry(string $key, string $value, string $operation, ?int $revision): KeyValueEntry
@@ -238,7 +264,7 @@ final class KeyValueBucket
             }
         }
 
-        $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+        $operation = $this->operationFromHeaders($headers);
         $revision = isset($message['seq']) ? (int) $message['seq'] : null;
 
         return $this->buildEntry($key, $value, $operation, $revision);
@@ -268,7 +294,7 @@ final class KeyValueBucket
                     }
 
                     $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
-                    $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+                    $operation = $this->operationFromHeaders($headers);
                     $revision = $this->jetStream->streamSequenceOf($message);
 
                     $handler(new KeyValueEntry(
@@ -326,7 +352,7 @@ final class KeyValueBucket
                     }
 
                     $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
-                    $operation = strtoupper((string) ($headers['KV-Operation'] ?? 'PUT'));
+                    $operation = $this->operationFromHeaders($headers);
                     if ($operation === 'DEL' || $operation === 'PURGE') {
                         return null;
                     }

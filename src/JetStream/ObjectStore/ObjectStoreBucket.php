@@ -526,15 +526,22 @@ final class ObjectStoreBucket
                 throw $e;
             }
 
+            // The record's stream sequence (its revision) travels in the Direct Get Nats-Sequence
+            // header, not in the meta JSON; surface it on ObjectInfo.
+            $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+
+            if (($headers['Nats-Marker-Reason'] ?? '') !== '') {
+                // Server-written subject delete-marker (ADR-43): the object's meta aged out / was
+                // purged, so the object is effectively absent.
+                return null;
+            }
+
             /** @var array<string,mixed>|null $metadata */
             $metadata = json_decode($message->payload, true);
             if (!is_array($metadata)) {
                 return null;
             }
 
-            // The record's stream sequence (its revision) travels in the Direct Get Nats-Sequence
-            // header, not in the meta JSON; surface it on ObjectInfo.
-            $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
             $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
 
             return ObjectInfo::fromArray($this->bucket, $metadata, $revision);
@@ -632,6 +639,13 @@ final class ObjectStoreBucket
             return $this->jetStream->subscribeEphemeralPushConsumer(
                 $this->streamName(),
                 function (NatsMessage $message) use ($handler): void {
+                    $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+                    if (($headers['Nats-Marker-Reason'] ?? '') !== '') {
+                        // Server-written subject delete-marker (the object's meta aged out / was
+                        // purged, ADR-43); not a real metadata update, so do not emit it.
+                        return;
+                    }
+
                     $metadata = json_decode($message->payload, true);
                     if (!is_array($metadata)) {
                         // Tolerate a malformed meta delivery instead of throwing out of the dispatch

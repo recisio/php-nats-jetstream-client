@@ -17,6 +17,65 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+NATS 2.11/2.12 client feature support (roadmap milestone, GitHub issues #4–#14; additive —
+targets 2.1.0).
+
+### Changed
+
+- `[bugfix]` Honor JetStream subject delete-markers (`Nats-Marker-Reason`: MaxAge/Remove/Purge, ADR-43,
+  issue #5). A server-written delete-marker is now treated as a tombstone rather than a live value:
+  `KeyValueBucket::get()` returns a `PURGE` entry with a null value (was an empty-string `PUT`),
+  `getAll()` omits the key, `watch()` emits a tombstone, and `ObjectStoreBucket::watch()`/`info()` skip
+  the marker. **Behavior change** (flagged `bc-break` on the issue, but bug-driven so versioned as a
+  bugfix): only reachable when a stream has `subject_delete_marker_ttl` set, which this client now also
+  forwards as a create option.
+
+### Added
+
+- `[feature]` Batched / multi Direct Get (ADR-31, issue #13). New `directGetBatch()` collects a
+  multi-response Direct Get stream (terminated by a 204 EOB or `Nats-Num-Pending: 0`), and
+  `directGetLastForSubjects()` fetches the latest message for many subjects in one request via
+  `multi_last`. Additive — the existing per-subject bulk paths (`getAll()`/`list()`) are unchanged
+  pending live verification on a 2.11+ server.
+- `[feature]` Pull-consumer priority groups and richer pull options (ADR-42, issue #7).
+  `fetchBatch()`/`fetchNext()` accept a `$pull` array (`group`, `id`, `min_pending`,
+  `min_ack_pending`, `priority`, `max_bytes`, `no_wait`); `PullConsumerIterator` gains
+  `setGroup()`/`setPriority()`/`setMinPending()`/`setMinAckPending()`/`setMaxBytes()`/`setNoWait()`
+  and transparently captures the `Nats-Pin-Id` and re-pins on a 423 stale-pin status. New
+  `unpinConsumer()` (CONSUMER.UNPIN) and `pinIdOf()`; consumer-create validates `priority_groups`/
+  `priority_policy`.
+- `[feature]` Atomic (all-or-nothing) batch publish (ADR-50, issue #8). `JetStreamContext::batch()`
+  returns a `BatchPublisher`: `add()` stages messages and `commit()` sends them with a shared
+  `Nats-Batch-Id`, an incrementing `Nats-Batch-Sequence`, and `Nats-Batch-Commit: 1` on the final
+  message, returning a single PubAck exposing the committed `batchCount`/`batchId`. Capped at 1000
+  messages; an aborted batch surfaces as a `JetStreamException`. Requires `allow_atomic_publish` on
+  the stream.
+- `[feature]` Multi-subject consumer filters (issue #10, NATS 2.10+). The consumer-create methods now
+  accept a `filter_subjects` array (via options), validated client-side and mutually exclusive with the
+  singular filter subject (combining the two is rejected with a clear error instead of an opaque server
+  rejection).
+- `[feature]` Distributed counter CRDT (ADR-49, issue #9). `JetStreamContext::incrementCounter()`
+  publishes a `Nats-Incr` delta (signed/unsigned integer string) and returns the new total;
+  `counterValue()` reads the current value via Direct Get ("0" when absent). Values are handled as
+  strings (decoded with `JSON_BIGINT_AS_STRING`) so arbitrary-precision counters are not truncated.
+  The target stream must be created with `allow_msg_counter` enabled.
+- `[feature]` `JetStreamContext::publish()` now accepts optional message headers — a generic
+  `array $headers`, a `$msgId` (`Nats-Msg-Id`) for server-side de-duplication within the stream's
+  `duplicate_window` (issue #11), and a per-message `$ttl` (`Nats-TTL`; requires `allow_msg_ttl` on
+  the stream — issue #4). `KeyValueBucket::put()` takes an optional per-key `$ttl`, and
+  `delete()`/`purge()` take an optional tombstone TTL. TTL values (integer seconds, a Go duration
+  string, or "never") are validated client-side via the new `MessageTtl` helper.
+- `[feature]` Recurring and cron scheduled publishing (ADR-51, issue #6). `Schedule::every()` builds
+  an `@every <interval>` expression (from an integer number of seconds or a Go-style duration string)
+  and `Schedule::cron()` validates/returns a 6-field (seconds-resolution) cron expression.
+  `JetStreamContext::publishScheduled()` now accepts `@at`, `@every`, and cron schedules (previously
+  only `@at`) and emits the optional `Nats-Schedule-Source`, `Nats-Schedule-Time-Zone` (cron only,
+  rejected otherwise), and `Nats-Schedule-Rollup: sub` headers alongside the existing
+  `Nats-Schedule`/`-Target`/`-TTL`. The target stream must be created with `allow_msg_schedules`
+  enabled (e.g. `createStream(..., ['allow_msg_schedules' => true])`).
+
+## [2.0.0] - 2026-06-07
+
 Findings from a deep review against a live NATS 2.12 server (README correctness,
 real-server behavior, bugs, and performance). Object Store interoperability with
 the `nats` CLI, idle-connection heartbeat survival, and request-timeout recovery

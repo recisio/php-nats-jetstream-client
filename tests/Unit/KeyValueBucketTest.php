@@ -216,6 +216,50 @@ final class KeyValueBucketTest extends TestCase
     }
 
     /**
+     * Verifies a per-key TTL on put emits Nats-TTL (issue #4).
+     */
+    public function testPutWithTtl(): void
+    {
+        $putAck = '{"stream":"KV_cfg","seq":5,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($putAck), $putAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->put('theme', 'green', ttl: 60)->await();
+
+        self::assertStringStartsWith('HPUB $KV.cfg.theme _INBOX.', $transport->writes[3]);
+        self::assertStringContainsString('Nats-TTL:60s', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies a tombstone TTL on delete emits Nats-TTL alongside the delete marker (issue #4).
+     */
+    public function testDeleteWithTombstoneTtl(): void
+    {
+        $delAck = '{"stream":"KV_cfg","seq":6,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($delAck), $delAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->delete('theme', tombstoneTtl: 120)->await();
+
+        self::assertStringContainsString('KV-Operation:DEL', $transport->writes[3]);
+        self::assertStringContainsString('Nats-TTL:120s', $transport->writes[3]);
+    }
+
+    /**
      * Verifies getStatus maps stream state counters.
      */
     public function testGetStatus(): void
@@ -272,6 +316,119 @@ final class KeyValueBucketTest extends TestCase
 
         self::assertSame(['email' => 'b@example.com'], $all);
         self::assertStringContainsString('$JS.API.DIRECT.GET.KV_cfg', implode('', $transport->writes));
+    }
+
+    /**
+     * Verifies get() treats a server delete-marker (Nats-Marker-Reason) as a PURGE tombstone with a
+     * null value, instead of a live empty-string value (issue #5).
+     */
+    public function testGetTreatsMarkerAsTombstone(): void
+    {
+        $hdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.theme\r\nNats-Sequence: 9\r\nNats-Marker-Reason: MaxAge\r\n\r\n";
+        $h = strlen($hdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.x 1 %d %d\r\n%s\r\n", $h, $h, $hdrs),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->get('theme')->await();
+
+        self::assertInstanceOf(KeyValueEntry::class, $entry);
+        /** @var KeyValueEntry $entry */
+        self::assertSame('PURGE', $entry->operation);
+        self::assertNull($entry->value);
+        self::assertSame(9, $entry->revision);
+    }
+
+    /**
+     * Verifies getAll() omits a key whose latest record is a server delete-marker (issue #5).
+     */
+    public function testGetAllOmitsMarker(): void
+    {
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":4,"bytes":256,"subjects":{"$KV.cfg.username":2,"$KV.cfg.email":2}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"messages":4,"bytes":256,"subjects":{}}}';
+        // username's latest record is a server delete-marker (aged out) -> must be omitted.
+        $usernameHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.username\r\nNats-Sequence: 3\r\nNats-Marker-Reason: MaxAge\r\n\r\n";
+        $emailHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.email\r\nNats-Sequence: 4\r\n\r\n";
+        $emailBody = 'b@example.com';
+        $uh = strlen($usernameHdrs);
+        $eh = strlen($emailHdrs);
+        $et = $eh + strlen($emailBody);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),
+            sprintf("HMSG _INBOX.b 3 %d %d\r\n%s\r\n", $uh, $uh, $usernameHdrs),
+            sprintf("HMSG _INBOX.c 4 %d %d\r\n%s%s\r\n", $eh, $et, $emailHdrs, $emailBody),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $all = $client->jetStream()->keyValue('cfg')->getAll()->await();
+
+        self::assertSame(['email' => 'b@example.com'], $all);
+    }
+
+    /**
+     * Verifies watch() delivers a server delete-marker as a PURGE tombstone (null value), not a live
+     * empty value (issue #5).
+     */
+    public function testWatchTreatsMarkerAsTombstone(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+        $markerHdrs = "NATS/1.0\r\nNats-Marker-Reason: MaxAge\r\n\r\n";
+        $mh = strlen($markerHdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            sprintf("HMSG \$KV.cfg.theme 2 \$JS.ACK.KV_cfg.KVWATCH.1.7.1.0.0 %d %d\r\n%s\r\n", $mh, $mh, $markerHdrs),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $seen = null;
+        $client->jetStream()->keyValue('cfg')->watch(static function (KeyValueEntry $entry) use (&$seen): void {
+            $seen = $entry;
+        })->await();
+
+        self::assertSame(1, $client->processIncoming()->await());
+        self::assertInstanceOf(KeyValueEntry::class, $seen);
+        /** @var KeyValueEntry $seen */
+        self::assertSame('theme', $seen->key);
+        self::assertSame('PURGE', $seen->operation);
+        self::assertNull($seen->value);
+    }
+
+    /**
+     * Verifies subject_delete_marker_ttl is forwarded into the KV stream config (issue #5 passthrough).
+     */
+    public function testCreateWithSubjectDeleteMarkerTtl(): void
+    {
+        $createPayload = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->create(['subject_delete_marker_ttl' => 3_600_000_000_000])->await();
+
+        self::assertStringContainsString('"subject_delete_marker_ttl":3600000000000', $transport->writes[3]);
     }
 
     // ─── Key Validation ─────────────────────────────────────────────
