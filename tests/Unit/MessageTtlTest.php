@@ -71,4 +71,32 @@ final class MessageTtlTest extends TestCase
 
         MessageTtl::format('   ');
     }
+
+    /**
+     * Verifies a negative duration string is rejected (consistent with the integer path).
+     */
+    public function testRejectsNegativeDurationString(): void
+    {
+        $this->expectException(JetStreamException::class);
+
+        MessageTtl::format('-5s');
+    }
+
+    /**
+     * Verifies a zero-valued duration string is rejected.
+     */
+    public function testRejectsZeroDurationString(): void
+    {
+        $this->expectException(JetStreamException::class);
+
+        MessageTtl::format('0s');
+    }
+
+    /**
+     * Verifies "never" is accepted case-insensitively and normalized.
+     */
+    public function testNormalizesNeverCaseInsensitively(): void
+    {
+        self::assertSame('never', MessageTtl::format('NEVER'));
+    }
 }

@@ -804,6 +804,16 @@ final class ObjectStoreBucketTest extends TestCase
         ], JSON_THROW_ON_ERROR);
 
         $createReply = '{"stream_name":"OBJ_assets","name":"OBJWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+        // The marker carries a NON-EMPTY, valid-JSON body so the marker-header check is the only thing
+        // preventing emission (an empty body would be skipped by the malformed-JSON guard regardless).
+        $markerBody = json_encode([
+            'name' => 'logo.txt',
+            'bucket' => 'assets',
+            'nuid' => 'stale',
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ], JSON_THROW_ON_ERROR);
         $markerHdrs = "NATS/1.0\r\nNats-Marker-Reason: MaxAge\r\n\r\n";
         $mh = strlen($markerHdrs);
 
@@ -812,7 +822,7 @@ final class ObjectStoreBucketTest extends TestCase
             "PONG\r\n",
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
             // A server delete-marker (sid 2) must be skipped, not surfaced as an ObjectInfo.
-            sprintf("HMSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.1.5.1.0.0 %d %d\r\n%s\r\n", $enc, $mh, $mh, $markerHdrs),
+            sprintf("HMSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.1.5.1.0.0 %d %d\r\n%s%s\r\n", $enc, $mh, $mh + strlen((string) $markerBody), $markerHdrs, (string) $markerBody),
             // A subsequent valid meta on the same subscription is still delivered.
             sprintf("MSG \$O.assets.M.%s 2 \$JS.ACK.OBJ_assets.OBJWATCH.2.6.2.0.0 %d\r\n%s\r\n", $enc, strlen((string) $valid), (string) $valid),
         ]);
@@ -829,6 +839,36 @@ final class ObjectStoreBucketTest extends TestCase
         $client->processIncoming()->await();
 
         self::assertSame(['wnuid3'], $seen);
+    }
+
+    /**
+     * Verifies info() returns null when the latest meta record is a server delete-marker, even when it
+     * carries a non-empty body (issue #5).
+     */
+    public function testInfoReturnsNullForDeleteMarker(): void
+    {
+        $enc = $this->encodeName('logo.txt');
+        $markerBody = json_encode([
+            'name' => 'logo.txt',
+            'bucket' => 'assets',
+            'nuid' => 'stale',
+            'deleted' => false,
+        ], JSON_THROW_ON_ERROR);
+        $hdrs = "NATS/1.0\r\nNats-Stream: OBJ_assets\r\nNats-Subject: \$O.assets.M.{$enc}\r\nNats-Sequence: 9\r\nNats-Marker-Reason: MaxAge\r\n\r\n";
+        $h = strlen($hdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.x 1 %d %d\r\n%s%s\r\n", $h, $h + strlen((string) $markerBody), $hdrs, (string) $markerBody),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->objectStore('assets')->info('logo.txt')->await();
+
+        self::assertNull($info);
     }
 
     public function testBucketSubjectHelpers(): void

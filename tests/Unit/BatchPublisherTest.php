@@ -13,8 +13,9 @@ use PHPUnit\Framework\TestCase;
 final class BatchPublisherTest extends TestCase
 {
     /**
-     * Verifies a committed batch emits one Nats-Batch-Id across all messages, an incrementing
-     * sequence, the commit marker only on the final message, and parses the commit ack (issue #8).
+     * Verifies a committed batch: the START (seq 1) is a request, the intermediate is fire-and-forget,
+     * the final carries the commit marker as a request, all share one Nats-Batch-Id, and the commit
+     * ack is parsed (issue #8, ADR-50).
      */
     public function testCommitSendsBatchHeadersAndParsesAck(): void
     {
@@ -23,7 +24,10 @@ final class BatchPublisherTest extends TestCase
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
-            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($commitAck), $commitAck),
+            // Zero-byte ack to the batch-start request (sid 1).
+            "MSG _INBOX.a 1 0\r\n\r\n",
+            // Commit PubAck to the commit request (sid 2).
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($commitAck), $commitAck),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -51,15 +55,55 @@ final class BatchPublisherTest extends TestCase
             self::assertStringContainsString('Nats-Batch-Id:batch-xyz', $write);
         }
 
+        // START (seq 1): a request (carries an inbox), no commit marker.
+        self::assertStringStartsWith('HPUB orders.created _INBOX.', $batchWrites[0]);
         self::assertStringContainsString('Nats-Batch-Sequence:1', $batchWrites[0]);
         self::assertStringNotContainsString('Nats-Batch-Commit', $batchWrites[0]);
+
+        // Intermediate (seq 2): fire-and-forget (no inbox after the subject, just the byte counts).
+        self::assertMatchesRegularExpression('/^HPUB orders\.created \d/', $batchWrites[1]);
         self::assertStringContainsString('Nats-Batch-Sequence:2', $batchWrites[1]);
         self::assertStringNotContainsString('Nats-Batch-Commit', $batchWrites[1]);
+
+        // Commit (seq 3): a request carrying the commit marker.
+        self::assertStringStartsWith('HPUB orders.created _INBOX.', $batchWrites[2]);
         self::assertStringContainsString('Nats-Batch-Sequence:3', $batchWrites[2]);
         self::assertStringContainsString('Nats-Batch-Commit:1', $batchWrites[2]);
+    }
 
-        // The commit message is sent request/reply (carries an inbox); intermediates are fire-and-forget.
-        self::assertStringStartsWith('HPUB orders.created _INBOX.', $batchWrites[2]);
+    /**
+     * Verifies a batch-start rejection (error reply to the start request) aborts before the
+     * intermediates/commit are sent (issue #8, ADR-50).
+     */
+    public function testCommitRejectedAtStart(): void
+    {
+        $startError = '{"error":{"code":400,"description":"atomic publish not enabled"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($startError), $startError),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $batch = $client->jetStream()->batch('batch-rej')
+            ->add('orders.created', 'a')
+            ->add('orders.created', 'b')
+            ->add('orders.created', 'c');
+
+        try {
+            $batch->commit()->await();
+            self::fail('Expected the batch-start rejection to throw');
+        } catch (JetStreamException $e) {
+            self::assertStringContainsString('atomic publish not enabled', $e->getMessage());
+        }
+
+        // Only the start message was written; no commit and no further sequence was sent.
+        $allWrites = implode('', $transport->writes);
+        self::assertStringNotContainsString('Nats-Batch-Commit', $allWrites);
+        self::assertStringNotContainsString('Nats-Batch-Sequence:3', $allWrites);
     }
 
     /**

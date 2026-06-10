@@ -76,4 +76,22 @@ final class Schedule
 
         return $expression;
     }
+
+    /**
+     * Returns one of the predefined NATS scheduler aliases (ADR-51): hourly, daily, weekly, monthly,
+     * yearly, annually, or midnight (with or without a leading "@"). These are cron-class schedules
+     * and may carry a time zone.
+     */
+    public static function predefined(string $alias): string
+    {
+        $normalized = '@' . ltrim(strtolower(trim($alias)), '@');
+
+        if (preg_match('/^@(?:hourly|daily|weekly|monthly|yearly|annually|midnight)$/', $normalized) !== 1) {
+            throw new \InvalidArgumentException(
+                'Unknown schedule alias "' . $alias . '": expected hourly, daily, weekly, monthly, yearly, annually, or midnight',
+            );
+        }
+
+        return $normalized;
+    }
 }

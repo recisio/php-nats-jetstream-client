@@ -68,9 +68,11 @@ targets 2.1.0).
 - `[feature]` Recurring and cron scheduled publishing (ADR-51, issue #6). `Schedule::every()` builds
   an `@every <interval>` expression (from an integer number of seconds or a Go-style duration string)
   and `Schedule::cron()` validates/returns a 6-field (seconds-resolution) cron expression.
-  `JetStreamContext::publishScheduled()` now accepts `@at`, `@every`, and cron schedules (previously
-  only `@at`) and emits the optional `Nats-Schedule-Source`, `Nats-Schedule-Time-Zone` (cron only,
-  rejected otherwise), and `Nats-Schedule-Rollup: sub` headers alongside the existing
+  `Schedule::predefined()` returns a predefined alias (`@daily`, `@hourly`, ...).
+  `JetStreamContext::publishScheduled()` now accepts `@at` (with `Z` or a numeric RFC3339 offset),
+  `@every`, cron, and the predefined aliases (previously only `@at` with `Z`) and emits the optional
+  `Nats-Schedule-Source`, `Nats-Schedule-Time-Zone` (cron/alias only, rejected otherwise), and
+  `Nats-Schedule-Rollup: sub` headers alongside the existing
   `Nats-Schedule`/`-Target`/`-TTL`. The target stream must be created with `allow_msg_schedules`
   enabled (e.g. `createStream(..., ['allow_msg_schedules' => true])`).
 

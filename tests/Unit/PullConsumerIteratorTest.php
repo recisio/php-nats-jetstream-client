@@ -230,7 +230,7 @@ final class PullConsumerIteratorTest extends TestCase
     {
         $stalePin = "NATS/1.0 423 Nats-Pin-Id Mismatch\r\nStatus: 423\r\n\r\n";
         $hStale = strlen($stalePin);
-        $body = 'order-9';
+        $pinHdrs = "NATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n";
 
         $transport = new FakeTransport([
             ...$this->infoAndPong(),
@@ -238,11 +238,14 @@ final class PullConsumerIteratorTest extends TestCase
             sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $hStale, $hStale, $stalePin),
             // iter 2 (sid 2): re-pinned, a message arrives carrying the new pin id.
             sprintf(
-                "HMSG _INBOX.JS.FETCH.any 2 \$JS.ACK.ORDERS.PROC.1.1.1.123.0 %d %d\r\nNATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n%s\r\n",
-                strlen("NATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n"),
-                strlen("NATS/1.0\r\nNats-Pin-Id: pin-new\r\n\r\n") + strlen($body),
-                $body,
+                "HMSG _INBOX.JS.FETCH.any 2 \$JS.ACK.ORDERS.PROC.1.1.1.123.0 %d %d\r\n%s%s\r\n",
+                strlen($pinHdrs),
+                strlen($pinHdrs) + strlen('order-9'),
+                $pinHdrs,
+                'order-9',
             ),
+            // iter 3 (sid 3): a plain message; the pull issued for this iteration must carry the pin id.
+            sprintf("MSG _INBOX.JS.FETCH.any 3 \$JS.ACK.ORDERS.PROC.2.2.2.123.0 %d\r\n%s\r\n", strlen('order-10'), 'order-10'),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -254,19 +257,25 @@ final class PullConsumerIteratorTest extends TestCase
             ->setBatching(1)
             ->setExpiresMs(100)
             ->setGroup('g1')
-            ->setIterations(2)
+            ->setIterations(3)
             ->handle(function (NatsMessage $msg, JetStreamContext $js) use (&$processed): void {
                 $processed[] = $msg->payload;
             })->await();
 
-        self::assertSame(1, $total);
-        self::assertSame(['order-9'], $processed);
+        self::assertSame(2, $total);
+        self::assertSame(['order-9', 'order-10'], $processed);
 
-        // The first pull carries the group; after the 423 the pin id is cleared and re-pulled.
         $pullWrites = array_values(array_filter(
             $transport->writes,
             static fn (string $w): bool => str_contains($w, 'CONSUMER.MSG.NEXT'),
         ));
+
+        // iter 1 pull: group present, no pin yet.
         self::assertStringContainsString('"group":"g1"', $pullWrites[0]);
+        self::assertStringNotContainsString('"id"', $pullWrites[0]);
+        // iter 2 pull (right after the 423): pin was cleared, so still no id.
+        self::assertStringNotContainsString('"id"', $pullWrites[1]);
+        // iter 3 pull: the pin id captured from iter 2's delivery is now re-sent.
+        self::assertStringContainsString('"id":"pin-new"', $pullWrites[2]);
     }
 }

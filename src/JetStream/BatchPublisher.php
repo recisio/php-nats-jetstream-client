@@ -98,31 +98,74 @@ final class BatchPublisher
 
             $this->committed = true;
 
-            $lastIndex = count($this->messages) - 1;
+            $total = count($this->messages);
+            $lastIndex = $total - 1;
 
-            // Intermediate messages are published fire-and-forget (no reply); the server stages them
-            // by batch id. Writes are serialized on the single connection, so they reach the server in
-            // sequence order ahead of the commit message below.
-            for ($i = 0; $i < $lastIndex; ++$i) {
-                $message = $this->messages[$i];
-                $this->client->publishWithHeaders(
-                    $message['subject'],
-                    $message['payload'],
-                    $this->batchHeaders($message['headers'], $i + 1, false),
+            // Per ADR-50 the batch START (sequence 1) is a request: the server replies with a zero-byte
+            // ack on success or an error if the batch is rejected (e.g. allow_atomic_publish disabled),
+            // so the client learns immediately instead of blindly publishing the whole batch. For a
+            // single-message batch the lone message is both start and commit (handled below).
+            if ($total > 1) {
+                $first = $this->messages[0];
+                $startReply = $this->client->requestWithHeaders(
+                    $first['subject'],
+                    $first['payload'],
+                    $this->batchHeaders($first['headers'], 1, false),
                 )->await();
+                $this->assertStartAccepted($startReply->payload);
+
+                // Intermediate messages (2..n-1) are fire-and-forget; the server stages them by batch
+                // id. Writes are serialized on the single connection, so they arrive in sequence order.
+                for ($i = 1; $i < $lastIndex; ++$i) {
+                    $message = $this->messages[$i];
+                    $this->client->publishWithHeaders(
+                        $message['subject'],
+                        $message['payload'],
+                        $this->batchHeaders($message['headers'], $i + 1, false),
+                    )->await();
+                }
             }
 
-            // The final message carries Nats-Batch-Commit and is sent request/reply; the server
-            // commits the whole batch and returns a single PubAck (batch id + committed count).
+            // The final message carries Nats-Batch-Commit and is sent request/reply; the server commits
+            // the whole batch and returns a single PubAck (batch id + committed count).
             $final = $this->messages[$lastIndex];
             $reply = $this->client->requestWithHeaders(
                 $final['subject'],
                 $final['payload'],
-                $this->batchHeaders($final['headers'], $lastIndex + 1, true),
+                $this->batchHeaders($final['headers'], $total, true),
             )->await();
 
             return $this->parseCommitAck($reply->payload);
         });
+    }
+
+    /**
+     * Validates the reply to the batch-start request: an empty (zero-byte) reply means the server
+     * accepted the batch; a reply carrying an error (e.g. atomic publish not enabled on the stream)
+     * aborts the batch before the remaining messages are published.
+     */
+    private function assertStartAccepted(string $payload): void
+    {
+        if (trim($payload) === '') {
+            return;
+        }
+
+        try {
+            /** @var array<string,mixed> $data */
+            $data = json_decode($payload, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            // A non-empty, non-JSON start reply is unexpected but not an error payload; treat as accepted.
+            return;
+        }
+
+        /** @var array<string,mixed>|null $error */
+        $error = is_array($data['error'] ?? null) ? $data['error'] : null;
+        if ($error !== null) {
+            throw new JetStreamException(
+                (string) ($error['description'] ?? 'Atomic batch rejected at start'),
+                (int) ($error['code'] ?? 0),
+            );
+        }
     }
 
     /**

@@ -261,6 +261,80 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies the mutual-exclusion guard also fires when the singular filter_subject is smuggled in
+     * via the options bag alongside filter_subjects (issue #10).
+     */
+    public function testCreateConsumerRejectsFilterSubjectInOptionsConflict(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Use either a single filter subject or filter_subjects, not both');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, [
+                'filter_subject' => 'orders.eu.>',
+                'filter_subjects' => ['orders.us.>'],
+            ])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies an empty filter subject is rejected uniformly on the ephemeral path too (issue #10).
+     */
+    public function testCreateEphemeralConsumerRejectsEmptyFilterSubject(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Consumer filter subject must not be empty');
+
+        try {
+            $client->jetStream()->createEphemeralConsumer('ORDERS', '')->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies filter_subjects flows through the push-consumer create path too (issue #10).
+     */
+    public function testCreatePushConsumerWithFilterSubjects(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->createPushConsumer('ORDERS', 'PROC', '_INBOX.deliver', null, [
+            'filter_subjects' => ['orders.eu.>', 'orders.us.>'],
+        ])->await();
+
+        self::assertStringContainsString('"filter_subjects":["orders.eu.>","orders.us.>"]', $transport->writes[3]);
+        self::assertStringNotContainsString('"filter_subject"', $transport->writes[3]);
+    }
+
+    /**
      * Verifies createConsumer validates and forwards priority-group config (issue #7).
      */
     public function testCreateConsumerWithPriorityGroups(): void
@@ -413,6 +487,8 @@ final class JetStreamContextTest extends TestCase
         $h2 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.b\r\nNats-Sequence: 6\r\n\r\n";
         $b2 = 'bbb';
         $eob = "NATS/1.0 204 EOB\r\n\r\n";
+        $h3 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.c\r\nNats-Sequence: 7\r\n\r\n";
+        $b3 = 'ccc';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
@@ -420,6 +496,9 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h1), strlen($h1) + strlen($b1), $h1, $b1),
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h2), strlen($h2) + strlen($b2), $h2, $b2),
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s\r\n", strlen($eob), strlen($eob), $eob),
+            // A frame AFTER the EOB must NOT be consumed: if termination were broken the loop would
+            // read this and return 3 messages.
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -445,12 +524,16 @@ final class JetStreamContextTest extends TestCase
         $b1 = 'aaa';
         $h2 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.b\r\nNats-Sequence: 6\r\nNats-Num-Pending: 0\r\n\r\n";
         $b2 = 'bbb';
+        // A frame after the Nats-Num-Pending:0 terminator must NOT be consumed.
+        $h3 = "NATS/1.0\r\nNats-Stream: ORDERS\r\nNats-Subject: orders.c\r\nNats-Sequence: 7\r\n\r\n";
+        $b3 = 'ccc';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h1), strlen($h1) + strlen($b1), $h1, $b1),
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h2), strlen($h2) + strlen($b2), $h2, $b2),
+            sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
         ]);
 
         $client = new NatsClient(new NatsOptions(), $transport);
@@ -696,6 +779,60 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies a predefined alias schedule (ADR-51) reaches the wire and may carry a time zone.
+     */
+    public function testPublishScheduledPredefinedAlias(): void
+    {
+        $ackPayload = '{"stream":"SCHED","seq":11,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publishScheduled(
+            'schedules.report',
+            'events.report',
+            '{"event":"daily"}',
+            Schedule::predefined('daily'),
+            timeZone: 'Europe/Warsaw',
+        )->await();
+
+        self::assertStringContainsString('Nats-Schedule:@daily', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Schedule-Time-Zone:Europe/Warsaw', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies an @at schedule with a numeric RFC3339 offset (not just "Z") reaches the wire.
+     */
+    public function testPublishScheduledAtWithTimezoneOffset(): void
+    {
+        $ackPayload = '{"stream":"SCHED","seq":12,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publishScheduled(
+            'schedules.orders.one',
+            'events.orders',
+            '{"event":"scheduled"}',
+            '@at 2030-01-01T02:00:00+02:00',
+        )->await();
+
+        self::assertStringContainsString('Nats-Schedule:@at 2030-01-01T02:00:00+02:00', $transport->writes[3]);
+    }
+
+    /**
      * Verifies a time zone supplied with a non-cron schedule is rejected before dispatch.
      */
     public function testPublishScheduledRejectsTimeZoneForNonCron(): void
@@ -864,7 +1001,9 @@ final class JetStreamContextTest extends TestCase
      */
     public function testIncrementCounterPreservesBigValue(): void
     {
-        $ackPayload = '{"stream":"COUNTERS","seq":2,"val":"99999999999999999999"}';
+        // Unquoted JSON number beyond PHP_INT_MAX: only JSON_BIGINT_AS_STRING preserves it exactly,
+        // so this payload makes that flag load-bearing (a quoted string would pass regardless).
+        $ackPayload = '{"stream":"COUNTERS","seq":2,"val":99999999999999999999}';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",

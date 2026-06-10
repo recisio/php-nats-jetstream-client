@@ -419,6 +419,18 @@ final class JetStreamContext
                 return [];
             }
 
+            // This convenience caps `batch` at the number of subjects, which is correct only for exact
+            // subjects (one match each). A wildcard filter can match many stored subjects, so capping at
+            // the filter count would silently truncate the result — reject it and point to directGetBatch().
+            foreach ($subjects as $subject) {
+                if (str_contains($subject, '*') || str_contains($subject, '>')) {
+                    throw new JetStreamException(
+                        'directGetLastForSubjects expects exact subjects; the wildcard "' . $subject
+                        . '" would be truncated — use directGetBatch() with an explicit batch size instead',
+                    );
+                }
+            }
+
             return $this->directGetBatch(
                 $stream,
                 ['multi_last' => $subjects, 'batch' => count($subjects)],
@@ -526,10 +538,6 @@ final class JetStreamContext
     public function createConsumer(string $stream, string $consumer, ?string $filterSubject = null, array $options = []): Future
     {
         return async(function () use ($stream, $consumer, $filterSubject, $options): ConsumerInfo {
-            if ($filterSubject === '') {
-                throw new JetStreamException('Consumer filter subject must not be empty (use null to omit)');
-            }
-
             $config = $this->applyDefaultAckPolicy($options);
             $config['durable_name'] = $consumer;
             $config = $this->applyFilterSubjects($config, $filterSubject);
@@ -1256,13 +1264,19 @@ final class JetStreamContext
     {
         $schedule = trim($schedule);
 
-        // @at <RFC3339> (optionally with fractional seconds).
-        if (preg_match('/^@at\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/', $schedule) === 1) {
+        // @at <RFC3339> — UTC "Z" or a numeric timezone offset (the server normalizes to UTC), with
+        // optional fractional seconds.
+        if (preg_match('/^@at\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/', $schedule) === 1) {
             return;
         }
 
         // @every <duration> (a non-empty interval token; the server validates the exact duration).
         if (preg_match('/^@every\s+\S+/', $schedule) === 1) {
+            return;
+        }
+
+        // Predefined aliases (ADR-51): @hourly, @daily, @weekly, @monthly, @yearly/@annually, @midnight.
+        if (preg_match('/^@(?:hourly|daily|weekly|monthly|yearly|annually|midnight)$/', $schedule) === 1) {
             return;
         }
 
@@ -1274,19 +1288,19 @@ final class JetStreamContext
 
         throw new JetStreamException(
             'Unsupported schedule expression "' . $schedule
-            . '": expected @at <RFC3339>, @every <duration>, or a 6-field cron expression',
+            . '": expected @at <RFC3339>, @every <duration>, a predefined alias (@daily, @hourly, ...),'
+            . ' or a 6-field cron expression',
         );
     }
 
     /**
-     * Whether a schedule expression is a cron form (i.e. neither @at nor @every). Only cron schedules
-     * may carry a Nats-Schedule-Time-Zone header.
+     * Whether a schedule expression is a cron-class form (a 6-field cron or a predefined alias) as
+     * opposed to @at/@every. Only cron-class schedules may carry a Nats-Schedule-Time-Zone header.
+     * Uses the same whitespace semantics as the validator so a non-space separator cannot misclassify.
      */
     private function isCronSchedule(string $schedule): bool
     {
-        $schedule = trim($schedule);
-
-        return !str_starts_with($schedule, '@at ') && !str_starts_with($schedule, '@every ');
+        return preg_match('/^@(?:at|every)\s/', trim($schedule)) !== 1;
     }
 
     /**
@@ -1369,7 +1383,9 @@ final class JetStreamContext
                 }
             }
 
-            if ($filterSubject !== null) {
+            // Mutually exclusive with the singular filter — whether supplied as the argument or
+            // smuggled in via the options bag.
+            if ($filterSubject !== null || array_key_exists('filter_subject', $config)) {
                 throw new JetStreamException('Use either a single filter subject or filter_subjects, not both');
             }
 
@@ -1379,7 +1395,13 @@ final class JetStreamContext
             return $config;
         }
 
-        if ($filterSubject !== null && $filterSubject !== '') {
+        // An empty string is a caller mistake (null omits the filter); reject it uniformly across all
+        // create variants rather than silently dropping it (which would over-broadly consume).
+        if ($filterSubject === '') {
+            throw new JetStreamException('Consumer filter subject must not be empty (use null to omit)');
+        }
+
+        if ($filterSubject !== null) {
             $config['filter_subject'] = $filterSubject;
         }
 

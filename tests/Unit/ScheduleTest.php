@@ -98,4 +98,24 @@ final class ScheduleTest extends TestCase
 
         Schedule::cron('0 0 * * *');
     }
+
+    /**
+     * Verifies predefined() normalizes an alias (with or without a leading "@") to "@alias".
+     */
+    public function testPredefinedNormalizesAlias(): void
+    {
+        self::assertSame('@daily', Schedule::predefined('daily'));
+        self::assertSame('@hourly', Schedule::predefined('@hourly'));
+        self::assertSame('@monthly', Schedule::predefined('MONTHLY'));
+    }
+
+    /**
+     * Verifies predefined() rejects an unknown alias.
+     */
+    public function testPredefinedRejectsUnknownAlias(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        Schedule::predefined('fortnightly');
+    }
 }
