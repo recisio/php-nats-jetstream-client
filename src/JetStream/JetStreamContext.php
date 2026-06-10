@@ -54,7 +54,7 @@ final class JetStreamContext
 
     /**
      * Starts an atomic (all-or-nothing) publish batch (ADR-50). The target stream must be created with
-     * `allow_atomic_publish` enabled. Pass a batch id (1..64 chars) to use your own, or omit it for a
+     * `allow_atomic` enabled. Pass a batch id (1..64 chars) to use your own, or omit it for a
      * generated one.
      */
     public function batch(?string $batchId = null): BatchPublisher

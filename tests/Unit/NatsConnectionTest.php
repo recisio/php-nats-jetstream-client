@@ -73,6 +73,34 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies the handshake reassembles an INFO frame fragmented across TCP segments (regression for
+     * issue #2). A long INFO (carrying an `xkey`, NATS 2.10+) can be split mid-frame over a real
+     * network; the tail segment, if parsed on its own, looks like a bogus control line (e.g.
+     * `...VDGU3DPK"}`). The parser must buffer the partial frame and only act on the reassembled whole,
+     * rather than parsing the raw tail and throwing "Unsupported control frame".
+     */
+    public function testConnectReassemblesFragmentedInfoFrame(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,'
+            . '"max_payload":1048576,"headers":true,"xkey":"XKEYVDGU3DPKVDGU3DPKVDGU3DPKVDGU3DPK"}' . "\r\n";
+        $split = intdiv(strlen($info), 2);
+
+        $transport = new FakeTransport([
+            substr($info, 0, $split),  // first segment: incomplete INFO — the parser must buffer it
+            substr($info, $split),     // tail segment completes the frame
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        $serverInfo = $connection->serverInfo();
+        self::assertNotNull($serverInfo);
+        self::assertSame('S1', $serverInfo->serverId);
+    }
+
+    /**
      * Verifies that an unknown control-line op during handshake raises a ConnectionException
      * wrapping the parser's ProtocolException.
      *

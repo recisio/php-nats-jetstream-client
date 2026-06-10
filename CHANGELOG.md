@@ -17,6 +17,23 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-06-10
+
+Verification pass for the 2.1.0 roadmap features against a live NATS 2.12.9 server.
+
+### Fixed
+
+- `[bugfix]` Atomic batch publish (#8): the stream-config field is **`allow_atomic`** — the server
+  rejects the previously-documented `allow_atomic_publish` with `unknown field`. Corrected the
+  `batch()`/`BatchPublisher` docblocks (the `BatchPublisher` code itself was already correct and is now
+  verified end-to-end: a 3-message batch commits 3/3 with the `batch`/`count` ack parsed).
+
+### Added
+
+- Live integration tests for atomic batch publish (#8) and batched/multi Direct Get (#13), and a
+  connection-level regression test for the fragmented-INFO handshake (#2, the `trim($chunk)` bug fixed
+  in v1.0.1 previously had no test). Full integration suite (76 tests) passes against NATS 2.12.9.
+
 ## [2.1.0] - 2026-06-10
 
 NATS 2.11/2.12 client feature support (roadmap milestone, GitHub issues #4–#14). All changes are
