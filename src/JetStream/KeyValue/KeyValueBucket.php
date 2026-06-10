@@ -375,7 +375,7 @@ final class KeyValueBucket
      */
     public function keys(): Future
     {
-        return async(fn (): array => array_keys($this->getAll()->await()));
+        return async(fn(): array => array_keys($this->getAll()->await()));
     }
 
     /**

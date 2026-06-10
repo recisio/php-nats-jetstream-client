@@ -294,7 +294,7 @@ final class NatsConnectionTest extends TestCase
 
         $replies = array_values(array_filter(
             $transport->writes,
-            static fn (string $w): bool => str_starts_with($w, 'PUB _INBOX.reply '),
+            static fn(string $w): bool => str_starts_with($w, 'PUB _INBOX.reply '),
         ));
         self::assertCount(1, $replies);
         self::assertSame("PUB _INBOX.reply 4\r\npong\r\n", $replies[0]);
@@ -322,7 +322,7 @@ final class NatsConnectionTest extends TestCase
 
         $replies = array_values(array_filter(
             $transport->writes,
-            static fn (string $w): bool => str_starts_with($w, 'HPUB _INBOX.reply '),
+            static fn(string $w): bool => str_starts_with($w, 'HPUB _INBOX.reply '),
         ));
         self::assertCount(1, $replies);
         self::assertStringContainsString('X-Trace:abc', $replies[0]);
@@ -701,7 +701,7 @@ final class NatsConnectionTest extends TestCase
 
         $replies = $connection->requestMany('svc.scan', 'q', null, 3, 1000)->await();
 
-        $payloads = array_map(static fn (NatsMessage $m): string => $m->payload, $replies);
+        $payloads = array_map(static fn(NatsMessage $m): string => $m->payload, $replies);
         self::assertSame(['A', 'B', 'C'], $payloads);
         self::assertStringStartsWith('PUB svc.scan _INBOX.', $transport->writes[3]);
         self::assertSame("UNSUB 1\r\n", $transport->writes[4]);

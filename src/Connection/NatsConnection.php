@@ -105,11 +105,9 @@ final class NatsConnection
         private readonly ProtocolCodec $codec = new ProtocolCodec(),
     ) {
         $this->parser = new ProtocolParser();
-        $this->messageResponder = function (string $subject, string $payload, ?array $headers): Future {
-            return $headers === null
+        $this->messageResponder = fn(string $subject, string $payload, ?array $headers): Future => $headers === null
                 ? $this->publish($subject, $payload)
                 : $this->publishWithHeaders($subject, $payload, $headers);
-        };
     }
 
     /**
