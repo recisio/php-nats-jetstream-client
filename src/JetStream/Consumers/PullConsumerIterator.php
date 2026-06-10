@@ -38,6 +38,12 @@ final class PullConsumerIterator
     /** Runtime pin id captured from the first delivered message of a pinned group. */
     private ?string $pinId = null;
 
+    /** Set by stop(): break the consume loop promptly, abandoning the rest of the in-flight batch. */
+    private bool $stopRequested = false;
+
+    /** Set by drain(): stop after the in-flight batch finishes processing; do not pull again. */
+    private bool $drainRequested = false;
+
     /**
      * @param JetStreamContext $context JetStream context used to issue pull requests and ACK-related commands.
      * @param string $stream Stream name that owns the target consumer.
@@ -200,7 +206,30 @@ final class PullConsumerIterator
     }
 
     /**
-     * Runs the fetch loop, invoking the handler for each received message.
+     * Signals a running {@see handle()} loop to stop promptly: it breaks before the next pull and
+     * abandons any messages remaining in the in-flight batch (already-fetched but not yet handled).
+     * Safe to call from inside the handler or from another fiber. Mirrors nats.go
+     * `ConsumeContext.Stop()`.
+     */
+    public function stop(): void
+    {
+        $this->stopRequested = true;
+    }
+
+    /**
+     * Signals a running {@see handle()} loop to drain: it finishes processing the in-flight batch
+     * (so no fetched message is dropped) and then stops without issuing another pull. Mirrors nats.go
+     * `ConsumeContext.Drain()`.
+     */
+    public function drain(): void
+    {
+        $this->drainRequested = true;
+    }
+
+    /**
+     * Runs the fetch loop, invoking the handler for each received message. The loop ends when the
+     * configured iteration count is reached, a terminal error occurs, or {@see stop()}/{@see drain()}
+     * is signalled.
      *
      * @param callable(NatsMessage, JetStreamContext):void $handler
      * @return Future<int> Total number of messages processed.
@@ -208,10 +237,15 @@ final class PullConsumerIterator
     public function handle(callable $handler): Future
     {
         return async(function () use ($handler): int {
+            // Reset lifecycle flags so a reused iterator is not pre-stopped from an earlier run.
+            $this->resetLifecycle();
             $totalProcessed = 0;
             $iteration = 0;
 
-            while ($this->iterations === null || $iteration < $this->iterations) {
+            while (($this->iterations === null || $iteration < $this->iterations)
+                && !$this->stopRequested
+                && !$this->drainRequested
+            ) {
                 ++$iteration;
 
                 try {
@@ -258,11 +292,36 @@ final class PullConsumerIterator
                 foreach ($messages as $message) {
                     $handler($message, $this->context);
                     ++$totalProcessed;
+
+                    // A hard stop abandons the rest of this batch; a drain lets it finish (the
+                    // while-condition then ends the loop before the next pull). Read through the
+                    // accessor so the flag the handler may have just set is observed.
+                    if ($this->isStopRequested()) {
+                        break;
+                    }
                 }
             }
 
             return $totalProcessed;
         });
+    }
+
+    /**
+     * Whether a hard {@see stop()} has been requested. Exposed as an accessor so the consume loop reads
+     * the live flag (which the handler may set mid-batch) rather than a value narrowed by control flow.
+     */
+    private function isStopRequested(): bool
+    {
+        return $this->stopRequested;
+    }
+
+    /**
+     * Clears the stop/drain flags at the start of a {@see handle()} run.
+     */
+    private function resetLifecycle(): void
+    {
+        $this->stopRequested = false;
+        $this->drainRequested = false;
     }
 
     /**
