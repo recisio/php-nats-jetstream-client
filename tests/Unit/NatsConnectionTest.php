@@ -2443,7 +2443,7 @@ final class NatsConnectionTest extends TestCase
 
     public function testHeartbeatReadHandlesEmptyErrorAndFatalFrames(): void
     {
-        $transport = new class () implements TransportInterface {
+        $transport = new class implements TransportInterface {
             /** @var list<string> */
             public array $writes = [];
             public string $mode = 'empty';
@@ -2454,8 +2454,7 @@ final class NatsConnectionTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function write(string $bytes): \Amp\Future
@@ -2470,8 +2469,7 @@ final class NatsConnectionTest extends TestCase
 
             public function upgradeTls(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
 
             public function readLine(?\Amp\Cancellation $cancellation = null): \Amp\Future
@@ -2491,8 +2489,7 @@ final class NatsConnectionTest extends TestCase
 
             public function close(): \Amp\Future
             {
-                return async(static function (): void {
-                });
+                return async(static function (): void {});
             }
         };
 

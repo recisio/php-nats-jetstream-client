@@ -12,6 +12,4 @@ namespace IDCT\NATS\Transport;
  * still-plaintext socket. Extends \RuntimeException so connect()'s catch (\Throwable) wraps it into
  * a ConnectionException.
  */
-final class TlsRequiredException extends \RuntimeException
-{
-}
+final class TlsRequiredException extends \RuntimeException {}

@@ -102,7 +102,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0', 'Echo service')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, metadata: ['team' => 'core']);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, metadata: ['team' => 'core']);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -359,7 +359,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => 'ok');
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => 'ok');
 
         $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
 
@@ -409,8 +409,8 @@ final class ServiceTest extends TestCase
             ->addObserver(static function (string $event, ServiceEndpoint $endpoint, NatsMessage $message, array $context) use (&$events): void {
                 $events[] = $event;
             })
-            ->withRequestValidator(static fn (NatsMessage $message, array $schema): string => 'bad input')
-            ->addEndpoint('v', 'svc.v', static fn (NatsMessage $message): string => 'ok', schema: ['type' => 'object']);
+            ->withRequestValidator(static fn(NatsMessage $message, array $schema): string => 'bad input')
+            ->addEndpoint('v', 'svc.v', static fn(NatsMessage $message): string => 'ok', schema: ['type' => 'object']);
         $service->start()->await();
 
         $client->processIncoming()->await();
@@ -429,8 +429,8 @@ final class ServiceTest extends TestCase
         // The second endpoint's subject is invalid (whitespace): addEndpoint accepts it, but the
         // subscribe at start() fails after discovery + the first endpoint already subscribed.
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('good', 'svc.good', static fn (NatsMessage $message): string => 'ok')
-            ->addEndpoint('bad', 'bad subject', static fn (NatsMessage $message): string => 'no');
+            ->addEndpoint('good', 'svc.good', static fn(NatsMessage $message): string => 'ok')
+            ->addEndpoint('bad', 'bad subject', static fn(NatsMessage $message): string => 'no');
 
         try {
             $service->start()->await();
@@ -823,7 +823,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload)
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload)
             ->run(0.03)->await();
 
         // The idle read was given a cancellation and was actually torn down (not orphaned): every
@@ -845,7 +845,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload)
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload)
             ->run(0.03)->await();
 
         // The shared connection must not be left with a read in progress (which would short-circuit
@@ -864,10 +864,10 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('a', 'svc.echo', static fn (NatsMessage $m): string => 'a');
+            ->addEndpoint('a', 'svc.echo', static fn(NatsMessage $m): string => 'a');
 
         $this->expectException(\InvalidArgumentException::class);
-        $service->addEndpoint('b', 'svc.echo', static fn (NatsMessage $m): string => 'b');
+        $service->addEndpoint('b', 'svc.echo', static fn(NatsMessage $m): string => 'b');
     }
 
     public function testAddEndpointRejectsEmptyName(): void
@@ -880,7 +880,7 @@ final class ServiceTest extends TestCase
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('name must not be empty');
-        $service->addEndpoint('   ', 'svc.echo', static fn (NatsMessage $m): string => 'x');
+        $service->addEndpoint('   ', 'svc.echo', static fn(NatsMessage $m): string => 'x');
     }
 
     public function testAddEndpointRejectsEmptySubject(): void
@@ -893,7 +893,7 @@ final class ServiceTest extends TestCase
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('subject must not be empty');
-        $service->addEndpoint('echo', '', static fn (NatsMessage $m): string => 'x');
+        $service->addEndpoint('echo', '', static fn(NatsMessage $m): string => 'x');
     }
 
     public function testClassHandlerWithRequiredConstructorArgIsRejected(): void
@@ -918,7 +918,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $m): string => $m->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
         $service->start()->await();
 
         // The connection is gone before stop(): unsubscribe() would throw "not open".
@@ -941,7 +941,7 @@ final class ServiceTest extends TestCase
         $client->connect()->await();
 
         $service = $client->service('echo', '1.0.0')
-            ->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $m): string => $m->payload);
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
 
         // run() with no timeout must still return once the connection is unrecoverable, instead of
         // busy-spinning forever. The outer bound fails the test if it spins.
@@ -964,7 +964,7 @@ final class ServiceTest extends TestCase
 
         // An invalid-UTF-8 description makes the INFO discovery payload fail to JSON-encode.
         $client->service('calc', '1.0.0', "bad\xB1description")
-            ->addEndpoint('add', 'calc.add', static fn (NatsMessage $m): string => 'ok')
+            ->addEndpoint('add', 'calc.add', static fn(NatsMessage $m): string => 'ok')
             ->start()->await();
 
         // The encode failure must be swallowed inside the discovery handler, not escape the dispatch

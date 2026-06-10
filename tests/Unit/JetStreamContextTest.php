@@ -15,8 +15,8 @@ use IDCT\NATS\Exception\UnsupportedFeatureException;
 use IDCT\NATS\JetStream\Configuration\StreamSource;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\JetStreamContext;
-use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
+use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\Schedule;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
@@ -2059,7 +2059,7 @@ final class JetStreamContextTest extends TestCase
         $streams = $client->jetStream()->listStreams()->await();
 
         // All three streams are returned across two pages (server page size would otherwise truncate).
-        self::assertSame(['S1', 'S2', 'S3'], array_map(static fn (StreamInfo $s): string => $s->name, $streams));
+        self::assertSame(['S1', 'S2', 'S3'], array_map(static fn(StreamInfo $s): string => $s->name, $streams));
 
         $writes = implode('||', $transport->writes);
         self::assertStringContainsString('"offset":0', $writes);
@@ -2381,7 +2381,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testSubscribeOrderedConsumerRecreatesOnSequenceGap(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],

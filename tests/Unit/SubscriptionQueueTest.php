@@ -279,7 +279,7 @@ final class SubscriptionQueueTest extends TestCase
         $client = $this->makeConnectedClient($transport);
         $queue = $client->subscribeQueue('idle.subject')->await();
 
-        $result = \Amp\Future\await([async(static fn (): ?\IDCT\NATS\Core\NatsMessage => $queue->fetch())], new TimeoutCancellation(2.0))[0];
+        $result = \Amp\Future\await([async(static fn(): ?\IDCT\NATS\Core\NatsMessage => $queue->fetch())], new TimeoutCancellation(2.0))[0];
 
         self::assertNull($result);
         self::assertTrue($transport->lastReadHadCancellation, 'fetch() must bound the read with a cancellation');
@@ -292,7 +292,7 @@ final class SubscriptionQueueTest extends TestCase
         $queue = $client->subscribeQueue('idle.subject')->await();
 
         // Default timeout is 0 (the <= 0 branch); it must not block the calling fiber.
-        $result = \Amp\Future\await([async(static fn (): ?\IDCT\NATS\Core\NatsMessage => $queue->next())], new TimeoutCancellation(2.0))[0];
+        $result = \Amp\Future\await([async(static fn(): ?\IDCT\NATS\Core\NatsMessage => $queue->next())], new TimeoutCancellation(2.0))[0];
 
         self::assertNull($result);
     }
@@ -304,7 +304,7 @@ final class SubscriptionQueueTest extends TestCase
         $queue = $client->subscribeQueue('idle.subject')->await();
         $queue->setTimeout(-1.0);
 
-        $result = \Amp\Future\await([async(static fn (): ?\IDCT\NATS\Core\NatsMessage => $queue->next())], new TimeoutCancellation(2.0))[0];
+        $result = \Amp\Future\await([async(static fn(): ?\IDCT\NATS\Core\NatsMessage => $queue->next())], new TimeoutCancellation(2.0))[0];
 
         self::assertNull($result);
     }
@@ -316,7 +316,7 @@ final class SubscriptionQueueTest extends TestCase
         $queue = $client->subscribeQueue('idle.subject')->await();
 
         // No setTimeout(): fetchAll() must still bound its read and return [] rather than parking.
-        $result = \Amp\Future\await([async(static fn (): array => $queue->fetchAll())], new TimeoutCancellation(2.0))[0];
+        $result = \Amp\Future\await([async(static fn(): array => $queue->fetchAll())], new TimeoutCancellation(2.0))[0];
 
         self::assertSame([], $result);
     }

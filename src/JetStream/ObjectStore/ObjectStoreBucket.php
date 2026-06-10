@@ -804,7 +804,7 @@ final class ObjectStoreBucket
      */
     private function lookupExisting(string $name): Future
     {
-        return async(fn (): ?ObjectInfo => $this->fetchInfo($name, true));
+        return async(fn(): ?ObjectInfo => $this->fetchInfo($name, true));
     }
 
     /**

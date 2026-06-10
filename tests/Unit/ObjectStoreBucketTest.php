@@ -622,7 +622,7 @@ final class ObjectStoreBucketTest extends TestCase
 
         // Both objects are returned (one came from page 2 — the old single-page code would miss it).
         self::assertCount(2, $objects);
-        $names = array_map(static fn ($o): string => $o->name, $objects);
+        $names = array_map(static fn($o): string => $o->name, $objects);
         sort($names);
         self::assertSame(['a.txt', 'b.txt'], $names);
 

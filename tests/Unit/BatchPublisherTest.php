@@ -46,7 +46,7 @@ final class BatchPublisherTest extends TestCase
 
         $batchWrites = array_values(array_filter(
             $transport->writes,
-            static fn (string $w): bool => str_contains($w, 'Nats-Batch-Id:'),
+            static fn(string $w): bool => str_contains($w, 'Nats-Batch-Id:'),
         ));
 
         self::assertCount(3, $batchWrites);

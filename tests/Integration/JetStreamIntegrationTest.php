@@ -283,7 +283,7 @@ final class JetStreamIntegrationTest extends TestCase
 
         $futures = [];
         for ($i = 0; $i < 12; $i++) {
-            $futures[] = async(static fn (): NatsMessage => $client->request('$JS.API.INFO', '')->await());
+            $futures[] = async(static fn(): NatsMessage => $client->request('$JS.API.INFO', '')->await());
         }
 
         /** @var list<NatsMessage> $results */
@@ -1102,7 +1102,7 @@ final class JetStreamIntegrationTest extends TestCase
         self::assertSame(0, $info->chunks);
 
         // The outer 5s bound fails the test if get() blocks pulling a chunk that will never arrive.
-        $data = Future\await([async(static fn (): ?ObjectData => $store->get('empty.bin')->await())], new TimeoutCancellation(5.0))[0];
+        $data = Future\await([async(static fn(): ?ObjectData => $store->get('empty.bin')->await())], new TimeoutCancellation(5.0))[0];
         self::assertNotNull($data);
         self::assertSame('', $data->data);
 
@@ -1628,7 +1628,7 @@ final class JetStreamIntegrationTest extends TestCase
         // batched get over a sequence range.
         $all = $js->directGetBatch($stream, ['seq' => 1, 'batch' => 10])->await();
         self::assertCount(3, $all);
-        $payloads = array_map(static fn (NatsMessage $m): string => $m->payload, $all);
+        $payloads = array_map(static fn(NatsMessage $m): string => $m->payload, $all);
         sort($payloads);
         self::assertSame(['val-a', 'val-b', 'val-c'], $payloads);
 

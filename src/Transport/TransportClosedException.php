@@ -15,6 +15,4 @@ namespace IDCT\NATS\Transport;
  * NatsConnection handle it without changes, while the catch (CancelledException) timeout paths do
  * not swallow it.
  */
-final class TransportClosedException extends \RuntimeException
-{
-}
+final class TransportClosedException extends \RuntimeException {}
