@@ -59,6 +59,12 @@ final class NatsOptions
       *        errors that do not surface to a specific caller: slow-consumer drops, recoverable server
       *        `-ERR` frames, and transport read failures that trigger reconnect. Exceptions thrown by the
       *        listener are swallowed.
+      * @param (\Closure():?string)|null $jwtProvider Optional callback returning the user JWT, invoked on
+      *        every (re)connect. Takes precedence over the static {@see $jwt} when set, so short-lived or
+      *        rotated JWTs are picked up on reconnect without rebuilding the client. Pair with a
+      *        {@see $nonceSigner} that reads the current seed for full credential reload.
+      * @param (\Closure():?string)|null $tokenProvider Optional callback returning the auth token, invoked
+      *        on every (re)connect. Takes precedence over the static {@see $token} when set.
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -94,6 +100,8 @@ final class NatsOptions
         public readonly SlowConsumerPolicy $slowConsumerPolicy = SlowConsumerPolicy::DropOldest,
         public readonly ?\Closure $connectionListener = null,
         public readonly ?\Closure $errorListener = null,
+        public readonly ?\Closure $jwtProvider = null,
+        public readonly ?\Closure $tokenProvider = null,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

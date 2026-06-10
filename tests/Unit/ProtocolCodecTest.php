@@ -80,6 +80,55 @@ final class ProtocolCodecTest extends TestCase
     }
 
     /**
+     * Verifies a tokenProvider is resolved per-encode and overrides the static token (#24).
+     */
+    public function testEncodeConnectUsesTokenProviderPerConnect(): void
+    {
+        $codec = new ProtocolCodec();
+        $calls = 0;
+        $options = new NatsOptions(
+            token: 'static-token',
+            tokenProvider: static function () use (&$calls): string {
+                $calls++;
+
+                return 'rotated-token-' . $calls;
+            },
+        );
+
+        $first = $codec->encodeConnect($options);
+        $second = $codec->encodeConnect($options);
+
+        self::assertStringContainsString('"auth_token":"rotated-token-1"', $first);
+        self::assertStringContainsString('"auth_token":"rotated-token-2"', $second);
+        self::assertStringNotContainsString('static-token', $first);
+        self::assertSame(2, $calls);
+    }
+
+    /**
+     * Verifies a jwtProvider is resolved per-encode and overrides the static JWT (#24).
+     */
+    public function testEncodeConnectUsesJwtProviderPerConnect(): void
+    {
+        $codec = new ProtocolCodec();
+        $calls = 0;
+        $options = new NatsOptions(
+            jwt: 'static-jwt',
+            nonceSigner: new FixedNonceSigner('sig:'),
+            jwtProvider: static function () use (&$calls): string {
+                $calls++;
+
+                return 'fresh-jwt-' . $calls;
+            },
+        );
+
+        $result = $codec->encodeConnect($options, 'nonce-1');
+
+        self::assertStringContainsString('"jwt":"fresh-jwt-1"', $result);
+        self::assertStringContainsString('"sig":"sig:nonce-1"', $result);
+        self::assertStringNotContainsString('static-jwt', $result);
+    }
+
+    /**
      * Verifies CONNECT encoding includes JWT auth fields signed with server nonce.
      */
     public function testEncodeConnectContainsJwtAuthFields(): void
