@@ -17,8 +17,11 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
-NATS 2.11/2.12 client feature support (roadmap milestone, GitHub issues #4–#14; additive —
-targets 2.1.0).
+## [2.1.0] - 2026-06-10
+
+NATS 2.11/2.12 client feature support (roadmap milestone, GitHub issues #4–#14). All changes are
+backward compatible (new optional parameters / new methods); the one behavior change (#5 delete
+markers) is bug-driven and flagged `[bugfix]`, so this is a minor release.
 
 ### Changed
 
