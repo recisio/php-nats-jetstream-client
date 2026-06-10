@@ -511,12 +511,14 @@ final class JetStreamIntegrationTest extends TestCase
                 $scheduleSubject,
                 $targetSubject,
                 '{"event":"bad-schedule"}',
-                '@every 5s',
+                'not-a-schedule',
                 null,
             )->await();
             self::fail('Expected unsupported schedule expression to be rejected.');
         } catch (JetStreamException $e) {
-            self::assertStringContainsString('Only @at schedule expressions are currently supported', $e->getMessage());
+            // @at / @every / cron / predefined aliases are accepted; a malformed expression is rejected
+            // client-side before any round-trip.
+            self::assertStringContainsString('Unsupported schedule expression', $e->getMessage());
         }
 
         $js->deleteStream($stream)->await();
