@@ -59,6 +59,38 @@ final class ServiceTest extends TestCase
     }
 
     /**
+     * Verifies the done handler fires once when the service stops, and re-arms on restart (#57).
+     */
+    public function testDoneHandlerFiresOnceOnStop(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $doneCount = 0;
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload)
+            ->onDone(static function () use (&$doneCount): void {
+                $doneCount++;
+            });
+
+        $service->start()->await();
+        $service->stop()->await();
+        $service->stop()->await(); // second stop must not re-fire
+
+        self::assertSame(1, $doneCount);
+
+        // Restart re-arms the handler.
+        $service->start()->await();
+        $service->stop()->await();
+        self::assertSame(2, $doneCount);
+    }
+
+    /**
      * Verifies a per-endpoint stats supplier merges custom data into STATS (#50).
      */
     public function testEndpointStatsHandlerMergesCustomData(): void

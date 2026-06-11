@@ -984,6 +984,31 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #57 — the service done handler fires when run() stops.
+     */
+    public function testServiceDoneHandlerFiresWhenRunStops(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.done.' . bin2hex(random_bytes(4));
+        $serviceClient = $this->client();
+
+        $done = false;
+        $service = $serviceClient->service('donesvc', '1.0.0')
+            ->addEndpoint('echo', $subject, static fn(NatsMessage $message): string => 'r', queueGroup: null)
+            ->onDone(static function () use (&$done): void {
+                $done = true;
+            });
+
+        // run() starts, processes for the timeout window, then stops (firing the done handler).
+        $service->run(0.3)->await();
+
+        self::assertTrue($done, 'The done handler must fire when run() stops');
+
+        $serviceClient->disconnect()->await();
+    }
+
+    /**
      * #51 — drain() stops the service serving requests (subsequent requests get no responder).
      */
     public function testServiceDrainStopsServing(): void

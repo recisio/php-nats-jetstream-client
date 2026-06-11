@@ -43,6 +43,12 @@ final class Service
     /** @var null|callable(NatsMessage,array<string,mixed>):(null|string) */
     private $requestValidator = null;
 
+    /** @var null|callable(Service):void */
+    private $doneHandler = null;
+
+    /** Whether the done handler has already fired, so stop()+drain() do not double-invoke it. */
+    private bool $doneFired = false;
+
     private readonly string $id;
     private readonly string $startedAt;
 
@@ -134,6 +140,19 @@ final class Service
     }
 
     /**
+     * Registers a callback invoked once when the service stops (via {@see stop()}, {@see drain()}, or
+     * {@see run()} exiting). Mirrors nats.go micro `DoneHandler` (#57).
+     *
+     * @param callable(Service):void $handler
+     */
+    public function onDone(callable $handler): self
+    {
+        $this->doneHandler = $handler;
+
+        return $this;
+    }
+
+    /**
      * Enables opt-in request validation for endpoints with a declared schema.
      *
      * @param callable(NatsMessage,array<string,mixed>):(null|string) $validator
@@ -174,6 +193,9 @@ final class Service
             if ($this->started) {
                 return;
             }
+
+            // Arm the done handler for this run (it fires once on the next stop/drain).
+            $this->doneFired = false;
 
             // Collect new SIDs locally and only commit them on full success, so a subscribe failing
             // mid-loop does not leave the service half-initialized (with the idempotency guard then
@@ -336,8 +358,27 @@ final class Service
                 // Always clear state so a subsequent start() can re-subscribe cleanly.
                 $this->subscriptionSids = [];
                 $this->started = false;
+                $this->markDone();
             }
         });
+    }
+
+    /**
+     * Invokes the done handler exactly once (reset by {@see start()}). Handler exceptions are swallowed
+     * so shutdown is not derailed.
+     */
+    private function markDone(): void
+    {
+        if ($this->doneFired || $this->doneHandler === null) {
+            return;
+        }
+
+        $this->doneFired = true;
+        try {
+            ($this->doneHandler)($this);
+        } catch (\Throwable) {
+            // A faulty done handler must not break shutdown.
+        }
     }
 
     /**
@@ -371,6 +412,7 @@ final class Service
             } finally {
                 $this->subscriptionSids = [];
                 $this->started = false;
+                $this->markDone();
             }
         });
     }
