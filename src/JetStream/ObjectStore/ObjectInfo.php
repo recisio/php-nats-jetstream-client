@@ -22,6 +22,8 @@ final class ObjectInfo
      * @param string $nuid Object NUID; chunks are stored under `$O.<bucket>.C.<nuid>` (official layout).
      * @param array<string,string> $metadata
      * @param ?int $revision Stream sequence of this metadata record when known (e.g. from watch()); null otherwise.
+     * @param array{bucket?:string,name?:string}|null $link Link target when this object is a link to another
+     *        object (`bucket` + `name`) or to a whole bucket (`bucket` only); null for a normal object.
      */
     public function __construct(
         public readonly string $bucket,
@@ -34,7 +36,16 @@ final class ObjectInfo
         public readonly string $nuid,
         public readonly array $metadata = [],
         public readonly ?int $revision = null,
+        public readonly ?array $link = null,
     ) {}
+
+    /**
+     * Whether this object is a link (to another object or a whole bucket) rather than stored content.
+     */
+    public function isLink(): bool
+    {
+        return $this->link !== null;
+    }
 
     /**
      * @param array<string,mixed> $data
@@ -43,6 +54,16 @@ final class ObjectInfo
     {
         /** @var array<string,string> $metadata */
         $metadata = is_array($data['metadata'] ?? null) ? array_map('strval', $data['metadata']) : [];
+
+        // Object links travel as options.link = {bucket, name?} in the meta record.
+        $link = null;
+        $options = is_array($data['options'] ?? null) ? $data['options'] : [];
+        if (is_array($options['link'] ?? null) && isset($options['link']['bucket'])) {
+            $link = ['bucket' => (string) $options['link']['bucket']];
+            if (isset($options['link']['name']) && $options['link']['name'] !== '') {
+                $link['name'] = (string) $options['link']['name'];
+            }
+        }
 
         return new self(
             bucket: (string) ($data['bucket'] ?? $bucket),
@@ -55,6 +76,7 @@ final class ObjectInfo
             nuid: (string) ($data['nuid'] ?? ''),
             metadata: $metadata,
             revision: $revision,
+            link: $link,
         );
     }
 }

@@ -61,14 +61,18 @@ final class ObjectStoreBucket
     }
 
     /**
-     * Creates or updates the underlying Object Store stream.
+     * Creates or updates the underlying Object Store stream. Accepts either a raw stream-config array
+     * or a typed {@see ObjectStoreConfig} (#39: TTL / MaxBytes / Storage / Replicas / Placement /
+     * compression).
      *
-     * @param array<string,mixed> $options
+     * @param array<string,mixed>|ObjectStoreConfig $options
      * @return Future<StreamInfo>
      */
-    public function create(array $options = []): Future
+    public function create(array|ObjectStoreConfig $options = []): Future
     {
-        return async(function () use ($options): StreamInfo {
+        $resolved = $options instanceof ObjectStoreConfig ? $options->toStreamConfig() : $options;
+
+        return async(function () use ($resolved): StreamInfo {
             $defaults = [
                 'description' => 'Object Store bucket ' . $this->bucket,
                 'allow_direct' => true,
@@ -79,9 +83,93 @@ final class ObjectStoreBucket
             return $this->jetStream->createStream(
                 $this->streamName(),
                 [$this->chunkPrefix() . '>', $this->metaPrefix() . '>'],
-                array_merge($defaults, $options),
+                array_merge($defaults, $resolved),
             )->await();
         });
+    }
+
+    /**
+     * Seals the bucket: makes it permanently read-only (no further writes/deletes). Irreversible.
+     * Mirrors nats.go / nats.java `ObjectStore.Seal` (#38).
+     *
+     * @return Future<bool>
+     */
+    public function seal(): Future
+    {
+        return async(function (): bool {
+            $info = $this->jetStream->getStream($this->streamName())->await();
+            /** @var array<string,mixed> $config */
+            $config = is_array($info->raw['config'] ?? null) ? $info->raw['config'] : [];
+
+            // Empty JSON objects in the fetched config (e.g. consumer_limits {}) decode to PHP [] and
+            // would re-encode as a JSON array the server rejects. Drop empty-array fields — the server
+            // re-applies their defaults — while preserving scalar/non-empty config (max_bytes, etc.).
+            $config = array_filter($config, static fn($value): bool => $value !== []);
+            $config['sealed'] = true;
+
+            $this->jetStream->updateStream($this->streamName(), $config)->await();
+
+            return true;
+        });
+    }
+
+    /**
+     * Creates a link object pointing at another object (by name) in this or another bucket. Mirrors
+     * nats.go / nats.java `ObjectStore.AddLink` (#48). The link stores no content; resolving it on
+     * read is tracked separately.
+     *
+     * @return Future<ObjectInfo>
+     */
+    public function addLink(string $name, string $targetName, ?string $targetBucket = null): Future
+    {
+        return async(function () use ($name, $targetName, $targetBucket): ObjectInfo {
+            $this->assertValidName($name);
+
+            $info = $this->linkMeta($name, ['bucket' => $targetBucket ?? $this->bucket, 'name' => $targetName]);
+            $this->publishMeta($name, $info);
+
+            return ObjectInfo::fromArray($this->bucket, $info);
+        });
+    }
+
+    /**
+     * Creates a link object pointing at a whole bucket. Mirrors nats.go / nats.java
+     * `ObjectStore.AddBucketLink` (#48).
+     *
+     * @return Future<ObjectInfo>
+     */
+    public function addBucketLink(string $name, string $targetBucket): Future
+    {
+        return async(function () use ($name, $targetBucket): ObjectInfo {
+            $this->assertValidName($name);
+
+            $info = $this->linkMeta($name, ['bucket' => $targetBucket]);
+            $this->publishMeta($name, $info);
+
+            return ObjectInfo::fromArray($this->bucket, $info);
+        });
+    }
+
+    /**
+     * Builds a link meta record (no content; carries options.link).
+     *
+     * @param array{bucket:string,name?:string} $link
+     * @return array<string,mixed>
+     */
+    private function linkMeta(string $name, array $link): array
+    {
+        return [
+            'name' => $name,
+            'bucket' => $this->bucket,
+            'nuid' => '',
+            'size' => 0,
+            'chunks' => 0,
+            'digest' => '',
+            'mtime' => gmdate('Y-m-d\TH:i:s\Z'),
+            'deleted' => false,
+            'options' => ['link' => $link],
+            'metadata' => [],
+        ];
     }
 
     /**

@@ -702,6 +702,83 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #39 — ObjectStore typed config maps to the backing stream configuration.
+     */
+    public function testObjectStoreTypedConfigApplied(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'tc' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create(new \IDCT\NATS\JetStream\ObjectStore\ObjectStoreConfig(maxBytes: 2_000_000, storage: 'file'))->await();
+
+        $stream = $client->jetStream()->getStream('OBJ_' . $bucket)->await();
+        self::assertSame(2_000_000, (int) ($stream->raw['config']['max_bytes'] ?? 0));
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #48 — addLink writes a resolvable link object pointing at a target object.
+     */
+    public function testObjectStoreAddLink(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'ln' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $store->put('target.bin', 'payload')->await();
+        $link = $store->addLink('shortcut', 'target.bin')->await();
+        self::assertTrue($link->isLink());
+
+        // The link record is retrievable and carries its target.
+        $info = $store->info('shortcut')->await();
+        self::assertNotNull($info);
+        self::assertTrue($info->isLink());
+        self::assertSame(['bucket' => $bucket, 'name' => 'target.bin'], $info->link);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #38 — a sealed bucket rejects further writes.
+     */
+    public function testObjectStoreSealRejectsWrites(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'sl' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+        $store->put('before.bin', 'ok')->await();
+
+        self::assertTrue($store->seal()->await());
+
+        $threw = false;
+        try {
+            $store->put('after.bin', 'nope')->await();
+        } catch (JetStreamException) {
+            $threw = true;
+        }
+        self::assertTrue($threw, 'A sealed bucket must reject new writes');
+
+        // Existing content is still readable.
+        $fetched = $store->get('before.bin')->await();
+        self::assertNotNull($fetched);
+        self::assertSame('ok', $fetched->data);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #40 + #50 — a grouped endpoint forwards metadata to $SRV.INFO and a stats supplier to $SRV.STATS.
      */
     public function testServiceGroupedMetadataAndCustomStats(): void
