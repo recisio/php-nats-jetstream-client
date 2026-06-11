@@ -702,6 +702,100 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #40 + #50 — a grouped endpoint forwards metadata to $SRV.INFO and a stats supplier to $SRV.STATS.
+     */
+    public function testServiceGroupedMetadataAndCustomStats(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $name = 'svc' . strtolower(bin2hex(random_bytes(2)));
+        $serviceClient = $this->client();
+        $requester = $this->client();
+
+        $service = $serviceClient->service($name, '1.0.0');
+        $service->addGroup('v1')->addEndpoint(
+            'work',
+            'work.' . $name,
+            static fn(NatsMessage $message): string => 'ok',
+            null,
+            null,
+            ['team' => 'core'],
+            static fn(\IDCT\NATS\Services\ServiceEndpoint $e): array => ['queue_depth' => 3],
+        );
+        $service->start()->await();
+        $serviceClient->flush()->await();
+
+        $pump = $this->pump($serviceClient);
+        try {
+            $info = json_decode($requester->request('$SRV.INFO.' . $name, '', 3000)->await()->payload, true, 512, JSON_THROW_ON_ERROR);
+            $stats = json_decode($requester->request('$SRV.STATS.' . $name, '', 3000)->await()->payload, true, 512, JSON_THROW_ON_ERROR);
+        } finally {
+            $pump->cancel();
+        }
+
+        // #40: grouped endpoint subject + per-endpoint metadata forwarded to INFO.
+        self::assertSame('v1.work.' . $name, $info['endpoints'][0]['subject'] ?? null);
+        self::assertSame(['team' => 'core'], $info['endpoints'][0]['metadata'] ?? null);
+        // #50: custom stats supplier data forwarded to STATS.
+        self::assertSame(['queue_depth' => 3], $stats['endpoints'][0]['data'] ?? null);
+
+        $service->stop()->await();
+        $requester->disconnect()->await();
+        $serviceClient->disconnect()->await();
+    }
+
+    /**
+     * #51 — drain() stops the service serving requests (subsequent requests get no responder).
+     */
+    public function testServiceDrainStopsServing(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.drain.' . bin2hex(random_bytes(4));
+        $serviceClient = $this->client();
+        $requester = $this->client();
+
+        $service = $serviceClient->service('drainsvc', '1.0.0')
+            ->addEndpoint('echo', $subject, static fn(NatsMessage $message): string => 'reply', queueGroup: null);
+        $service->start()->await();
+        $serviceClient->flush()->await();
+
+        $pump = $this->pump($serviceClient);
+        try {
+            // Sanity: the endpoint serves before draining.
+            $reply = null;
+            for ($attempt = 0; $attempt < 10; $attempt++) {
+                try {
+                    $reply = $requester->request($subject, 'go', 1500)->await();
+                    break;
+                } catch (\IDCT\NATS\Exception\NatsException $e) {
+                    if ($attempt === 9 || !str_contains($e->getMessage(), 'No responders')) {
+                        throw $e;
+                    }
+                    \Amp\delay(0.1);
+                }
+            }
+            self::assertNotNull($reply);
+
+            // Drain, then the endpoint no longer responds.
+            $service->drain()->await();
+
+            $drainedThrew = false;
+            try {
+                $requester->request($subject, 'after-drain', 1000)->await();
+            } catch (\IDCT\NATS\Exception\NatsException $e) {
+                $drainedThrew = str_contains($e->getMessage(), 'No responders');
+            }
+            self::assertTrue($drainedThrew, 'After drain the endpoint must no longer respond');
+        } finally {
+            $pump->cancel();
+        }
+
+        $requester->disconnect()->await();
+        $serviceClient->disconnect()->await();
+    }
+
+    /**
      * #31 — the WebSocket transport carries core pub/sub and JetStream over ws://.
      */
     public function testWebSocketTransportCarriesPubSubAndJetStream(): void

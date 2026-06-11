@@ -21,6 +21,8 @@ final class ServiceEndpoint
      * @param int $errors Runtime counter of handler/validation errors.
      * @param ?string $lastError Most recent endpoint error message.
      * @param int $processingTimeNs Accumulated processing time in nanoseconds.
+     * @param (\Closure(ServiceEndpoint):array<string,mixed>)|null $statsHandler Optional supplier of
+     *        extra endpoint-specific data merged into the STATS `data` field (nats.go StatsHandler).
      */
     public function __construct(
         public readonly string $name,
@@ -34,5 +36,6 @@ final class ServiceEndpoint
         public int $errors = 0,
         public ?string $lastError = null,
         public int $processingTimeNs = 0,
+        public readonly ?\Closure $statsHandler = null,
     ) {}
 }
