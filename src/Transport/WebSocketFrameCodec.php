@@ -35,10 +35,11 @@ final class WebSocketFrameCodec
      *
      * @param string|null $maskKey Optional fixed mask key (4 bytes) for deterministic tests; otherwise random.
      */
-    public static function encode(int $opcode, string $payload, bool $mask = true, ?string $maskKey = null): string
+    public static function encode(int $opcode, string $payload, bool $mask = true, ?string $maskKey = null, bool $rsv1 = false): string
     {
         $length = strlen($payload);
-        $frame = pack('C', 0x80 | ($opcode & 0x0F)); // FIN=1 + opcode
+        // FIN=1, RSV1 marks a permessage-deflate-compressed payload (RFC 7692), then the opcode.
+        $frame = pack('C', 0x80 | ($rsv1 ? 0x40 : 0x00) | ($opcode & 0x0F));
 
         $maskBit = $mask ? 0x80 : 0x00;
         if ($length <= 125) {
@@ -66,7 +67,7 @@ final class WebSocketFrameCodec
      * Decodes as many complete frames as are present in $buffer, removing the consumed bytes (an
      * incomplete trailing frame is left in $buffer for the next read).
      *
-     * @return list<array{opcode:int,payload:string,fin:bool}>
+     * @return list<array{opcode:int,payload:string,fin:bool,rsv1:bool}>
      */
     public static function decode(string &$buffer): array
     {
@@ -81,6 +82,7 @@ final class WebSocketFrameCodec
             $byte1 = ord($buffer[0]);
             $byte2 = ord($buffer[1]);
             $fin = ($byte1 & 0x80) !== 0;
+            $rsv1 = ($byte1 & 0x40) !== 0;
             $opcode = $byte1 & 0x0F;
             $masked = ($byte2 & 0x80) !== 0;
             $length = $byte2 & 0x7F;
@@ -128,10 +130,52 @@ final class WebSocketFrameCodec
             }
 
             $buffer = substr($buffer, $offset + $length);
-            $frames[] = ['opcode' => $opcode, 'payload' => $payload, 'fin' => $fin];
+            $frames[] = ['opcode' => $opcode, 'payload' => $payload, 'fin' => $fin, 'rsv1' => $rsv1];
         }
 
         return $frames;
+    }
+
+    /**
+     * Compresses a payload for permessage-deflate (RFC 7692, no context takeover): raw DEFLATE with a
+     * sync flush, trailing empty block (0x00 0x00 0xff 0xff) removed.
+     */
+    public static function deflate(string $payload): string
+    {
+        $ctx = deflate_init(ZLIB_ENCODING_RAW);
+        if ($ctx === false) {
+            throw new ProtocolException('Failed to initialize DEFLATE context');
+        }
+
+        $out = deflate_add($ctx, $payload, ZLIB_SYNC_FLUSH);
+        if ($out === false) {
+            throw new ProtocolException('Failed to deflate WebSocket frame');
+        }
+
+        if (str_ends_with($out, "\x00\x00\xff\xff")) {
+            $out = substr($out, 0, -4);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Decompresses a permessage-deflate payload (the inverse of {@see deflate()}): re-append the empty
+     * block tail, then raw INFLATE.
+     */
+    public static function inflate(string $payload): string
+    {
+        $ctx = inflate_init(ZLIB_ENCODING_RAW);
+        if ($ctx === false) {
+            throw new ProtocolException('Failed to initialize INFLATE context');
+        }
+
+        $result = inflate_add($ctx, $payload . "\x00\x00\xff\xff");
+        if ($result === false) {
+            throw new ProtocolException('Failed to inflate compressed WebSocket frame');
+        }
+
+        return $result;
     }
 
     /**

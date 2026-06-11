@@ -79,6 +79,10 @@ final class NatsOptions
       *        maxReconnectAttempts, with backoff) when it fails, even if {@see $reconnectEnabled} is off.
       *        With reconnect enabled the initial connect already retries; this decouples "try hard to
       *        connect once" from "reconnect forever after".
+      * @param array<string,string> $webSocketHeaders Extra HTTP headers added to the WebSocket upgrade
+      *        request (e.g. cookies, proxy auth) — used by {@see \IDCT\NATS\Transport\WebSocketTransport}.
+      * @param bool $webSocketCompression Request permessage-deflate compression on the WebSocket
+      *        connection; payloads are (de)compressed only when the server agrees in the handshake.
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -120,6 +124,8 @@ final class NatsOptions
         public readonly ?ClientTlsContext $tlsContext = null,
         public readonly bool $randomizeServers = false,
         public readonly bool $retryOnFailedInitialConnect = false,
+        public readonly array $webSocketHeaders = [],
+        public readonly bool $webSocketCompression = false,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

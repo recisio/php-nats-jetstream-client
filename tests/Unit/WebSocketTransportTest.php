@@ -46,6 +46,53 @@ final class WebSocketTransportTest extends TestCase
     }
 
     /**
+     * Verifies the upgrade request includes custom headers and the compression offer (#61).
+     */
+    public function testBuildUpgradeRequestWithCustomHeadersAndCompression(): void
+    {
+        $request = WebSocketTransport::buildUpgradeRequest(
+            'nats.example',
+            443,
+            '/',
+            'abc123==',
+            ['Cookie' => 'session=xyz', 'X-Proxy-Auth' => 'token'],
+            true,
+        );
+
+        self::assertStringContainsString("GET / HTTP/1.1\r\n", $request);
+        self::assertStringContainsString("Host: nats.example:443\r\n", $request);
+        self::assertStringContainsString("Sec-WebSocket-Key: abc123==\r\n", $request);
+        self::assertStringContainsString('Sec-WebSocket-Extensions: permessage-deflate', $request);
+        self::assertStringContainsString("Cookie: session=xyz\r\n", $request);
+        self::assertStringContainsString("X-Proxy-Auth: token\r\n", $request);
+        self::assertStringEndsWith("\r\n\r\n", $request);
+    }
+
+    /**
+     * Verifies reserved headers cannot be overridden and CR/LF is stripped from custom values (#61).
+     */
+    public function testBuildUpgradeRequestRejectsReservedAndStripsCrLf(): void
+    {
+        $request = WebSocketTransport::buildUpgradeRequest(
+            'h',
+            80,
+            '/',
+            'k',
+            ['Host' => 'evil', 'X-Inject' => "ok\r\nX-Evil: 1"],
+            false,
+        );
+
+        // The reserved Host header keeps its real value (the override is ignored).
+        self::assertStringContainsString("Host: h:80\r\n", $request);
+        self::assertStringNotContainsString('evil', $request);
+        // CR/LF stripped from a custom value: no injected header line.
+        self::assertStringContainsString("X-Inject: okX-Evil: 1\r\n", $request);
+        self::assertStringNotContainsString("\r\nX-Evil: 1\r\n", $request);
+        // No compression offer when disabled.
+        self::assertStringNotContainsString('permessage-deflate', $request);
+    }
+
+    /**
      * Verifies connect() rejects a DSN without a host before attempting a socket connection (#31).
      */
     public function testConnectRejectsDsnWithoutHost(): void

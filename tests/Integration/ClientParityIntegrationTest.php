@@ -1189,6 +1189,43 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #61 — WebSocket with permessage-deflate compression + a custom upgrade header round-trips.
+     */
+    public function testWebSocketCompressionAndCustomHeaders(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $options = new NatsOptions(
+            servers: [$this->integrationWsServerUrl()],
+            webSocketCompression: true,
+            webSocketHeaders: ['X-Client' => 'idct-nats'],
+        );
+        $client = new NatsClient($options, new WebSocketTransport($options));
+        $client->connect()->await();
+
+        // A larger, compressible payload exercises the deflate/inflate path.
+        $subject = 'it.wsz.' . bin2hex(random_bytes(4));
+        $payload = str_repeat('compressible-nats-payload ', 100);
+        $received = null;
+        $client->subscribe($subject, static function (NatsMessage $m) use (&$received): void {
+            $received = $m->payload;
+        })->await();
+        $client->publish($subject, $payload)->await();
+
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        self::assertSame($payload, $received);
+
+        $client->disconnect()->await();
+    }
+
+    /**
      * #31 — the WebSocket transport carries core pub/sub and JetStream over ws://.
      */
     public function testWebSocketTransportCarriesPubSubAndJetStream(): void

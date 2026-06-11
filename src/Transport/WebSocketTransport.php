@@ -38,6 +38,11 @@ final class WebSocketTransport implements TlsAwareTransportInterface
     /** Reassembly buffer for a fragmented data message and whether one is in progress. */
     private string $fragmentBuffer = '';
     private bool $fragmenting = false;
+    /** Whether the in-progress fragmented message was flagged compressed (RSV1 on its first frame). */
+    private bool $fragmentCompressed = false;
+
+    /** Whether permessage-deflate was negotiated with the server (#61). */
+    private bool $compressionActive = false;
 
     /**
      * @param NatsOptions $options Client options controlling TLS (used for `wss://`) and socket behavior.
@@ -55,6 +60,7 @@ final class WebSocketTransport implements TlsAwareTransportInterface
             $this->readBuffer = '';
             $this->fragmentBuffer = '';
             $this->fragmenting = false;
+            $this->compressionActive = false;
 
             $parts = parse_url($dsn);
             if ($parts === false || !isset($parts['host'])) {
@@ -111,7 +117,13 @@ final class WebSocketTransport implements TlsAwareTransportInterface
     public function write(string $bytes): Future
     {
         return async(function () use ($bytes): void {
-            $this->socket?->write(WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_BINARY, $bytes));
+            // When permessage-deflate was negotiated, compress the payload and mark the frame (RSV1).
+            $payload = $this->compressionActive ? WebSocketFrameCodec::deflate($bytes) : $bytes;
+            $this->socket?->write(WebSocketFrameCodec::encode(
+                WebSocketFrameCodec::OP_BINARY,
+                $payload,
+                rsv1: $this->compressionActive,
+            ));
         });
     }
 
@@ -189,10 +201,13 @@ final class WebSocketTransport implements TlsAwareTransportInterface
                 case WebSocketFrameCodec::OP_BINARY:
                 case WebSocketFrameCodec::OP_TEXT:
                     if ($frame['fin']) {
-                        $out .= $frame['payload'];
+                        // A compressed (RSV1) message is inflated once fully received.
+                        $out .= $frame['rsv1'] ? WebSocketFrameCodec::inflate($frame['payload']) : $frame['payload'];
                     } else {
                         $this->fragmentBuffer = $frame['payload'];
                         $this->fragmenting = true;
+                        // permessage-deflate marks RSV1 only on the first frame of the message.
+                        $this->fragmentCompressed = $frame['rsv1'];
                     }
                     break;
 
@@ -200,9 +215,12 @@ final class WebSocketTransport implements TlsAwareTransportInterface
                     if ($this->fragmenting) {
                         $this->fragmentBuffer .= $frame['payload'];
                         if ($frame['fin']) {
-                            $out .= $this->fragmentBuffer;
+                            $out .= $this->fragmentCompressed
+                                ? WebSocketFrameCodec::inflate($this->fragmentBuffer)
+                                : $this->fragmentBuffer;
                             $this->fragmentBuffer = '';
                             $this->fragmenting = false;
+                            $this->fragmentCompressed = false;
                         }
                     }
                     break;
@@ -224,13 +242,14 @@ final class WebSocketTransport implements TlsAwareTransportInterface
         }
 
         $clientKey = WebSocketFrameCodec::generateClientKey();
-        $request = "GET {$path} HTTP/1.1\r\n"
-            . "Host: {$host}:{$port}\r\n"
-            . "Upgrade: websocket\r\n"
-            . "Connection: Upgrade\r\n"
-            . "Sec-WebSocket-Key: {$clientKey}\r\n"
-            . "Sec-WebSocket-Version: 13\r\n\r\n";
-        $socket->write($request);
+        $socket->write(self::buildUpgradeRequest(
+            $host,
+            $port,
+            $path,
+            $clientKey,
+            $this->options->webSocketHeaders,
+            $this->options->webSocketCompression,
+        ));
 
         $cancellation = new TimeoutCancellation($this->lastConnectTimeoutMs / 1000);
         $response = '';
@@ -262,15 +281,63 @@ final class WebSocketTransport implements TlsAwareTransportInterface
             if ($colon === false) {
                 continue;
             }
-            if (strcasecmp(trim(substr($line, 0, $colon)), 'Sec-WebSocket-Accept') === 0) {
-                $accept = trim(substr($line, $colon + 1));
-                break;
+            $headerName = trim(substr($line, 0, $colon));
+            $headerValue = trim(substr($line, $colon + 1));
+
+            if (strcasecmp($headerName, 'Sec-WebSocket-Accept') === 0) {
+                $accept = $headerValue;
+            } elseif (strcasecmp($headerName, 'Sec-WebSocket-Extensions') === 0
+                && stripos($headerValue, 'permessage-deflate') !== false
+            ) {
+                // The server accepted compression; (de)compress data frames from here on (#61).
+                $this->compressionActive = true;
             }
         }
 
         if ($accept === null || !hash_equals(WebSocketFrameCodec::acceptKey($clientKey), $accept)) {
             throw new ConnectionException('WebSocket handshake failed: invalid Sec-WebSocket-Accept');
         }
+    }
+
+    /**
+     * Builds the RFC 6455 HTTP upgrade request, including any caller-supplied headers (#61, e.g. cookies
+     * / proxy auth) and the permessage-deflate extension offer when compression is requested. Pure and
+     * static so it can be unit-tested without a socket.
+     *
+     * @param array<string,string> $extraHeaders
+     */
+    public static function buildUpgradeRequest(
+        string $host,
+        int $port,
+        string $path,
+        string $clientKey,
+        array $extraHeaders = [],
+        bool $compression = false,
+    ): string {
+        $lines = [
+            "GET {$path} HTTP/1.1",
+            "Host: {$host}:{$port}",
+            'Upgrade: websocket',
+            'Connection: Upgrade',
+            "Sec-WebSocket-Key: {$clientKey}",
+            'Sec-WebSocket-Version: 13',
+        ];
+
+        if ($compression) {
+            $lines[] = 'Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover';
+        }
+
+        // Reserved handshake headers cannot be overridden by caller headers (they would corrupt it).
+        $reserved = ['host', 'upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version'];
+        foreach ($extraHeaders as $name => $value) {
+            if (in_array(strtolower($name), $reserved, true)) {
+                continue;
+            }
+            // Strip CR/LF to prevent header/request injection.
+            $lines[] = $name . ': ' . str_replace(["\r", "\n"], '', $value);
+        }
+
+        return implode("\r\n", $lines) . "\r\n\r\n";
     }
 
     /**

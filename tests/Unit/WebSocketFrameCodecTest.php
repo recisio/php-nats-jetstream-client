@@ -111,6 +111,43 @@ final class WebSocketFrameCodecTest extends TestCase
     }
 
     /**
+     * Verifies permessage-deflate deflate/inflate round-trips (#61).
+     */
+    public function testDeflateInflateRoundTrip(): void
+    {
+        $payload = str_repeat('NATS-over-websocket payload ', 20);
+
+        $compressed = WebSocketFrameCodec::deflate($payload);
+        self::assertNotSame($payload, $compressed);
+        self::assertLessThan(strlen($payload), strlen($compressed));
+        self::assertSame($payload, WebSocketFrameCodec::inflate($compressed));
+    }
+
+    /**
+     * Verifies a compressed frame carries RSV1 and decodes back to the original payload (#61).
+     */
+    public function testCompressedFrameRoundTrip(): void
+    {
+        $payload = 'PUB orders.created 5\r\nhello\r\n';
+        $encoded = WebSocketFrameCodec::encode(
+            WebSocketFrameCodec::OP_BINARY,
+            WebSocketFrameCodec::deflate($payload),
+            true,
+            'MASK',
+            true,
+        );
+
+        // RSV1 bit set on the first byte.
+        self::assertSame(0x40, ord($encoded[0]) & 0x40);
+
+        $buffer = $encoded;
+        $frames = WebSocketFrameCodec::decode($buffer);
+        self::assertCount(1, $frames);
+        self::assertTrue($frames[0]['rsv1']);
+        self::assertSame($payload, WebSocketFrameCodec::inflate($frames[0]['payload']));
+    }
+
+    /**
      * Verifies a non-4-byte mask key is rejected by encode() (#31).
      */
     public function testEncodeRejectsBadMaskKey(): void
