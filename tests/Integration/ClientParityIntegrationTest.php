@@ -883,6 +883,54 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #58 — an object description is stored and surfaced on ObjectInfo.
+     */
+    public function testObjectStoreDescriptionStored(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'ds' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $put = $store->put('readme.txt', 'hello', [], 'Project readme')->await();
+        self::assertSame('Project readme', $put->description);
+
+        $info = $store->info('readme.txt')->await();
+        self::assertNotNull($info);
+        self::assertSame('Project readme', $info->description);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #59 — get() transparently follows an object link to the target's content.
+     */
+    public function testObjectStoreGetFollowsLink(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'lr' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $store->put('target.bin', 'the-payload')->await();
+        $store->addLink('shortcut', 'target.bin')->await();
+
+        // get() on the link resolves to the target's bytes.
+        $fetched = $store->get('shortcut')->await();
+        self::assertNotNull($fetched);
+        self::assertSame('the-payload', $fetched->data);
+        self::assertSame('target.bin', $fetched->info->name);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #48 — addLink writes a resolvable link object pointing at a target object.
      */
     public function testObjectStoreAddLink(): void

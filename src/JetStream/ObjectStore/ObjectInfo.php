@@ -24,6 +24,7 @@ final class ObjectInfo
      * @param ?int $revision Stream sequence of this metadata record when known (e.g. from watch()); null otherwise.
      * @param array{bucket?:string,name?:string}|null $link Link target when this object is a link to another
      *        object (`bucket` + `name`) or to a whole bucket (`bucket` only); null for a normal object.
+     * @param string $description Human-readable object description (`description` meta field).
      */
     public function __construct(
         public readonly string $bucket,
@@ -37,6 +38,7 @@ final class ObjectInfo
         public readonly array $metadata = [],
         public readonly ?int $revision = null,
         public readonly ?array $link = null,
+        public readonly string $description = '',
     ) {}
 
     /**
@@ -77,6 +79,7 @@ final class ObjectInfo
             metadata: $metadata,
             revision: $revision,
             link: $link,
+            description: (string) ($data['description'] ?? ''),
         );
     }
 }

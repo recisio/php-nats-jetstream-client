@@ -539,6 +539,61 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
+     * Verifies put() stores a description and surfaces it on ObjectInfo (#58).
+     */
+    public function testPutWithDescription(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),     // lookupExisting -> none
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),       // chunk publish ack
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(2)), $this->pubAck(2)),       // meta publish ack
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->objectStore('assets')->put('doc.txt', 'hello', [], 'A friendly doc')->await();
+
+        self::assertSame('A friendly doc', $info->description);
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('"description":"A friendly doc"', $writes);
+
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Verifies get() transparently follows an object link to the target's content (#59).
+     */
+    public function testGetFollowsObjectLink(): void
+    {
+        $nuid = 'nuidlink001';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // info('shortcut') -> link meta pointing at doc.txt (Direct Get, sid 1).
+            $this->directMetaReply('shortcut', ['options' => ['link' => ['bucket' => 'assets', 'name' => 'doc.txt']]], 1),
+            // info('doc.txt') -> the real object meta (sid 2).
+            $this->directMetaReply('doc.txt', ['nuid' => $nuid, 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 2),
+            // single-chunk Direct Get on the target NUID subject (sid 3).
+            $this->directChunkReply($nuid, 'hello', 3),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fetched = $client->jetStream()->objectStore('assets')->get('shortcut')->await();
+
+        self::assertInstanceOf(ObjectData::class, $fetched);
+        self::assertSame('hello', $fetched->data);
+        self::assertSame('doc.txt', $fetched->info->name);
+
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies create() accepts a typed ObjectStoreConfig and maps it to stream config (#39).
      */
     public function testCreateWithTypedConfig(): void

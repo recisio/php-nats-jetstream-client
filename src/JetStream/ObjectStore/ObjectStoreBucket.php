@@ -40,6 +40,9 @@ final class ObjectStoreBucket
      */
     private const UPLOAD_PIPELINE_DEPTH = 16;
 
+    /** Max link hops followed when resolving an object link, to bound link cycles (#59). */
+    private const MAX_LINK_HOPS = 8;
+
     /**
      * Creates an Object Store bucket context bound to a client and bucket name.
      *
@@ -186,11 +189,12 @@ final class ObjectStoreBucket
      * Stores an object payload and publishes metadata, purging any previous revision's chunks.
      *
      * @param array<string,string> $metadata
+     * @param string|null $description Optional human-readable object description (#58).
      * @return Future<ObjectInfo>
      */
-    public function put(string $name, string $data, array $metadata = []): Future
+    public function put(string $name, string $data, array $metadata = [], ?string $description = null): Future
     {
-        return async(function () use ($name, $data, $metadata): ObjectInfo {
+        return async(function () use ($name, $data, $metadata, $description): ObjectInfo {
             $this->assertValidName($name);
 
             // Run the previous-revision lookup concurrently with the upload below: it is only needed
@@ -245,6 +249,9 @@ final class ObjectStoreBucket
                 'options' => ['max_chunk_size' => $this->chunkSize],
                 'metadata' => $metadata,
             ];
+            if ($description !== null && $description !== '') {
+                $info['description'] = $description;
+            }
 
             $this->publishMeta($name, $info);
 
@@ -364,10 +371,31 @@ final class ObjectStoreBucket
      */
     public function get(string $name): Future
     {
-        return async(function () use ($name): ?ObjectData {
+        return $this->getInternal($name, 0);
+    }
+
+    /**
+     * Reads an object, transparently following an object link to its target (in this or another
+     * bucket), bounded against link cycles. Mirrors nats.go / nats.java link-aware `Get` (#59).
+     *
+     * @return Future<ObjectData|null>
+     */
+    private function getInternal(string $name, int $depth): Future
+    {
+        return async(function () use ($name, $depth): ?ObjectData {
+            if ($depth > self::MAX_LINK_HOPS) {
+                throw new JetStreamException('Too many Object Store link hops resolving "' . $name . '"');
+            }
+
             $info = $this->info($name)->await();
             if ($info === null) {
                 return null;
+            }
+
+            if ($info->isLink()) {
+                $target = $this->linkTargetBucket($info, $name);
+
+                return $target->getInternal((string) ($info->link['name'] ?? ''), $depth + 1)->await();
             }
 
             if ($info->deleted) {
@@ -389,6 +417,21 @@ final class ObjectStoreBucket
     }
 
     /**
+     * Resolves the bucket holding a link's target object, rejecting bucket links (which have no object
+     * content to read).
+     */
+    private function linkTargetBucket(ObjectInfo $info, string $name): self
+    {
+        if (!isset($info->link['name']) || $info->link['name'] === '') {
+            throw new JetStreamException('Cannot get() the bucket link "' . $name . '": it points to a bucket, not an object');
+        }
+
+        $targetBucket = $info->link['bucket'] ?? $this->bucket;
+
+        return $targetBucket === $this->bucket ? $this : $this->jetStream->objectStore($targetBucket);
+    }
+
+    /**
      * Streams object payload to a callback chunk-by-chunk without buffering the whole object.
      *
      * The callback is invoked once per stored chunk as it is downloaded, so large objects do not
@@ -400,10 +443,32 @@ final class ObjectStoreBucket
      */
     public function getToCallback(string $name, callable $chunkHandler): Future
     {
-        return async(function () use ($name, $chunkHandler): ?ObjectInfo {
+        return $this->getToCallbackInternal($name, $chunkHandler, 0);
+    }
+
+    /**
+     * Streaming counterpart to {@see getInternal()}: follows object links to the target, bounded
+     * against cycles, then streams the target's chunks to the callback (#59).
+     *
+     * @param callable(string):void $chunkHandler
+     * @return Future<ObjectInfo|null>
+     */
+    private function getToCallbackInternal(string $name, callable $chunkHandler, int $depth): Future
+    {
+        return async(function () use ($name, $chunkHandler, $depth): ?ObjectInfo {
+            if ($depth > self::MAX_LINK_HOPS) {
+                throw new JetStreamException('Too many Object Store link hops resolving "' . $name . '"');
+            }
+
             $info = $this->info($name)->await();
             if ($info === null) {
                 return null;
+            }
+
+            if ($info->isLink()) {
+                $target = $this->linkTargetBucket($info, $name);
+
+                return $target->getToCallbackInternal((string) ($info->link['name'] ?? ''), $chunkHandler, $depth + 1)->await();
             }
 
             if ($info->deleted) {
