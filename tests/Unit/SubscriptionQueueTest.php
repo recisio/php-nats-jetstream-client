@@ -387,4 +387,86 @@ final class SubscriptionQueueTest extends TestCase
 
         self::assertStringContainsString("UNSUB {$queue->sid}\r\n", implode('', $transport->writes));
     }
+
+    /**
+     * Line 66: SlowConsumerPolicy::Error throws NatsException when the queue is full.
+     */
+    public function testEnqueueThrowsOnOverflowWhenPolicyIsError(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = $this->makeConnectedClient($transport);
+        $queue = new SubscriptionQueue($client, 99, 2, SlowConsumerPolicy::Error);
+
+        $queue->enqueue(new NatsMessage('events', 99, null, 'a'));
+        $queue->enqueue(new NatsMessage('events', 99, null, 'b'));
+
+        $this->expectException(\IDCT\NATS\Exception\NatsException::class);
+        $this->expectExceptionMessage('Subscription queue overflow for sid 99');
+
+        // Third enqueue exceeds the cap of 2 and must throw with the Error policy.
+        $queue->enqueue(new NatsMessage('events', 99, null, 'c'));
+    }
+
+    /**
+     * Line 92: close() is an alias of unsubscribe() and sends UNSUB for the queue's own sid.
+     */
+    public function testCloseSendsUnsubForOwnSid(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('events')->await();
+
+        $queue->close()->await();
+
+        self::assertStringContainsString("UNSUB {$queue->sid}\r\n", implode('', $transport->writes));
+    }
+
+    /**
+     * Line 169: next() with a positive timeout times out (CancelledException caught) and returns null.
+     *
+     * The blocking transport means processIncoming() suspends the fiber until the TimeoutCancellation
+     * fires, which exercises the catch(CancelledException) clause on line 169.
+     */
+    public function testNextWithTimeoutReturnsNullWhenNoMessageArrivesBeforeDeadline(): void
+    {
+        // blockWhenEmpty suspends processIncoming() so the TimeoutCancellation fires inside it,
+        // propagates as CancelledException caught at line 169, and next() returns null.
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('idle')->await();
+        $queue->setTimeout(0.02);
+
+        $msg = $queue->next();
+
+        self::assertNull($msg);
+    }
+
+    /**
+     * Line 231: the final-drain body in fetchAll() collects a message that was enqueued into the
+     * queue by a concurrent fiber while fetchAll() was blocked inside processIncoming().
+     *
+     * Flow:
+     *  1. fetchAll() blocks in processIncoming() (blockWhenEmpty transport).
+     *  2. A parallel async fiber waits briefly then calls enqueue() directly.
+     *  3. The TimeoutCancellation fires; processIncoming() throws CancelledException (line 225).
+     *  4. The final drain loop (line 231) finds the concurrently-enqueued message and returns it.
+     */
+    public function testFetchAllFinalDrainCollectsConcurrentlyEnqueuedMessage(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = $this->makeConnectedClient($transport);
+        $queue = $client->subscribeQueue('events')->await();
+        $queue->setTimeout(0.1);
+
+        // Schedule a direct enqueue to fire after fetchAll() has suspended in processIncoming().
+        async(static function () use ($queue): void {
+            \Amp\delay(0.02);
+            $queue->enqueue(new NatsMessage('events', 1, null, 'late'));
+        });
+
+        $messages = $queue->fetchAll();
+
+        self::assertCount(1, $messages);
+        self::assertSame('late', $messages[0]->payload);
+    }
 }

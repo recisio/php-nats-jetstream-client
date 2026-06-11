@@ -1306,6 +1306,29 @@ final class KeyValueBucketTest extends TestCase
         self::assertSame(11, $entry->revision);
     }
 
+    /**
+     * Verifies the STREAM.MSG.GET fallback throws when message.data contains invalid base64 (line 340).
+     */
+    public function testGetFallbackThrowsOnMalformedBase64Data(): void
+    {
+        // '!!!' is not valid base64 and base64_decode('!!!', true) returns false.
+        $envelope = '{"message":{"subject":"$KV.cfg.theme","seq":5,"data":"!!!"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->kvDirectStatus(1, 503, 'No Responders'),                                     // Direct Get -> 503 fallback trigger
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($envelope), $envelope),              // STREAM.MSG.GET -> malformed data
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Malformed KV payload for key theme');
+        $client->jetStream()->keyValue('cfg')->get('theme')->await();
+    }
+
     // ─── watch() callback: non-KV subject (line 386) ────────────────────────
 
     /**

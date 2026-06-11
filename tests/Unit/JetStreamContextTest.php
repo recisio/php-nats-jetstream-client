@@ -11,6 +11,8 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
+use IDCT\NATS\Exception\NatsException;
+use IDCT\NATS\Exception\TimeoutException;
 use IDCT\NATS\Exception\UnsupportedFeatureException;
 use IDCT\NATS\JetStream\Configuration\StreamSource;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
@@ -3635,5 +3637,133 @@ final class JetStreamContextTest extends TestCase
         $nonInt = new NatsMessage('events.x', 1, '$JS.ACK.ORDERS.CONS.1.42.NaN.123.0', 'body');
 
         self::assertNull($method->invoke($js, $nonInt));
+    }
+
+    /**
+     * Verifies directGetBatch() catches CancelledException (line 700) when the wait-cancellation
+     * fires while processIncoming is blocked on an idle socket (blockWhenEmpty path).
+     *
+     * The method should return an empty array rather than propagating the cancellation.
+     */
+    public function testDirectGetBatchReturnsEmptyArrayOnTimeout(): void
+    {
+        $transport = new FakeTransport(
+            readQueue: [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+            ],
+            blockWhenEmpty: true,
+        );
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // expiresMs=1 makes the TimeoutCancellation fire after ~1001 ms; the blocking transport
+        // keeps processIncoming suspended so the cancellation is the only way out — line 700.
+        $messages = $client->jetStream()->directGetBatch('ORDERS', ['batch' => 10], 1)->await();
+
+        self::assertSame([], $messages);
+    }
+
+    /**
+     * Verifies directGetBatch() calls delay(0.001) (line 697) when processIncoming returns 0
+     * frames (non-blocking empty-queue transport) and then catches the CancelledException (line 700)
+     * when the TimeoutCancellation fires.
+     *
+     * NOTE: The test requires the TimeoutCancellation to fire; with expiresMs=1 this takes
+     * approximately 1 second of real time.
+     */
+    public function testDirectGetBatchDelaysOnZeroFrames(): void
+    {
+        // Non-blocking empty-queue transport: once connect+PONG are consumed, every subsequent
+        // readLine() returns '' immediately, making processIncoming() return 0 (lines 617-618 of
+        // NatsConnection). The directGetBatch loop then enters the delay(0.001) branch (line 697)
+        // on every iteration until the TimeoutCancellation fires (line 700).
+        $transport = new FakeTransport(
+            readQueue: [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+            ],
+            blockWhenEmpty: false,
+        );
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // expiresMs=1 → TimeoutCancellation(1.001 s).  The empty non-blocking transport causes
+        // processIncoming to return 0 immediately, triggering delay(0.001, $waitCancellation) at
+        // line 697 on every iteration.  The TimeoutCancellation fires during one of those delays,
+        // which is then caught at line 700, and the method returns whatever was collected (empty).
+        $messages = $client->jetStream()->directGetBatch('ORDERS', ['batch' => 5], 1)->await();
+
+        self::assertSame([], $messages);
+        // publish was issued; at least INFO, PONG, CONNECT, and the PUB frame were written.
+        self::assertStringContainsString('$JS.API.DIRECT.GET.ORDERS', implode('', $transport->writes));
+    }
+
+    /**
+     * Verifies jsRequest() (line 1148) re-throws a non-"No responders" NatsException unchanged
+     * when the underlying client->request() fails with a TimeoutException.
+     *
+     * Triggered via incrementCounter(), which calls jsRequest() directly.
+     */
+    public function testJsRequestRethrowsNonNoRespondersNatsException(): void
+    {
+        // blockWhenEmpty keeps processIncoming() suspended so the request's TimeoutCancellation
+        // (requestTimeoutMs=1 ms) fires during the read, producing a TimeoutException.  That
+        // exception is a NatsException whose message does NOT contain "No responders", so
+        // jsRequest() re-throws it unchanged at line 1148.
+        $transport = new FakeTransport(
+            readQueue: [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+            ],
+            blockWhenEmpty: true,
+        );
+
+        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1), $transport);
+        $client->connect()->await();
+
+        $this->expectException(TimeoutException::class);
+        $this->expectExceptionMessage('Request timed out');
+
+        // incrementCounter calls jsRequest() directly (without publishWithRetry), so any
+        // NatsException that isn't "No responders" surfaces at line 1148.
+        $client->jetStream()->incrementCounter('counters.hits', '+1')->await();
+    }
+
+    /**
+     * Verifies publishWithRetry() (line 1242) re-throws a JetStreamException when all configured
+     * retry attempts are exhausted on transient 503 "no-responder" failures.
+     *
+     * The publish() path goes: publish() → publishWithRetry() → jsRequest() → client->request().
+     * A 503 HMSG status makes requestInternal() throw NatsException("No responders…"), which
+     * jsRequest() converts to JetStreamException(503).  publishWithRetry() retries up to
+     * $publishRetryAttempts times; on the final attempt ($attempt >= $attempts) it hits line 1242.
+     */
+    public function testPublishWithRetryRethrowsWhenRetriesExhausted(): void
+    {
+        $status = "NATS/1.0 503\r\n\r\n";
+
+        // Two 503 frames: attempt 1 gets the first 503 (retried), attempt 2 gets the second 503
+        // (attempt >= attempts=2 → line 1242 throws).
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            'HMSG _INBOX.a 1 ' . strlen($status) . ' ' . strlen($status) . "\r\n" . $status . "\r\n",
+            'HMSG _INBOX.b 2 ' . strlen($status) . ' ' . strlen($status) . "\r\n" . $status . "\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // publishRetryAttempts=2, publishRetryWaitMs=1 (tight loop so the test is fast).
+        $js = new JetStreamContext($client, publishRetryAttempts: 2, publishRetryWaitMs: 1);
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionCode(503);
+        $this->expectExceptionMessage('No JetStream responder');
+
+        $js->publish('orders.created', '{"id":1}')->await();
     }
 }
