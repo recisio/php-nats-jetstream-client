@@ -7,6 +7,7 @@ namespace IDCT\NATS\Connection;
 use Amp\Socket\ClientTlsContext;
 use IDCT\NATS\Auth\NonceSignerInterface;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
+use Psr\Log\LoggerInterface;
 
 /**
  * Configuration container for NATS connection, auth, reconnect, and protocol options.
@@ -83,6 +84,9 @@ final class NatsOptions
       *        request (e.g. cookies, proxy auth) — used by {@see \IDCT\NATS\Transport\WebSocketTransport}.
       * @param bool $webSocketCompression Request permessage-deflate compression on the WebSocket
       *        connection; payloads are (de)compressed only when the server agrees in the handshake.
+      * @param LoggerInterface|null $logger Optional PSR-3 logger; lifecycle events (connect/disconnect/
+      *        reconnect/close, discovery, lame-duck), reconnect attempts, and async errors are logged to
+      *        it. Defaults to a NullLogger (no output).
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -126,6 +130,7 @@ final class NatsOptions
         public readonly bool $retryOnFailedInitialConnect = false,
         public readonly array $webSocketHeaders = [],
         public readonly bool $webSocketCompression = false,
+        public readonly ?LoggerInterface $logger = null,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

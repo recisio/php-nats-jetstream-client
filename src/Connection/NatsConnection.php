@@ -29,6 +29,8 @@ use IDCT\NATS\Protocol\ServerInfo;
 use IDCT\NATS\Transport\TlsAwareTransportInterface;
 use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Revolt\EventLoop;
 use SplQueue;
 
@@ -109,6 +111,9 @@ final class NatsConnection
      */
     private readonly array $orderedServers;
 
+    /** Structured logger for lifecycle/error events; NullLogger when none is configured (#69). */
+    private readonly LoggerInterface $logger;
+
     /**
      * Creates a connection runtime with transport and protocol dependencies.
      *
@@ -129,6 +134,7 @@ final class NatsConnection
             shuffle($servers);
         }
         $this->orderedServers = $servers;
+        $this->logger = $this->options->logger ?? new NullLogger();
 
         $this->messageResponder = fn(string $subject, string $payload, ?array $headers): Future => $headers === null
                 ? $this->publish($subject, $payload)
@@ -1203,6 +1209,10 @@ final class NatsConnection
             } catch (\Throwable $e) {
                 $lastError = $e;
                 $delayMs = $this->backoffDelayMs($attempt);
+                $this->logger->warning(
+                    sprintf('NATS reconnect attempt %d/%d failed; retrying in %dms', $attempt, $maxAttempts, $delayMs),
+                    ['attempt' => $attempt, 'maxAttempts' => $maxAttempts, 'delayMs' => $delayMs, 'exception' => $e],
+                );
                 delay($delayMs / 1000);
             }
         }
@@ -1738,6 +1748,13 @@ final class NatsConnection
      */
     private function emitEvent(ConnectionEvent $event, ?\Throwable $error = null): void
     {
+        // Log every lifecycle transition regardless of whether a connection listener is configured (#69).
+        if ($error !== null) {
+            $this->logger->warning('NATS connection ' . $event->name, ['event' => $event->name, 'exception' => $error]);
+        } else {
+            $this->logger->info('NATS connection ' . $event->name, ['event' => $event->name]);
+        }
+
         $listener = $this->options->connectionListener;
         if ($listener === null) {
             return;
@@ -1755,6 +1772,8 @@ final class NatsConnection
      */
     private function emitError(\Throwable $error): void
     {
+        $this->logger->error('NATS connection error: ' . $error->getMessage(), ['exception' => $error]);
+
         $listener = $this->options->errorListener;
         if ($listener === null) {
             return;
