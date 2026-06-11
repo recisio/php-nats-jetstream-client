@@ -99,4 +99,15 @@ final class MessageTtlTest extends TestCase
     {
         self::assertSame('never', MessageTtl::format('NEVER'));
     }
+
+    /**
+     * Verifies a bare integer string "0" (less than 1) is rejected.
+     */
+    public function testRejectsZeroStringAsSeconds(): void
+    {
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Per-message TTL must be at least 1 second');
+
+        MessageTtl::format('0');
+    }
 }

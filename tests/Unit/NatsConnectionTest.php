@@ -4287,4 +4287,382 @@ final class NatsConnectionTest extends TestCase
         self::assertSame(1, $stats->outMsgs);
         self::assertSame(5, $stats->outBytes); // strlen('hello')
     }
+
+    // ─── New coverage additions ──────────────────────────────────────────
+
+    /**
+     * Lines 918 (continue): requestManyInternal() continues when the internal slice timeout fires
+     * but no external cancellation was requested (covers the `continue` branch in the
+     * CancelledException catch block on line 918).
+     *
+     * Strategy: supply a small stallMs and a reply that arrives before the stall expires.
+     * After the stall window elapses with no further reply the stall break fires, but along
+     * the way the slice TimeoutCancellation fires at least once inside processIncoming(),
+     * triggering the catch block. Because no external cancellation is set, `continue` is taken.
+     */
+    public function testRequestManyInternalContinuesOnSliceTimeout(): void
+    {
+        // One reply arrives, then nothing.  With stallMs=50 the loop re-evaluates and eventually
+        // hits the stall break; the internal slice timeouts (CancelledException) along the way
+        // exercise the `continue` branch on line 918.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG _INBOX.any 1 1\r\nA\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        // totalTimeoutMs=2000ms, stallMs=50ms: after receiving A, wait for stall to expire.
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 2000, 50)->await();
+
+        $payloads = array_map(static fn(NatsMessage $m): string => $m->payload, $replies);
+        self::assertSame(['A'], $payloads);
+    }
+
+    /**
+     * Lines 911-913: requestManyInternal() rethrows CancelledException when the external
+     * cancellation fires WHILE processIncoming() is blocking inside the requestMany loop.
+     *
+     * Strategy: use a blocking transport (blockWhenEmpty=true) so processIncoming() suspends
+     * waiting for data. Cancel externally after a short delay; the CancelledException propagates
+     * out of processIncoming(), the catch block on line 911 detects that the external cancellation
+     * is requested and rethrows (line 913).
+     */
+    public function testRequestManyRethrowsExternalCancellationFromProcessIncoming(): void
+    {
+        $transport = new FakeTransport(
+            readQueue: [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+                // Nothing else: processIncoming() will block waiting for a frame.
+            ],
+            blockWhenEmpty: true,
+        );
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $deferredCancellation = new DeferredCancellation();
+
+        // Fire the external cancellation after a short delay (while processIncoming() is suspended).
+        $cancel = async(static function () use ($deferredCancellation): void {
+            delay(0.03);
+            $deferredCancellation->cancel();
+        });
+
+        $this->expectException(CancelledException::class);
+        try {
+            $connection->requestMany(
+                'svc.scan',
+                'q',
+                null,
+                null,
+                5000,
+                null,
+                $deferredCancellation->getCancellation(),
+            )->await();
+        } finally {
+            $cancel->await();
+        }
+    }
+
+    /**
+     * Lines 1103, 1105: recoverConnection() coalesces concurrent callers: a second caller
+     * that arrives while a reconnect is already in progress awaits the same future rather than
+     * starting a second recovery attempt.
+     *
+     * Strategy: hold the second connect() attempt open with a DeferredFuture so both the
+     * primary and a secondary recoverConnection() call are in flight simultaneously. Release
+     * the latch and verify only two total connect calls were made (initial + one reconnect).
+     */
+    public function testRecoverConnectionCoalescesConcurrentCallers(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+        $release = new DeferredFuture();
+        $connectCount = 0;
+
+        $transport = new class ($info, $release, $connectCount) implements TransportInterface {
+            /** @var list<string> */
+            public array $connectCalls = [];
+            /** @var list<string> */
+            public array $writes = [];
+            /** @var list<list<string>> */
+            private array $reads;
+            private int $connects = 0;
+
+            /** @param DeferredFuture<void> $release */
+            public function __construct(
+                string $info,
+                private DeferredFuture $release,
+                private int &$connectCount,
+            ) {
+                $this->reads = [
+                    [$info, "PONG\r\n"],   // initial
+                    [$info, "PONG\r\n"],   // reconnect
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function () use ($dsn, $timeoutMs): void {
+                    $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+                    // Block the reconnect attempt until released.
+                    if ($this->connects === 1) {
+                        $this->release->getFuture()->await();
+                    }
+                    $this->connects++;
+                    $this->connectCount++;
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+                    $next = array_shift($this->reads[$conn]) ?? '';
+                    if ($next === '__EOF__') {
+                        throw new TransportClosedException('eof');
+                    }
+
+                    return $next;
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static fn(): null => null);
+            }
+        };
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectDelayMs: 1, reconnectJitterMs: 0, pingIntervalSeconds: 0),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // Trigger a reconnect by invoking recoverConnection() twice concurrently via reflection.
+        $recover = new \ReflectionMethod($connection, 'recoverConnection');
+
+        // Force state to Connecting so recoverConnection() does not skip early.
+        (new \ReflectionProperty($connection, 'state'))->setValue($connection, ConnectionState::Connecting);
+
+        // First caller starts the reconnect and suspends in connect().
+        $first = async(static function () use ($recover, $connection): void {
+            $recover->invoke($connection);
+        });
+
+        delay(0.02); // let first caller enter and suspend
+
+        // Second caller must coalesce: it awaits the same in-progress future.
+        $second = async(static function () use ($recover, $connection): void {
+            $recover->invoke($connection);
+        });
+
+        delay(0.01);
+
+        $release->complete();  // release the blocked connect()
+
+        $first->await();
+        $second->await();
+
+        // Only one reconnect attempt ran: total connects = initial(1) + reconnect(1) = 2.
+        self::assertCount(2, $transport->connectCalls);
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
+    /**
+     * Line 1147: retryInitialConnect() ignores transport.close() failures between attempts.
+     *
+     * When a close() call throws during the retry loop, the exception is swallowed and the
+     * next connect attempt still proceeds normally.
+     */
+    public function testRetryInitialConnectIgnoresCloseFailureBetweenAttempts(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+
+        $transport = new class ($info) implements TransportInterface {
+            /** @var list<string> */
+            public array $connectCalls = [];
+            /** @var list<string> */
+            public array $writes = [];
+
+            private int $connects = 0;
+            /** @var list<list<string>> */
+            private array $reads;
+
+            public function __construct(string $info)
+            {
+                $this->reads = [
+                    // First attempt fails (no PONG for connectOnce to succeed).
+                    [],
+                    // Second attempt succeeds.
+                    [$info, "PONG\r\n"],
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function () use ($dsn, $timeoutMs): void {
+                    $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+                    $this->connects++;
+                    // First connect succeeds (initial attempt), second connect also succeeds (retry).
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+
+                    return array_shift($this->reads[$conn]) ?? '';
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static function (): void {
+                    // Always throw: retryInitialConnect() must swallow this.
+                    throw new \RuntimeException('close failed intentionally');
+                });
+            }
+        };
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: false,
+                retryOnFailedInitialConnect: true,
+                maxReconnectAttempts: 2,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                connectTimeoutMs: 50,
+                pingIntervalSeconds: 0,
+            ),
+            $transport,
+        );
+
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        // At least 2 connect calls: initial (failed, exhausted poll budget) + retry that succeeded.
+        self::assertGreaterThanOrEqual(2, count($transport->connectCalls));
+    }
+
+    /**
+     * Line 1189: performRecovery() ignores transport.close() failures during reconnect loop.
+     *
+     * A close() that throws between reconnect attempts must be swallowed so subsequent
+     * connect attempts still proceed and recovery can succeed.
+     */
+    public function testPerformRecoveryIgnoresCloseFailureDuringReconnect(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+
+        $transport = new class ($info) implements TransportInterface {
+            /** @var list<string> */
+            public array $connectCalls = [];
+            /** @var list<string> */
+            public array $writes = [];
+
+            private int $connects = 0;
+            /** @var list<list<string>> */
+            private array $reads;
+
+            public function __construct(string $info)
+            {
+                $this->reads = [
+                    // Initial connection succeeds.
+                    [$info, "PONG\r\n", '__EOF__'],
+                    // Reconnect attempt succeeds.
+                    [$info, "PONG\r\n"],
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function () use ($dsn, $timeoutMs): void {
+                    $this->connectCalls[] = $dsn . '|' . $timeoutMs;
+                    $this->connects++;
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+                    $next = array_shift($this->reads[$conn]) ?? '';
+                    if ($next === '__EOF__') {
+                        throw new TransportClosedException('eof');
+                    }
+
+                    return $next;
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static function (): void {
+                    // Always throw: performRecovery() must swallow this and keep retrying.
+                    throw new \RuntimeException('close failed intentionally');
+                });
+            }
+        };
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: true,
+                maxReconnectAttempts: 3,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                pingIntervalSeconds: 0,
+            ),
+            $transport,
+        );
+
+        $connection->connect()->await();
+
+        // processIncoming() reads EOF → triggers recoverConnection() → performRecovery() →
+        // transport.close() throws → swallowed → reconnect attempt succeeds.
+        $connection->processIncoming()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertCount(2, $transport->connectCalls);
+    }
 }

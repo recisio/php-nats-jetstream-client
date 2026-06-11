@@ -645,8 +645,10 @@ final class JetStreamIntegrationTest extends TestCase
             self::assertMatchesRegularExpression('/status (404|408)|No messages received within timeout/i', $e->getMessage());
         }
 
+        // Generous deadline: redelivery is due ~ack_wait (1s) after the WPI, but the poll must tolerate
+        // server-timer jitter and a slow (xdebug-instrumented) run without flaking (#70 family).
         $redelivered = null;
-        $deadline = $this->monotonic() + 4.0;
+        $deadline = $this->monotonic() + 12.0;
         while ($redelivered === null && $this->monotonic() < $deadline) {
             try {
                 $redelivered = $js->fetchNext($stream, $consumer, 800)->await();

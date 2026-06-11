@@ -123,4 +123,26 @@ final class BasicJsonSchemaValidatorTest extends TestCase
 
         self::assertNull($error);
     }
+
+    /**
+     * Verifies that a property defined in the schema but absent from the object is skipped (line 59).
+     * An optional property that is not present in the payload should not trigger a type error.
+     */
+    public function testSkipsPropertyNotPresentInObject(): void
+    {
+        $validator = new BasicJsonSchemaValidator();
+        // Payload has only 'id'; 'name' is in properties but not required and not in the object.
+        $message = new NatsMessage('svc.echo', 1, '_INBOX.1', '{"id":7}', null);
+
+        $error = $validator->validate($message, [
+            'type' => 'object',
+            'required' => ['id'],
+            'properties' => [
+                'id' => ['type' => 'integer'],
+                'name' => ['type' => 'string'],
+            ],
+        ]);
+
+        self::assertNull($error);
+    }
 }

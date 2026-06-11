@@ -1655,4 +1655,4 @@ Many thanks for all the contributions:
 - Integration tests cover live connect/disconnect, publish-subscribe roundtrip, request-reply, connection rotation fallback, JetStream stream/consumer lifecycle with publish-ack flow, KV operations, ObjectStore operations, and service discovery.
 - Integration tests also cover local token auth, username/password auth, TLS handshake-first auth including strict peer-validation, hostname mismatch, and missing-client-cert failures, resolver-backed JWT auth, and standalone NKey auth.
 - Static analysis runs with PHPStan level 8.
-- Combined unit + integration line coverage is ~97%, enforced at a 95% floor in CI (the build fails below it).
+- Combined unit + integration line coverage is ~98%, enforced at a 97% floor in CI (the build fails below it).

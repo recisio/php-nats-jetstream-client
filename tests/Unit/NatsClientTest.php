@@ -130,6 +130,22 @@ final class NatsClientTest extends TestCase
     }
 
     /**
+     * Verifies discoveredServers() returns the connect_urls advertised in the server INFO frame.
+     */
+    public function testDiscoveredServersReturnsConnectUrls(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"connect_urls":["nats://10.0.0.2:4222","nats://10.0.0.3:4222"]}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        self::assertSame(['nats://10.0.0.2:4222', 'nats://10.0.0.3:4222'], $client->discoveredServers());
+    }
+
+    /**
      * Verifies facade service factory and lifecycle delegates (drain/disconnect).
      */
     public function testClientServiceFactoryDisconnectAndDrain(): void

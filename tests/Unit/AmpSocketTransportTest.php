@@ -7,10 +7,12 @@ namespace IDCT\NATS\Tests\Unit;
 use Amp\Socket\ConnectContext;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Transport\AmpSocketTransport;
+use IDCT\NATS\Transport\TlsRequiredException;
 use IDCT\NATS\Transport\TransportClosedException;
 use PHPUnit\Framework\TestCase;
 
 use function Amp\async;
+use function Amp\delay;
 use function Amp\Socket\listen;
 
 final class AmpSocketTransportTest extends TestCase
@@ -194,5 +196,40 @@ final class AmpSocketTransportTest extends TestCase
 
         self::assertStringContainsString('hello', $collected);
         self::assertTrue($threw, 'readLine() must throw TransportClosedException on peer EOF');
+    }
+
+    /**
+     * Verifies upgradeTls() on a connected plaintext socket with no TLS materials fails fast with
+     * TlsRequiredException, rather than leaving the socket plaintext (which would leak a CONNECT).
+     */
+    public function testUpgradeTlsThrowsWhenConnectedWithoutTlsContext(): void
+    {
+        $server = listen('tcp://127.0.0.1:0');
+        $address = (string) $server->getAddress();
+
+        // Accept and hold the connection open so the client socket stays connected during upgrade.
+        async(static function () use ($server): void {
+            $client = $server->accept();
+            if ($client !== null) {
+                delay(0.5);
+                $client->close();
+            }
+        });
+
+        $transport = new AmpSocketTransport(new NatsOptions());
+        $transport->connect('tcp://' . $address, 1000)->await();
+
+        $threw = false;
+        try {
+            $transport->upgradeTls()->await();
+        } catch (TlsRequiredException $e) {
+            $threw = true;
+            self::assertStringContainsString('TLS upgrade requested but no TLS context', $e->getMessage());
+        } finally {
+            $transport->close()->await();
+            $server->close();
+        }
+
+        self::assertTrue($threw, 'upgradeTls() without TLS materials must throw TlsRequiredException');
     }
 }

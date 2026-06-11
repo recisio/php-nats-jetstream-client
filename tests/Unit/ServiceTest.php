@@ -1440,4 +1440,132 @@ final class ServiceTest extends TestCase
         self::assertStringContainsString('UNSUB ', $writes);
     }
 
+    /**
+     * Verifies start() rollback silently swallows unsubscribe failures when the connection is gone
+     * during the catch block (line 326: inner catch in the rollback foreach).
+     *
+     * Scenario: two endpoints are added; the connection is dropped before start(). The first
+     * discovery subscribe succeeds (the fake transport is still open) but everything breaks
+     * after that... actually we need a subtler approach: connect, immediately close the transport,
+     * then call start() so that even the first subscribe fails — but then the rollback tries
+     * unsub on the already-queued SIDs and THAT also fails (line 326 catch fires).
+     *
+     * The simplest reliable trigger: start successfully, close the connection, then force a second
+     * start() with a bad endpoint. The partial subscribe at "bad subject" throws, and the rollback
+     * over the already-subscribed SIDs (discovery + first endpoint) also throws because the
+     * connection is now closed — exercising the line-326 swallow path.
+     */
+    public function testStartRollbackSwallowsUnsubscribeFailureOnClosedConnection(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // Add a valid endpoint so discovery subscriptions and one endpoint get registered.
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('good', 'svc.good', static fn(NatsMessage $m): string => 'ok')
+            ->addEndpoint('bad', 'bad subject', static fn(NatsMessage $m): string => 'no');
+
+        // Close the connection so that when start() rolls back the already-subscribed SIDs,
+        // unsubscribe() throws (line 326 catch fires) but must be swallowed.
+        $client->disconnect()->await();
+
+        try {
+            $service->start()->await();
+            self::fail('Expected start() to throw');
+        } catch (\Throwable) {
+            // expected: the subscribe or rollback itself throws; what matters is no secondary exception.
+        }
+
+        // Service must remain not-started and SIDs must be cleared (rollback complete despite unsubscribe failures).
+        self::assertSame([], (new \ReflectionProperty($service, 'subscriptionSids'))->getValue($service));
+        self::assertFalse((new \ReflectionProperty($service, 'started'))->getValue($service));
+    }
+
+    /**
+     * Verifies drain() silently swallows unsubscribe failures when the connection is already gone
+     * (line 398: catch block inside the foreach in drain()).
+     */
+    public function testDrainToleratesClosedConnectionDuringUnsubscribe(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+        $service->start()->await();
+
+        // Drop the connection before draining so unsubscribe() throws for every SID (line 398 catch).
+        $client->disconnect()->await();
+
+        // drain() must complete without rethrowing any unsubscribe exceptions.
+        $service->drain()->await();
+
+        // State must still be cleared via the finally block.
+        self::assertSame([], (new \ReflectionProperty($service, 'subscriptionSids'))->getValue($service));
+        self::assertFalse((new \ReflectionProperty($service, 'started'))->getValue($service));
+    }
+
+    /**
+     * Verifies drain() silently swallows flush failures when the connection is already gone
+     * (line 408: catch block around flush() inside drain()).
+     *
+     * This path is reached when $this->started is true and flush() throws (e.g. closed connection).
+     */
+    public function testDrainToleratesFlushFailureOnClosedConnection(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // No second PONG: flush will timeout/fail because there is no PONG response queued.
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+        $service->start()->await();
+
+        // Close connection; now flush() inside drain() will throw (line 408 catch fires).
+        $client->disconnect()->await();
+
+        // drain() must complete without rethrowing the flush exception; state must be cleared.
+        $service->drain()->await();
+
+        self::assertFalse((new \ReflectionProperty($service, 'started'))->getValue($service));
+        self::assertSame([], (new \ReflectionProperty($service, 'subscriptionSids'))->getValue($service));
+    }
+
+    /**
+     * Verifies buildRunCancellation returns a CompositeCancellation when both a timeout and an
+     * external cancellation are supplied (line 751).
+     */
+    public function testRunWithBothTimeoutAndExternalCancellationUsesCompositeCancellation(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong(), blockWhenEmpty: true);
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+
+        // Provide BOTH a timeout and an external DeferredCancellation — this exercises the
+        // CompositeCancellation branch (line 751). The external cancel fires first.
+        $deferred = new \Amp\DeferredCancellation();
+        $runner = \Amp\async(static function () use ($service, $deferred): void {
+            $service->run(10.0, $deferred->getCancellation())->await();
+        });
+
+        \Amp\delay(0.01);
+        $deferred->cancel();
+        $runner->await();
+
+        // Service must have been stopped after the composite cancellation fired.
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('UNSUB ', $writes);
+    }
+
+
 }

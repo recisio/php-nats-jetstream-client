@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Unit;
 
+use Amp\Socket\ConnectException as AmpConnectException;
+use Amp\Socket\TlsException;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Transport\TlsAwareTransportInterface;
 use IDCT\NATS\Transport\WebSocketTransport;
 use PHPUnit\Framework\TestCase;
+
+use function Amp\Socket\listen;
 
 final class WebSocketTransportTest extends TestCase
 {
@@ -102,5 +106,75 @@ final class WebSocketTransportTest extends TestCase
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Invalid WebSocket DSN');
         $transport->connect('ws:///just-a-path', 1000)->await();
+    }
+
+    /**
+     * Verifies connect() appends query string to path (line 76) before attempting socket open.
+     *
+     * The DSN contains a query part, so path is built as '/?q=v' on line 76.  The closure then
+     * proceeds to the socket connect which fails (port 1 is not listening), surfacing an Amp
+     * ConnectException — proof that input-validation and path-building ran without error.
+     */
+    public function testConnectAppendsQueryStringToPathBeforeSocketAttempt(): void
+    {
+        $transport = new WebSocketTransport(new NatsOptions());
+
+        $this->expectException(AmpConnectException::class);
+        // ws:// with a query string — parse_url yields ['host'=>..., 'query'=>'q=v'].
+        // Line 76 executes ($path .= '?' . $parts['query']) before the socket connect fails.
+        $transport->connect('ws://127.0.0.1:1/?q=v', 100)->await();
+    }
+
+    /**
+     * Verifies connect() builds a TLS context for wss:// (line 83) before attempting socket open.
+     *
+     * Using wss:// triggers the `if ($secure)` branch on line 82, which calls buildTlsContext()
+     * and stores the result in $context on line 83.  The socket connect on line 86 then fails
+     * (port 1 is not listening), confirming lines 82-83 ran without error.
+     */
+    public function testConnectBuildsTlsContextForWssSchemeBeforeSocketAttempt(): void
+    {
+        $transport = new WebSocketTransport(new NatsOptions());
+
+        $this->expectException(AmpConnectException::class);
+        // wss:// activates the secure branch; buildTlsContext() runs on line 83, then port 1
+        // refuses the connection — ConnectException is the expected outcome.
+        $transport->connect('wss://127.0.0.1:1/', 100)->await();
+    }
+
+    /**
+     * Verifies connect() calls setupTls() on the socket for wss:// (line 89) when TCP succeeds.
+     *
+     * A plain-TCP listener is started locally so the socket connect (line 86) succeeds.  The
+     * transport then calls setupTls() on line 89 (still inside the `if ($secure)` block), which
+     * fails because the server speaks plain TCP — surfacing a TlsException.  This confirms line 89
+     * is reachable; line 90 ($this->tlsEstablished = true) requires a real TLS server and is
+     * therefore skipped.
+     */
+    public function testConnectCallsSetupTlsOnWssAndThrowsWhenServerIsPlainTcp(): void
+    {
+        // Spin up a plain-TCP listener on an ephemeral port.
+        $server = listen('tcp://127.0.0.1:0');
+        $address = (string) $server->getAddress();
+
+        // Accept and immediately close — we just need TCP to connect; no TLS handshake.
+        \Amp\async(static function () use ($server): void {
+            $client = $server->accept();
+            if ($client !== null) {
+                $client->close();
+            }
+        });
+
+        $transport = new WebSocketTransport(new NatsOptions(tlsVerifyPeer: false));
+
+        try {
+            $transport->connect('wss://' . $address . '/', 2000)->await();
+            self::fail('Expected TlsException was not thrown');
+        } catch (TlsException) {
+            // Line 89 (setupTls) ran and threw because the server is plain TCP — expected.
+            self::assertFalse($transport->tlsActive(), 'tlsEstablished must remain false when setupTls throws');
+        } finally {
+            $server->close();
+        }
     }
 }
