@@ -57,7 +57,7 @@ jobs:
         run: composer coverage:clover:all
       - name: Enforce Coverage Threshold
         # Reuses the clover report above (no extra test run); threshold is defined in composer.json
-        # (coverage:check:clover) and currently fails the build below 89% (a ratchet on ~89.6%).
+        # (coverage:check:clover) and fails the build below 90% (current combined coverage ~91.1%).
         run: composer coverage:check:clover
       - name: Stop NATS services
         if: always()
