@@ -146,6 +146,16 @@ trait IntegrationTestBootstrap
     }
 
     /**
+     * Returns the configured WebSocket NATS server URL (ws://).
+     */
+    protected function integrationWsServerUrl(): string
+    {
+        $url = getenv('NATS_WS_URL');
+
+        return is_string($url) && $url !== '' ? $url : 'ws://127.0.0.1:14229';
+    }
+
+    /**
      * Returns the configured JWT-auth NATS server URL.
      */
     protected function integrationJwtServerUrl(): string
