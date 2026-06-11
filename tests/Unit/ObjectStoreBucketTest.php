@@ -1424,4 +1424,868 @@ final class ObjectStoreBucketTest extends TestCase
         $this->expectExceptionMessage('status 409');
         $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
     }
+
+    /**
+     * Line 392: get() returns null when info() finds no object (Direct Get returns 404).
+     */
+    public function testGetReturnsNullWhenObjectNotFound(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 404, 'Message Not Found'), // info() -> 404
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->get('missing.txt')->await();
+
+        self::assertNull($result);
+    }
+
+    /**
+     * Line 401/405: get() returns null for a deleted (tombstoned) object.
+     */
+    public function testGetReturnsNullForDeletedObject(): void
+    {
+        $meta = $this->metaGetResponse('gone.txt', ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1), // info() -> deleted tombstone
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->get('gone.txt')->await();
+
+        self::assertNull($result);
+    }
+
+    /**
+     * Line 387: get() throws after too many link hops (MAX_LINK_HOPS = 8, so depth 9 triggers).
+     * We chain 9 self-referential links; on the 9th recursion depth > 8 and the exception is thrown.
+     */
+    public function testGetThrowsOnTooManyLinkHops(): void
+    {
+        // Build 9 link meta replies all pointing at the same name "loop.txt" to force a cycle.
+        // The first info() call returns a link, which recursively calls getInternal with depth+1.
+        // At depth > MAX_LINK_HOPS (8) the exception fires.
+        $linkMeta = ['options' => ['link' => ['bucket' => 'assets', 'name' => 'loop.txt']]];
+
+        $readQueue = [
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ];
+        // MAX_LINK_HOPS = 8; we need 9 info() replies (depth 0..8) before the 9th depth check fires.
+        for ($i = 1; $i <= 9; $i++) {
+            $readQueue[] = $this->directMetaReply('loop.txt', $linkMeta, $i);
+        }
+
+        $transport = new FakeTransport($readQueue);
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Too many Object Store link hops');
+        $client->jetStream()->objectStore('assets')->get('loop.txt')->await();
+    }
+
+    /**
+     * Line 426: get() throws when a bucket link is followed (link has no 'name' key).
+     */
+    public function testGetThrowsOnBucketLink(): void
+    {
+        // A bucket link has options.link = {bucket: 'other'} — no 'name' key.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directMetaReply('bucket-link', ['options' => ['link' => ['bucket' => 'other-bucket']]], 1),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('it points to a bucket, not an object');
+        $client->jetStream()->objectStore('assets')->get('bucket-link')->await();
+    }
+
+    /**
+     * Line 460: getToCallback() throws after too many link hops.
+     */
+    public function testGetToCallbackThrowsOnTooManyLinkHops(): void
+    {
+        $linkMeta = ['options' => ['link' => ['bucket' => 'assets', 'name' => 'loop.txt']]];
+
+        $readQueue = [
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ];
+        for ($i = 1; $i <= 9; $i++) {
+            $readQueue[] = $this->directMetaReply('loop.txt', $linkMeta, $i);
+        }
+
+        $transport = new FakeTransport($readQueue);
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Too many Object Store link hops');
+        $client->jetStream()->objectStore('assets')->getToCallback('loop.txt', static function (string $c): void {})->await();
+    }
+
+    /**
+     * Line 465: getToCallback() returns null when object is not found.
+     */
+    public function testGetToCallbackReturnsNullWhenNotFound(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 404, 'Message Not Found'),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $called = false;
+        $result = $client->jetStream()->objectStore('assets')->getToCallback(
+            'missing.txt',
+            static function (string $chunk) use (&$called): void {
+                $called = true;
+            },
+        )->await();
+
+        self::assertNull($result);
+        self::assertFalse($called);
+    }
+
+    /**
+     * Lines 469+471: getToCallback() follows an object link and streams the target's content.
+     */
+    public function testGetToCallbackFollowsObjectLink(): void
+    {
+        $nuid = 'nuidcblink1';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // info('shortcut') -> link pointing at doc.txt in same bucket (sid 1)
+            $this->directMetaReply('shortcut', ['options' => ['link' => ['bucket' => 'assets', 'name' => 'doc.txt']]], 1),
+            // info('doc.txt') -> real object (sid 2)
+            $this->directMetaReply('doc.txt', ['nuid' => $nuid, 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 2),
+            // single-chunk Direct Get on the NUID subject (sid 3)
+            $this->directChunkReply($nuid, 'hello', 3),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $captured = '';
+        $info = $client->jetStream()->objectStore('assets')->getToCallback(
+            'shortcut',
+            static function (string $chunk) use (&$captured): void {
+                $captured .= $chunk;
+            },
+        )->await();
+
+        self::assertSame('hello', $captured);
+        self::assertNotNull($info);
+        self::assertSame('doc.txt', $info->name);
+    }
+
+    /**
+     * Lines 525-527: streamChunks single-chunk path throws "Incomplete object download" on 404.
+     */
+    public function testGetSingleChunkThrowsIncompleteDownloadOnNotFound(): void
+    {
+        $nuid = 'nuidsingle04';
+        $meta = $this->metaGetResponse('doc.txt', [
+            'nuid' => $nuid,
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),          // info() Direct Get
+            $this->directStatusReply(2, 404, 'Not Found'),     // single-chunk Direct Get -> 404
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Incomplete object download: expected 1 chunks, received 0');
+        $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+    }
+
+    /**
+     * Lines 530-531: streamChunks single-chunk path rethrows non-404, non-503 Direct Get errors.
+     */
+    public function testGetSingleChunkRethrowsNonNotFoundNonUnavailableError(): void
+    {
+        $nuid = 'nuidsingle05';
+        $meta = $this->metaGetResponse('doc.txt', [
+            'nuid' => $nuid,
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),          // info() Direct Get
+            $this->directStatusReply(2, 500, 'Stream Error Occurred'), // single-chunk Direct Get -> 500 (rethrow)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Stream Error Occurred');
+        $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+    }
+
+    /**
+     * Line 530 (503 fall-through): single-chunk object, Direct Get returns 503 → falls through to
+     * the ephemeral consumer path and successfully downloads the chunk.
+     */
+    public function testGetSingleChunkFallsThrough503ToEphemeralConsumer(): void
+    {
+        $nuid = 'nuidsingle06';
+        $meta = $this->metaGetResponse('doc.txt', [
+            'nuid' => $nuid,
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHSINGLE","config":{"ack_policy":"none"}}';
+        $deleteConsumer = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),                                                          // info() Direct Get
+            $this->directStatusReply(2, 503, 'No Responders'),                                                 // single-chunk Direct Get -> 503 (fall-through)
+            sprintf("MSG _INBOX.b 3 %d\r\n%s\r\n", strlen($consumer), $consumer),                            // create ephemeral consumer
+            "MSG _INBOX.JS.FETCH.c 4 5\r\nhello\r\n",                                                         // chunk delivered via pull
+            sprintf("MSG _INBOX.d 5 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),                 // delete consumer
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fetched = $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+
+        self::assertInstanceOf(\IDCT\NATS\JetStream\ObjectStore\ObjectData::class, $fetched);
+        self::assertSame('hello', $fetched->data);
+    }
+
+    /**
+     * Line 614: verifyDigest returns early (no throw) when the object's stored digest is empty.
+     * The downloaded content digest does not match what was stored (but stored is ''), so no throw.
+     */
+    public function testGetSucceedsWhenStoredDigestIsEmpty(): void
+    {
+        $nuid = 'nuidnodigest';
+        $meta = $this->metaGetResponse('doc.txt', [
+            'nuid' => $nuid,
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => '', // empty → verifyDigest returns early, no check performed
+        ]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),
+            $this->directChunkReply($nuid, 'hello', 2),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // No digest to check → must succeed even though digest field is empty.
+        $fetched = $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+
+        self::assertInstanceOf(\IDCT\NATS\JetStream\ObjectStore\ObjectData::class, $fetched);
+        self::assertSame('hello', $fetched->data);
+    }
+
+    /**
+     * Line 638: decodeDigest returns null for a non-"SHA-256=" prefixed digest, causing verifyDigest
+     * to throw a mismatch exception even though the bytes match.
+     */
+    public function testGetThrowsOnUnknownDigestPrefix(): void
+    {
+        $nuid = 'nuidbadpfx01';
+        // Store a digest with an unrecognised prefix — decodeDigest() returns null for both sides,
+        // and verifyDigest throws because $expected === null.
+        $badDigest = 'MD5=abc123'; // not SHA-256 prefixed
+        $meta = $this->metaGetResponse('doc.txt', [
+            'nuid' => $nuid,
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $badDigest,
+        ]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),
+            $this->directChunkReply($nuid, 'hello', 2),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Object digest mismatch');
+        $client->jetStream()->objectStore('assets')->get('doc.txt')->await();
+    }
+
+    /**
+     * Line 679: info() rethrows non-404, non-503 errors from Direct Get.
+     */
+    public function testInfoRethrowsNonNotFoundNonUnavailableError(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 500, 'Downstream Error'),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Downstream Error');
+        $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+    }
+
+    /**
+     * Line 695: info() returns null when the Direct Get body is not valid JSON.
+     */
+    public function testInfoReturnsNullWhenPayloadIsNotJson(): void
+    {
+        // Build a Direct-Get-style HMSG reply whose body is not valid JSON.
+        $hdrs = "NATS/1.0\r\nNats-Stream: OBJ_assets\r\nNats-Sequence: 3\r\n\r\n";
+        $h = strlen($hdrs);
+        $body = 'NOT_JSON';
+        $frame = sprintf("HMSG _INBOX.x 1 %d %d\r\n%s%s\r\n", $h, $h + strlen($body), $hdrs, $body);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $frame,
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+
+        self::assertNull($result);
+    }
+
+    /**
+     * Line 721: fetchInfo (used as info() fallback via 503) rethrows a non-404 error when
+     * swallowErrors=false (i.e. when called from the 503 fallback path in info()).
+     */
+    public function testInfoFallbackRethrowsNon404Error(): void
+    {
+        // Direct Get returns 503 → falls back to STREAM.MSG.GET; that returns a 500 error → thrown.
+        $msgGetError = '{"error":{"code":500,"description":"stream error"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 503, 'No Responders'),                                      // Direct Get -> 503
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($msgGetError), $msgGetError),              // STREAM.MSG.GET -> 500
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('stream error');
+        $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+    }
+
+    /**
+     * Line 732: fetchInfo returns null when decodeMetadataFromApiMessage returns null (empty data field).
+     * Triggered via info() 503 fallback → fetchInfo(name, false); response has no 'data' key.
+     */
+    public function testInfoFallbackReturnsNullWhenMessageDataIsEmpty(): void
+    {
+        // Direct Get -> 503; STREAM.MSG.GET returns a message with empty 'data' field.
+        $msgGetNoData = '{"message":{"subject":"$O.assets.M.doc","seq":5}}'; // no 'data' key
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 503, 'No Responders'),
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($msgGetNoData), $msgGetNoData),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+
+        self::assertNull($result);
+    }
+
+    /**
+     * Line 797: updateMeta() throws 404 when the object is deleted (tombstoned).
+     */
+    public function testUpdateMetaThrowsWhenObjectIsDeleted(): void
+    {
+        $meta = $this->metaGetResponse('gone.txt', ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1), // info('gone.txt') -> deleted tombstone
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Object not found: gone.txt');
+        $client->jetStream()->objectStore('assets')->updateMeta('gone.txt')->await();
+    }
+
+    /**
+     * Line 797: updateMeta() throws 404 when the object does not exist at all.
+     */
+    public function testUpdateMetaThrowsWhenObjectNotFound(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 404, 'Message Not Found'), // info() -> 404 (null)
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Object not found: missing.txt');
+        $client->jetStream()->objectStore('assets')->updateMeta('missing.txt')->await();
+    }
+
+    /**
+     * Line 805: updateMeta() throws when renaming onto an existing non-deleted object.
+     */
+    public function testUpdateMetaThrowsWhenRenameTargetExists(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // info('logo.txt') -> found (sid 1)
+            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')], 1),
+            // info('brand.txt') clash check -> found and not deleted (sid 2)
+            $this->directMetaReply('brand.txt', ['nuid' => 'n2', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 2),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Cannot rename to an existing object: brand.txt');
+        $client->jetStream()->objectStore('assets')->updateMeta('logo.txt', 'brand.txt')->await();
+    }
+
+    /**
+     * Line 900: list() returns an empty array when there are no meta subjects in the bucket.
+     */
+    public function testListReturnsEmptyArrayWhenBucketIsEmpty(): void
+    {
+        // metaSubjects() returns [] when subjects map is empty.
+        $emptyStreamInfo = '{"state":{"subjects":{}}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($emptyStreamInfo), $emptyStreamInfo),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->list()->await();
+
+        self::assertSame([], $result);
+    }
+
+    /**
+     * Line 922: list() skips a meta subject whose Direct Get reply body is not valid JSON.
+     */
+    public function testListSkipsSubjectWithNonJsonBody(): void
+    {
+        $enc = $this->encodeName('corrupt.txt');
+        $streamInfo = (string) json_encode([
+            'state' => ['subjects' => [
+                '$O.assets.M.' . $enc => 1,
+                '$O.assets.M.' . $this->encodeName('good.txt') => 1,
+            ]],
+        ], JSON_THROW_ON_ERROR);
+        $emptyPage = '{"state":{"subjects":{}}}';
+
+        // Build a Direct Get reply with a non-JSON body for corrupt.txt.
+        $badHdrs = "NATS/1.0\r\nNats-Stream: OBJ_assets\r\nNats-Sequence: 1\r\n\r\n";
+        $bh = strlen($badHdrs);
+        $badBody = 'NOT_VALID_JSON';
+        $badReply = sprintf("HMSG _INBOX.x 3 %d %d\r\n%s%s\r\n", $bh, $bh + strlen($badBody), $badHdrs, $badBody);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfo), $streamInfo), // page 1 (sid 1)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($emptyPage), $emptyPage),   // page 2 terminator (sid 2)
+            $badReply,                                                                  // corrupt.txt -> non-JSON body (sid 3)
+            $this->directMetaReply('good.txt', ['nuid' => 'n1', 'size' => 5, 'chunks' => 1, 'digest' => $this->digestOf('hello')], 4),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $objects = $client->jetStream()->objectStore('assets')->list()->await();
+
+        // corrupt.txt is skipped (null returned for non-JSON); only good.txt remains.
+        self::assertCount(1, $objects);
+        self::assertSame('good.txt', $objects[0]->name);
+    }
+
+    /**
+     * Lines 960-973: getStatus() returns the correct mapped fields from stream state.
+     */
+    public function testGetStatusReturnsMappedStreamState(): void
+    {
+        $streamReply = (string) json_encode([
+            'config' => ['name' => 'OBJ_assets'],
+            'state' => [
+                'messages' => 42,
+                'last_seq' => 100,
+                'bytes' => 8192,
+                'subjects' => ['$O.assets.M.abc' => 1],
+            ],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamReply), $streamReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $status = $client->jetStream()->objectStore('assets')->getStatus()->await();
+
+        self::assertSame('assets', $status['bucket']);
+        self::assertSame('OBJ_assets', $status['stream']);
+        self::assertSame(42, $status['messages']);
+        self::assertSame(100, $status['last_sequence']);
+        self::assertSame(8192, $status['bytes']);
+        self::assertSame(['$O.assets.M.abc' => 1], $status['subjects']);
+    }
+
+    /**
+     * Line 963: getStatus() defaults state fields to zero/empty when state is missing.
+     */
+    public function testGetStatusDefaultsWhenStateIsAbsent(): void
+    {
+        $streamReply = '{"config":{"name":"OBJ_assets"}}'; // no 'state' key
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamReply), $streamReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $status = $client->jetStream()->objectStore('assets')->getStatus()->await();
+
+        self::assertSame(0, $status['messages']);
+        self::assertSame(0, $status['last_sequence']);
+        self::assertSame(0, $status['bytes']);
+        self::assertSame([], $status['subjects']);
+    }
+
+    /**
+     * Line 314: putStream() skips empty-string blocks from the producer without hashing or buffering them.
+     */
+    public function testPutStreamSkipsEmptyBlocks(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // lookup (sid 1) -> not found
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
+            // one chunk ack (sid 2) for the non-empty 'hello' block
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+            // meta ack (sid 3)
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(2)), $this->pubAck(2)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // Producer yields: empty, empty, 'hello', empty, null.
+        $blocks = ['', '', 'hello', '', null];
+        $index = 0;
+        $store = new ObjectStoreBucket($client, $client->jetStream(), 'assets');
+        $stored = $store->putStream('skip-empty.txt', static function () use (&$index, $blocks): ?string {
+            return $blocks[$index++];
+        })->await();
+
+        // Only 'hello' was processed; empty blocks are silently skipped.
+        self::assertSame(5, $stored->size);
+        self::assertSame(1, $stored->chunks);
+        self::assertSame($this->digestOf('hello'), $stored->digest);
+    }
+
+    /**
+     * Line 360: putStream() purges previous revision's chunks when a previous nuid exists.
+     */
+    public function testPutStreamPurgesPreviousChunks(): void
+    {
+        $oldNuid = 'oldnuidstr01';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // lookup (sid 1) -> returns previous meta with old nuid
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->metaGetResponse('data.bin', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])), $this->metaGetResponse('data.bin', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])),
+            // chunk ack (sid 2)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(3)), $this->pubAck(3)),
+            // meta ack (sid 3)
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(4)), $this->pubAck(4)),
+            // purge old chunks ack (sid 4)
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen('{"success":true,"purged":1}'), '{"success":true,"purged":1}'),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $store = new ObjectStoreBucket($client, $client->jetStream(), 'assets');
+        $blocks = ['new'];
+        $index = 0;
+        $stored = $store->putStream('data.bin', static function () use (&$index, $blocks): ?string {
+            return $blocks[$index++] ?? null;
+        })->await();
+
+        self::assertSame(3, $stored->size);
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('$JS.API.STREAM.PURGE.OBJ_assets', $writes);
+        self::assertStringContainsString('$O.assets.C.' . $oldNuid, $writes);
+    }
+
+    /**
+     * Line 1160: decodeMetadataFromApiMessage returns null (covered via fetchInfo 503 path)
+     * when the STREAM.MSG.GET response has no 'message' key at all.
+     */
+    public function testInfoFallbackReturnsNullWhenMessageKeyAbsent(): void
+    {
+        // Direct Get -> 503; STREAM.MSG.GET returns a response with no 'message' key.
+        $msgGetNoMessage = '{"ok":true}'; // no 'message' key
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 503, 'No Responders'),
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($msgGetNoMessage), $msgGetNoMessage),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+
+        self::assertNull($result);
+    }
+
+    /**
+     * Line 1165: decodeMetadataFromApiMessage returns null when base64 decodes to empty.
+     * This happens via the fetchInfo/503 fallback path when the message data field is not valid base64.
+     */
+    public function testInfoFallbackReturnsNullWhenDataIsInvalidBase64(): void
+    {
+        // Direct Get -> 503; STREAM.MSG.GET returns a message with invalid base64 in 'data'.
+        $invalidB64Data = '{"message":{"subject":"subj","seq":1,"data":"!!!NOT_BASE64!!!"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directStatusReply(1, 503, 'No Responders'),
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($invalidB64Data), $invalidB64Data),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->info('doc.txt')->await();
+
+        self::assertNull($result);
+    }
+
+    /**
+     * Line 1069: purgeChunks swallows JetStreamException (the surrounding operation succeeds).
+     * Already covered by testDeleteToleratesPurgeFailure. This additional test verifies the same
+     * behaviour via put() overwrite path: purge failure does NOT propagate.
+     */
+    public function testPutOverwriteSwallowsPurgeFailure(): void
+    {
+        $oldNuid = 'oldnuidswallow';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // lookup (sid 1) -> returns previous meta
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->metaGetResponse('f.txt', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])), $this->metaGetResponse('f.txt', ['nuid' => $oldNuid, 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')])),
+            // chunk publish ack (sid 2)
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(3)), $this->pubAck(3)),
+            // meta publish ack (sid 3)
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(4)), $this->pubAck(4)),
+            // purge -> error (must be swallowed)
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen('{"error":{"code":500,"description":"purge failed"}}'), '{"error":{"code":500,"description":"purge failed"}}'),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // Should not throw despite the purge failure.
+        $stored = $client->jetStream()->objectStore('assets')->put('f.txt', 'new')->await();
+
+        self::assertSame('f.txt', $stored->name);
+    }
+
+    /**
+     * Line 805 complement: updateMeta() succeeds when rename target exists but IS deleted (tombstoned).
+     */
+    public function testUpdateMetaSucceedsWhenRenameTargetIsDeleted(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // info('logo.txt') -> found (sid 1)
+            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old')], 1),
+            // info('brand.txt') clash check -> found but DELETED (sid 2)
+            $this->directMetaReply('brand.txt', ['nuid' => '', 'size' => 0, 'chunks' => 0, 'digest' => '', 'deleted' => true], 2),
+            // publishMeta('brand.txt') ack (sid 3)
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(8)), $this->pubAck(8)),
+            // publishMeta('logo.txt' tombstone) ack (sid 4)
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($this->pubAck(9)), $this->pubAck(9)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // Renaming onto a deleted target must succeed (deleted != live conflict).
+        $info = $client->jetStream()->objectStore('assets')->updateMeta('logo.txt', 'brand.txt')->await();
+
+        self::assertSame('brand.txt', $info->name);
+        self::assertSame('n1', $info->nuid);
+    }
+
+    /**
+     * Line 426 complement: linkTargetBucket throws when the link object has an explicit empty name.
+     * An options.link = {bucket:'b', name:''} is treated the same as a bucket link (name absent).
+     */
+    public function testGetThrowsOnBucketLinkWithEmptyName(): void
+    {
+        // options.link with name='' — ObjectInfo.fromArray will NOT set 'name' in $link
+        // because of the `$options['link']['name'] !== ''` guard.
+        // So $info->link = ['bucket' => 'assets'] (no 'name' key) → bucket link guard fires.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directMetaReply('blink', ['options' => ['link' => ['bucket' => 'assets', 'name' => '']]], 1),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('it points to a bucket, not an object');
+        $client->jetStream()->objectStore('assets')->get('blink')->await();
+    }
+
+    /**
+     * Line 530 (503 path in streamChunks): getToCallback on a single-chunk object where Direct Get
+     * returns 503 falls through to ephemeral consumer and delivers to the callback.
+     */
+    public function testGetToCallbackSingleChunkFallsThrough503(): void
+    {
+        $nuid = 'nuidsingle07';
+        $meta = $this->metaGetResponse('doc.txt', [
+            'nuid' => $nuid,
+            'size' => 5,
+            'chunks' => 1,
+            'digest' => $this->digestOf('hello'),
+        ]);
+        $consumer = '{"stream_name":"OBJ_assets","name":"EPHCB503","config":{"ack_policy":"none"}}';
+        $deleteConsumer = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directReplyFromEnvelope($meta, 1),                                                      // info() Direct Get
+            $this->directStatusReply(2, 503, 'No Responders'),                                             // single-chunk Direct Get -> 503
+            sprintf("MSG _INBOX.b 3 %d\r\n%s\r\n", strlen($consumer), $consumer),                        // create ephemeral consumer
+            "MSG _INBOX.JS.FETCH.c 4 5\r\nhello\r\n",                                                     // chunk delivered via pull
+            sprintf("MSG _INBOX.d 5 %d\r\n%s\r\n", strlen($deleteConsumer), $deleteConsumer),             // delete consumer
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $captured = '';
+        $info = $client->jetStream()->objectStore('assets')->getToCallback(
+            'doc.txt',
+            static function (string $chunk) use (&$captured): void {
+                $captured .= $chunk;
+            },
+        )->await();
+
+        self::assertSame('hello', $captured);
+        self::assertNotNull($info);
+        self::assertSame('doc.txt', $info->name);
+    }
+
+    /**
+     * Line 900 variant: list() with an empty state (no 'state' key) returns empty array.
+     */
+    public function testListReturnsEmptyWhenStateKeyAbsent(): void
+    {
+        // STREAM.INFO response with no state/subjects at all (e.g. fresh empty stream).
+        $emptyStreamInfo = '{"config":{"name":"OBJ_assets"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($emptyStreamInfo), $emptyStreamInfo),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $result = $client->jetStream()->objectStore('assets')->list()->await();
+
+        self::assertSame([], $result);
+    }
 }

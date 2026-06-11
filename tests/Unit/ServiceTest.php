@@ -1107,4 +1107,337 @@ final class ServiceTest extends TestCase
         $frames = $client->processIncoming()->await();
         self::assertSame(1, $frames);
     }
+
+    /**
+     * Verifies that calling start() on an already-started service is a no-op (idempotency guard, line 194).
+     */
+    public function testStartIsIdempotentWhenAlreadyStarted(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+
+        $service->start()->await();
+        $writesAfterFirst = $transport->writes;
+
+        // Second start() must be a no-op: no additional SUB frames.
+        $service->start()->await();
+        $writesAfterSecond = $transport->writes;
+
+        self::assertSame($writesAfterFirst, $writesAfterSecond);
+    }
+
+    /**
+     * Verifies that a ServiceError with no body AND a correlation_id header emits the correlation_id
+     * in the error payload (lines 273-274).
+     */
+    public function testServiceErrorWithNullBodyIncludesCorrelationIdFromHeader(): void
+    {
+        $headerPayload = "NATS/1.0\r\nX-Request-Id:corr-99\r\n\r\n";
+        $bodyPayload = 'go';
+        $merged = $headerPayload . $bodyPayload;
+        $headerBytes = strlen($headerPayload);
+        $totalBytes = strlen($merged);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "HMSG svc.echo 13 _INBOX.req {$headerBytes} {$totalBytes}\r\n{$merged}\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // ServiceError with null body: the runtime builds the errorPayload and must include correlation_id.
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static function (NatsMessage $m): never {
+                throw new \IDCT\NATS\Services\ServiceError('422', 'Unprocessable');
+            });
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('"correlation_id":"corr-99"', $writes);
+        self::assertStringContainsString('"code":"422"', $writes);
+        self::assertStringContainsString('Nats-Service-Error-Code:422', $writes);
+    }
+
+    /**
+     * Verifies that a handler returning null causes no reply to be published (line 310).
+     */
+    public function testHandlerReturningNullSendsNoReply(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.fire 13 _INBOX.req 5\r\nhello\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $handled = false;
+        $service = $client->service('fire', '1.0.0')
+            ->addEndpoint('fire', 'svc.fire', static function (NatsMessage $m) use (&$handled): null {
+                $handled = true;
+
+                return null;
+            });
+        $service->start()->await();
+
+        $writesBefore = $transport->writes;
+        $client->processIncoming()->await();
+
+        $newWrites = array_slice($transport->writes, count($writesBefore));
+        // Handler ran, but no PUB should follow (null response).
+        self::assertTrue($handled);
+        foreach ($newWrites as $w) {
+            self::assertStringNotContainsString('PUB _INBOX.req', $w);
+        }
+
+        // Request counter incremented even for null-response handlers.
+        $stats = $service->statsSnapshot();
+        self::assertSame(1, $stats['endpoints'][0]['num_requests'] ?? null);
+    }
+
+    /**
+     * Verifies that drain() fires the done handler once (line 379 via markDone from drain).
+     */
+    public function testDrainFiresDoneHandler(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fired = 0;
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload)
+            ->onDone(static function () use (&$fired): void {
+                $fired++;
+            });
+
+        $service->start()->await();
+        $service->drain()->await();
+
+        self::assertSame(1, $fired);
+    }
+
+    /**
+     * Verifies that the done handler exception is swallowed (line 379: handler called inside try/catch).
+     */
+    public function testDoneHandlerExceptionIsSwallowed(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload)
+            ->onDone(static function (): never {
+                throw new \RuntimeException('done-handler-boom');
+            });
+
+        $service->start()->await();
+
+        // stop() must complete without rethrowing the done-handler exception.
+        $service->stop()->await();
+
+        // Reaching here means the exception was swallowed (started state was cleared).
+        $started = (new \ReflectionProperty($service, 'started'))->getValue($service);
+        self::assertFalse($started);
+    }
+
+    /**
+     * Verifies a discovery message with no replyTo is silently ignored (line 565).
+     */
+    public function testDiscoveryMessageWithoutReplyToIsIgnored(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // PING discovery message with no reply inbox (0-byte body, no reply subject).
+            "MSG \$SRV.PING 1 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+        $service->start()->await();
+
+        $writesBefore = $transport->writes;
+        $frames = $client->processIncoming()->await();
+
+        // Frame was processed (one MSG delivered) but no PUB was emitted.
+        self::assertSame(1, $frames);
+        $newWrites = array_slice($transport->writes, count($writesBefore));
+        foreach ($newWrites as $w) {
+            self::assertStringNotContainsString('PUB $SRV', $w);
+        }
+    }
+
+    /**
+     * Verifies endpoint requests with no replyTo are processed but produce no PUB (line 593).
+     */
+    public function testEndpointRequestWithNoReplyToSendsNoResponse(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // No reply subject (fire-and-forget publish to the endpoint).
+            "MSG svc.work 13 5\r\nhello\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $handled = false;
+        $service = $client->service('work', '1.0.0')
+            ->addEndpoint('work', 'svc.work', static function (NatsMessage $m) use (&$handled): string {
+                $handled = true;
+
+                return 'done';
+            });
+        $service->start()->await();
+
+        $writesBefore = $transport->writes;
+        $client->processIncoming()->await();
+
+        self::assertTrue($handled);
+        $newWrites = array_slice($transport->writes, count($writesBefore));
+        foreach ($newWrites as $w) {
+            self::assertStringNotContainsString('PUB', $w);
+        }
+    }
+
+    /**
+     * Verifies observer that throws does not interrupt request handling (line 672).
+     */
+    public function testObserverExceptionIsSwallowed(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.echo 13 _INBOX.req 5\r\nhello\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addObserver(static function (string $event): never {
+                throw new \RuntimeException('observer-boom');
+            })
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => 'ok');
+        $service->start()->await();
+
+        // processIncoming must complete even though the observer throws.
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        // The handler still ran and replied.
+        self::assertStringContainsString('PUB _INBOX.req', $writes);
+        self::assertStringContainsString('ok', $writes);
+    }
+
+    /**
+     * Verifies buildRunCancellation throws for a non-positive timeout (line 739).
+     */
+    public function testRunRejectsNonPositiveTimeout(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('timeout must be greater than zero');
+        $service->run(0.0)->await();
+    }
+
+    /**
+     * Verifies run() with only a positive timeout (no external cancellation) uses a TimeoutCancellation (line 751).
+     */
+    public function testRunWithOnlyTimeoutUsesTimeoutCancellation(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ], blockWhenEmpty: true);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+
+        // run() with only a timeout and no external cancellation must return (TimeoutCancellation path).
+        $service->run(0.02)->await();
+
+        // After run() exits the service must be stopped.
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('UNSUB ', $writes);
+    }
+
+    /**
+     * Verifies stats supplier that throws does not break the stats response (line 517 catch).
+     */
+    public function testStatsHandlerExceptionIsSwallowed(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $service = $client->service('svc', '1.0.0')->addEndpoint(
+            'work',
+            'svc.work',
+            static fn(NatsMessage $m): string => 'ok',
+            'q',
+            null,
+            [],
+            static fn(\IDCT\NATS\Services\ServiceEndpoint $e): array => throw new \RuntimeException('stats-boom'),
+        );
+
+        $snapshot = $service->statsSnapshot();
+        $endpoint = $snapshot['endpoints'][0] ?? [];
+
+        // The stats entry must be present but without a 'data' key (supplier threw).
+        self::assertArrayHasKey('num_requests', $endpoint);
+        self::assertArrayNotHasKey('data', $endpoint);
+    }
+
+    /**
+     * Verifies the run loop breaks immediately when the cancellation is already requested on entry (line 440).
+     */
+    public function testRunBreaksImmediatelyWhenCancellationAlreadyRequested(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $m): string => $m->payload);
+
+        $deferred = new \Amp\DeferredCancellation();
+        $deferred->cancel();
+        $cancellation = $deferred->getCancellation();
+
+        // The cancellation is already triggered; run() should exit promptly without hanging.
+        $service->run(null, $cancellation)->await();
+
+        $writes = implode('', $transport->writes);
+        // Service stopped: UNSUB frames must appear.
+        self::assertStringContainsString('UNSUB ', $writes);
+    }
+
 }

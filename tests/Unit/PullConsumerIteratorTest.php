@@ -350,6 +350,391 @@ final class PullConsumerIteratorTest extends TestCase
         self::assertSame(['job-7'], $processed);
     }
 
+    // ── setGroup / setPriority / setMinPending / setMinAckPending / setMaxBytes / setNoWait ──────
+
+    /**
+     * Covers line 114: setGroup() throws on an invalid group name.
+     */
+    public function testSetGroupRejectsInvalidName(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $this->expectException(JetStreamException::class);
+        $iter->setGroup('this-name-is-way-too-long-to-be-valid');
+    }
+
+    /**
+     * Covers line 114: setGroup() accepts null (clearing the group).
+     */
+    public function testSetGroupAcceptsNull(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setGroup('g1')->setGroup(null);
+
+        // No exception; setGroup returns $this so we can still call methods.
+        self::assertInstanceOf(PullConsumerIterator::class, $iter);
+    }
+
+    /**
+     * Covers lines 129-130: setPriority() throws when priority < 0.
+     */
+    public function testSetPriorityRejectsNegative(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $this->expectException(JetStreamException::class);
+        $iter->setPriority(-1);
+    }
+
+    /**
+     * Covers lines 129-130: setPriority() throws when priority > 9.
+     */
+    public function testSetPriorityRejectsAboveNine(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $this->expectException(JetStreamException::class);
+        $iter->setPriority(10);
+    }
+
+    /**
+     * Covers lines 133,135: setPriority() sets the priority and returns $this.
+     */
+    public function testSetPriorityAcceptsValidValues(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $result = $iter->setPriority(5);
+        self::assertSame($iter, $result);
+
+        // Boundary checks: 0 and 9 are both valid.
+        $iter->setPriority(0);
+        $iter->setPriority(9);
+    }
+
+    /**
+     * Covers lines 133,135: setPriority(null) clears the priority.
+     */
+    public function testSetPriorityAcceptsNull(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setPriority(3)->setPriority(null);
+        self::assertInstanceOf(PullConsumerIterator::class, $iter);
+    }
+
+    /**
+     * Covers lines 146,148: setMinPending() stores the value and returns $this.
+     */
+    public function testSetMinPendingStoresValue(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $result = $iter->setMinPending(42);
+        self::assertSame($iter, $result);
+    }
+
+    /**
+     * Covers lines 146,148: setMinPending(null) clears the threshold.
+     */
+    public function testSetMinPendingAcceptsNull(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setMinPending(10)->setMinPending(null);
+        self::assertInstanceOf(PullConsumerIterator::class, $iter);
+    }
+
+    /**
+     * Covers lines 158,160: setMinAckPending() stores the value and returns $this.
+     */
+    public function testSetMinAckPendingStoresValue(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $result = $iter->setMinAckPending(7);
+        self::assertSame($iter, $result);
+    }
+
+    /**
+     * Covers lines 158,160: setMinAckPending(null) clears the threshold.
+     */
+    public function testSetMinAckPendingAcceptsNull(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setMinAckPending(5)->setMinAckPending(null);
+        self::assertInstanceOf(PullConsumerIterator::class, $iter);
+    }
+
+    /**
+     * Covers lines 170,172: setMaxBytes() stores the value and returns $this.
+     */
+    public function testSetMaxBytesStoresValue(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $result = $iter->setMaxBytes(1024);
+        self::assertSame($iter, $result);
+    }
+
+    /**
+     * Covers lines 170,172: setMaxBytes(null) clears the cap.
+     */
+    public function testSetMaxBytesAcceptsNull(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setMaxBytes(512)->setMaxBytes(null);
+        self::assertInstanceOf(PullConsumerIterator::class, $iter);
+    }
+
+    /**
+     * Covers lines 182,184: setNoWait() sets the flag and returns $this.
+     */
+    public function testSetNoWaitStoresValue(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $result = $iter->setNoWait(true);
+        self::assertSame($iter, $result);
+
+        // Calling with false clears the flag.
+        $iter->setNoWait(false);
+    }
+
+    /**
+     * Covers lines 182,184: setNoWait() defaults to true when called with no argument.
+     */
+    public function testSetNoWaitDefaultsToTrue(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $iter = $client->jetStream()->pullConsumer('S', 'C');
+
+        $result = $iter->setNoWait();
+        self::assertSame($iter, $result);
+    }
+
+    // ── buildPull() branches (lines 372, 376, 380, 384, 388) via actual pull wire output ──────────
+
+    /**
+     * Covers line 372 (priority), 376 (min_pending), 380 (min_ack_pending), 384 (max_bytes),
+     * 388 (no_wait): verifies all optional pull fields appear in the NATS PUB payload when set.
+     */
+    public function testBuildPullIncludesAllOptionalFields(): void
+    {
+        $body = 'order-x';
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // One message so the loop runs one iteration, then a 404 to stop.
+            $this->jsMsg('_INBOX.JS.FETCH.any', $body, '$JS.ACK.ORDERS.PROC.1.1.1.123.0'),
+            sprintf("HMSG _INBOX.JS.FETCH.any 2 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()
+            ->pullConsumer('ORDERS', 'PROC')
+            ->setBatching(1)
+            ->setExpiresMs(500)
+            ->setIterations(2)
+            ->setPriority(3)
+            ->setMinPending(10)
+            ->setMinAckPending(5)
+            ->setMaxBytes(65536)
+            ->setNoWait(true)
+            ->handle(static function (): void {})->await();
+
+        $pullWrites = array_values(array_filter(
+            $transport->writes,
+            static fn(string $w): bool => str_contains($w, 'CONSUMER.MSG.NEXT'),
+        ));
+
+        self::assertNotEmpty($pullWrites, 'At least one pull request must have been issued');
+        $firstPull = $pullWrites[0];
+
+        // Each buildPull() branch must appear in the JSON payload.
+        self::assertStringContainsString('"priority":3', $firstPull);
+        self::assertStringContainsString('"min_pending":10', $firstPull);
+        self::assertStringContainsString('"min_ack_pending":5', $firstPull);
+        self::assertStringContainsString('"max_bytes":65536', $firstPull);
+        self::assertStringContainsString('"no_wait":true', $firstPull);
+    }
+
+    /**
+     * Covers lines 372, 376, 380, 384, 388 negative path: when the optional fields are NOT set,
+     * they must be absent from the pull payload.
+     */
+    public function testBuildPullOmitsUnsetOptionalFields(): void
+    {
+        $body = 'order-y';
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            $this->jsMsg('_INBOX.JS.FETCH.any', $body, '$JS.ACK.ORDERS.PROC.1.1.1.123.0'),
+            sprintf("HMSG _INBOX.JS.FETCH.any 2 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // No optional fields set.
+        $client->jetStream()
+            ->pullConsumer('ORDERS', 'PROC')
+            ->setBatching(1)
+            ->setExpiresMs(500)
+            ->setIterations(2)
+            ->handle(static function (): void {})->await();
+
+        $pullWrites = array_values(array_filter(
+            $transport->writes,
+            static fn(string $w): bool => str_contains($w, 'CONSUMER.MSG.NEXT'),
+        ));
+
+        self::assertNotEmpty($pullWrites);
+        $firstPull = $pullWrites[0];
+
+        self::assertStringNotContainsString('"priority"', $firstPull);
+        self::assertStringNotContainsString('"min_pending"', $firstPull);
+        self::assertStringNotContainsString('"min_ack_pending"', $firstPull);
+        self::assertStringNotContainsString('"max_bytes"', $firstPull);
+        self::assertStringNotContainsString('"no_wait"', $firstPull);
+    }
+
+    // ── stop() / drain() / resetLifecycle() re-use tests ─────────────────────────────────────────
+
+    /**
+     * Covers resetLifecycle(): a reused iterator whose stop() was called in the first run must
+     * NOT be pre-stopped during a second handle() call.
+     *
+     * SID note: each fetchBatch() subscribe() increments nextSid. First handle() = SID 1, second = SID 2.
+     */
+    public function testReusedIteratorAfterStopStartsFresh(): void
+    {
+        $body = 'fresh-msg';
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // First run (SID 1): deliver 2 msgs concatenated; handler stops after the first.
+            $this->jsMsg('_INBOX.JS.FETCH.any', 'm1', '$JS.ACK.S.C.1.1.1.0.0')
+                . $this->jsMsg('_INBOX.JS.FETCH.any', 'm2', '$JS.ACK.S.C.1.2.2.0.0'),
+            // Second run (SID 2): deliver 1 msg, then 404 to stop.
+            sprintf("MSG _INBOX.JS.FETCH.any 2 \$JS.ACK.S.C.2.1.1.0.0 %d\r\n%s\r\n", strlen($body), $body),
+            sprintf("HMSG _INBOX.JS.FETCH.any 2 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $iter = $client->jetStream()
+            ->pullConsumer('S', 'C')
+            ->setBatching(2)
+            ->setExpiresMs(200)
+            ->setIterations(1);
+
+        // First run: stop inside handler; only 1 message processed (m2 abandoned).
+        $firstRun = [];
+        $iter->handle(function (NatsMessage $msg) use (&$firstRun, $iter): void {
+            $firstRun[] = $msg->payload;
+            $iter->stop();
+        })->await();
+        self::assertSame(['m1'], $firstRun);
+
+        // Second run: stop flag must be cleared by resetLifecycle(). 1 message + 404 stop.
+        $secondRun = [];
+        $iter->handle(function (NatsMessage $msg) use (&$secondRun): void {
+            $secondRun[] = $msg->payload;
+        })->await();
+        self::assertSame([$body], $secondRun);
+    }
+
+    /**
+     * Covers resetLifecycle(): a reused iterator whose drain() was called in the first run must
+     * NOT be pre-drained during a second handle() call.
+     *
+     * SID note: each fetchBatch() subscribe() increments nextSid. First handle() = SID 1, second = SID 2.
+     */
+    public function testReusedIteratorAfterDrainStartsFresh(): void
+    {
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // First run (SID 1): one message; handler drains, batch finishes, no second pull.
+            sprintf("MSG _INBOX.JS.FETCH.any 1 \$JS.ACK.S.C.1.1.1.0.0 %d\r\n%s\r\n", strlen('run1'), 'run1'),
+            // Second run (SID 2): one message then 404 stop.
+            sprintf("MSG _INBOX.JS.FETCH.any 2 \$JS.ACK.S.C.2.1.1.0.0 %d\r\n%s\r\n", strlen('run2'), 'run2'),
+            sprintf("HMSG _INBOX.JS.FETCH.any 2 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $iter = $client->jetStream()
+            ->pullConsumer('S', 'C')
+            ->setBatching(1)
+            ->setExpiresMs(200)
+            ->setIterations(1);
+
+        // First run: drain during the only message.
+        $firstRun = [];
+        $iter->handle(function (NatsMessage $msg) use (&$firstRun, $iter): void {
+            $firstRun[] = $msg->payload;
+            $iter->drain();
+        })->await();
+        self::assertSame(['run1'], $firstRun);
+
+        // Second run: drain flag must be reset; the iterator must poll again.
+        $secondRun = [];
+        $iter->handle(function (NatsMessage $msg) use (&$secondRun): void {
+            $secondRun[] = $msg->payload;
+        })->await();
+        self::assertSame(['run2'], $secondRun);
+    }
+
+    /**
+     * Covers the onError path with a 408 (request timeout): routine empty window, must NOT fire onError.
+     */
+    public function testOnErrorNotFiredOnRoutine408(): void
+    {
+        $statusHeaders = "NATS/1.0 408 Request Timeout\r\nStatus: 408\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fired = false;
+        $client->jetStream()
+            ->pullConsumer('STREAM', 'CONS')
+            ->setBatching(1)
+            ->setExpiresMs(200)
+            ->setIterations(1)
+            ->setOnError(static function (JetStreamException $e) use (&$fired): void {
+                $fired = true;
+            })
+            ->handle(static function (): void {})->await();
+
+        self::assertFalse($fired, 'A routine 408 timeout must not trigger onError');
+    }
+
     /**
      * Verifies a stale-pin (423) status drops the pin id and re-pulls without it, capturing the new
      * pin id from the next delivery (issue #7).

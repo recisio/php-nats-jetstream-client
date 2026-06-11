@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Unit;
 
+use IDCT\NATS\Auth\NkeySeedSigner;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Protocol\ProtocolCodec;
@@ -303,5 +304,131 @@ final class ProtocolCodecTest extends TestCase
         $this->expectExceptionMessage('NKey authentication requires server nonce from INFO');
 
         $codec->encodeConnect($options);
+    }
+
+    /**
+     * Verifies JWT auth with a valid signer but a null nonce throws (line 74).
+     *
+     * The existing testEncodeConnectJwtRequiresSignerAndNonce covers the missing-signer
+     * path (line 70). This test covers the complementary branch: signer is present but
+     * the server nonce is null.
+     */
+    public function testEncodeConnectJwtWithSignerButNullNonceThrows(): void
+    {
+        $codec = new ProtocolCodec();
+        $options = new NatsOptions(
+            jwt: 'jwt-value',
+            nonceSigner: new FixedNonceSigner('sig:'),
+        );
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('JWT authentication requires server nonce from INFO');
+
+        $codec->encodeConnect($options, null);
+    }
+
+    /**
+     * Verifies JWT auth with a valid signer but an empty-string nonce throws (line 74).
+     */
+    public function testEncodeConnectJwtWithSignerButEmptyNonceThrows(): void
+    {
+        $codec = new ProtocolCodec();
+        $options = new NatsOptions(
+            jwt: 'jwt-value',
+            nonceSigner: new FixedNonceSigner('sig:'),
+        );
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('JWT authentication requires server nonce from INFO');
+
+        $codec->encodeConnect($options, '');
+    }
+
+    /**
+     * Verifies that configuring an NKey that does not match the public key derived from the
+     * NkeySeedSigner seed throws (line 104).
+     *
+     * The mismatch guard fires regardless of whether JWT is also set; here we use the JWT
+     * path so both jwt and nkey are present in the payload and the seed-signer check runs.
+     */
+    public function testEncodeConnectNkeyMismatchWithSeedSignerThrows(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        // Known-good seed whose public key is UDXU4RCSJNZOIQHZNWXHXORDPRTGNJAHAHFRGZNEEJCPQTT2M7NLCNF4.
+        $signer = new NkeySeedSigner('SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY');
+
+        $codec = new ProtocolCodec();
+        $options = new NatsOptions(
+            jwt: 'jwt-value',
+            // Intentionally wrong public key — does not match the seed above.
+            nkey: 'UABC123WRONGKEY',
+            nonceSigner: $signer,
+        );
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Configured nkey does not match the public key derived from the NKey seed');
+
+        $codec->encodeConnect($options, 'server-nonce');
+    }
+
+    /**
+     * Verifies that decodeInfoLine throws when the line does not start with 'INFO ' (line 240).
+     */
+    public function testDecodeInfoLineThrowsOnNonInfoPrefix(): void
+    {
+        $codec = new ProtocolCodec();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Expected INFO line from server');
+
+        $codec->decodeInfoLine('PING\r\n');
+    }
+
+    /**
+     * Verifies that a bare 'INFO' line without a trailing space throws the prefix error (line 240).
+     *
+     * NOTE: The "INFO payload cannot be empty" guard at line 246 is structurally unreachable:
+     * trim() strips trailing whitespace, so any trimmed line that passes the str_starts_with(…, 'INFO ')
+     * check must contain at least one non-whitespace character after position 5, making substr(…, 5)
+     * always non-empty. This test documents the reachable boundary instead.
+     */
+    public function testDecodeInfoLineThrowsOnBareInfoWithoutSpace(): void
+    {
+        $codec = new ProtocolCodec();
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Expected INFO line from server');
+
+        $codec->decodeInfoLine('INFO');
+    }
+
+    /**
+     * Verifies the happy path of decodeInfoLine returns the correct command and raw payload string.
+     */
+    public function testDecodeInfoLineReturnsCommandAndPayload(): void
+    {
+        $codec = new ProtocolCodec();
+
+        $result = $codec->decodeInfoLine('INFO {"server_id":"X"}');
+
+        self::assertSame('INFO', $result['command']);
+        self::assertSame('{"server_id":"X"}', $result['payload']);
+    }
+
+    /**
+     * Verifies decodeInfoLine trims surrounding whitespace before checking the prefix,
+     * so a line ending with CRLF is handled correctly.
+     */
+    public function testDecodeInfoLineTrimsWhitespace(): void
+    {
+        $codec = new ProtocolCodec();
+
+        $result = $codec->decodeInfoLine("INFO {\"server_id\":\"Y\"}\r\n");
+
+        self::assertSame('INFO', $result['command']);
+        self::assertSame('{"server_id":"Y"}', $result['payload']);
     }
 }

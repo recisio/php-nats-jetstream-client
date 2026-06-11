@@ -155,4 +155,118 @@ final class WebSocketFrameCodecTest extends TestCase
         $this->expectException(ProtocolException::class);
         WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_BINARY, 'x', true, 'AB');
     }
+
+    /**
+     * Verifies encode() uses a 64-bit length header for payloads > 65535 bytes (line 51),
+     * and that decode() correctly reassembles the same frame (lines 104-106).
+     */
+    public function testEncode64BitLengthFrameRoundTrips(): void
+    {
+        // Payload is 65536 bytes — exactly one past the 16-bit threshold.
+        $payload = str_repeat('A', 65536);
+        $encoded = WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_BINARY, $payload, false);
+
+        // Byte 1 must carry the 127 length marker (no mask bit since mask=false).
+        self::assertSame(127, ord($encoded[1]) & 0x7F);
+        // The 8-byte big-endian length starting at offset 2 must equal 65536.
+        /** @var array{1:int} $unpacked */
+        $unpacked = unpack('J', substr($encoded, 2, 8));
+        self::assertSame(65536, $unpacked[1]);
+
+        // Decode must reconstruct the original payload from the 64-bit-length frame.
+        $buffer = $encoded;
+        $frames = WebSocketFrameCodec::decode($buffer);
+        self::assertCount(1, $frames);
+        self::assertSame($payload, $frames[0]['payload']);
+        self::assertSame('', $buffer);
+    }
+
+    /**
+     * Verifies decode() halts and preserves the buffer when a 64-bit length header is incomplete
+     * (lines 100-101): the first 2 bytes say length=127 but fewer than 10 bytes are available.
+     */
+    public function testDecode64BitLengthHeaderIncompleteWaits(): void
+    {
+        // 2-byte frame header with length marker 127, then only 3 of the required 8 length bytes.
+        // decode() needs at least offset(2) + 8 = 10 bytes to read the 64-bit length, so 5 bytes
+        // is not enough and the loop must break without consuming anything.
+        $buffer = pack('CC', 0x82, 127) . str_repeat("\x00", 3);
+        $original = $buffer;
+
+        $frames = WebSocketFrameCodec::decode($buffer);
+
+        self::assertSame([], $frames, 'No complete frame should be decoded');
+        self::assertSame($original, $buffer, 'Buffer must be left unchanged when header is incomplete');
+    }
+
+    /**
+     * Verifies decode() halts and preserves the buffer when a 16-bit length header is incomplete
+     * (line 93): the first 2 bytes say length=126 but only one of the two length bytes is present.
+     */
+    public function testDecode16BitLengthHeaderIncompleteWaits(): void
+    {
+        // 2-byte frame header with length marker 126, then only 1 byte of the 2-byte length field.
+        $buffer = pack('CC', 0x82, 126) . "\x01";
+        $original = $buffer;
+
+        $frames = WebSocketFrameCodec::decode($buffer);
+
+        self::assertSame([], $frames, 'No complete frame should be decoded');
+        self::assertSame($original, $buffer, 'Buffer must not be consumed when 16-bit length is incomplete');
+    }
+
+    /**
+     * Verifies decode() throws when the declared payload length exceeds MAX_FRAME_PAYLOAD (line 110).
+     * We craft a 64-bit-length frame header with a length value of 64 MiB + 1.
+     */
+    public function testDecodePayloadLengthOutOfBoundsThrows(): void
+    {
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessageMatches('/payload length out of bounds/');
+
+        // MAX_FRAME_PAYLOAD is 64 * 1024 * 1024 = 67108864. Use one byte over.
+        $tooLarge = 64 * 1024 * 1024 + 1;
+        // FIN+binary, 64-bit length marker, 8-byte big-endian length (no payload needed — decode
+        // throws before trying to read the payload).
+        $buffer = pack('CC', 0x82, 127) . pack('J', $tooLarge);
+
+        WebSocketFrameCodec::decode($buffer);
+    }
+
+    /**
+     * Verifies decode() halts and preserves the buffer when a masked frame has a complete header
+     * but its 4-byte mask key is not yet fully buffered (lines 115-116).
+     */
+    public function testDecodeMaskedFrameWaitsForMaskKey(): void
+    {
+        // Craft a masked frame: FIN+binary, mask bit set, 7-bit length = 5.
+        // Full frame would be: 2 header + 4 mask key + 5 payload = 11 bytes.
+        // Provide header + only 2 of the 4 mask key bytes — not enough.
+        $buffer = pack('CC', 0x82, 0x80 | 5) . "\xAB\xCD";
+        $original = $buffer;
+
+        $frames = WebSocketFrameCodec::decode($buffer);
+
+        self::assertSame([], $frames, 'No frame decoded when mask key is incomplete');
+        self::assertSame($original, $buffer, 'Buffer unchanged when mask key bytes are missing');
+    }
+
+    /**
+     * Verifies inflate() throws a ProtocolException when the input is not valid DEFLATE data (line 175).
+     *
+     * PHPUnit's error handler is disabled so that the native PHP E_WARNING emitted by inflate_add()
+     * on a corrupt stream does not short-circuit into a test error; the ProtocolException thrown
+     * immediately after is what the test actually asserts.
+     */
+    #[\PHPUnit\Framework\Attributes\WithoutErrorHandler]
+    public function testInflateInvalidDataThrows(): void
+    {
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessageMatches('/inflate compressed WebSocket frame/');
+
+        // Pass data that is definitely not a valid raw DEFLATE stream.
+        // inflate() appends \x00\x00\xff\xff before calling inflate_add; even so, this garbage
+        // is not valid and inflate_add returns false, triggering the ProtocolException.
+        WebSocketFrameCodec::inflate('this is not compressed data at all !!!!!!');
+    }
 }
