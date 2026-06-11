@@ -63,6 +63,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Republish and Subject Transform](#republish-and-subject-transform)
 - [Compatibility Mapping](#compatibility-mapping)
 - [Behavior Notes](#behavior-notes)
+- [Production Notes and Limitations](#production-notes-and-limitations)
 - [Configuration Option Mapping](#configuration-option-mapping)
 - [Performance Benchmark Recipe](#performance-benchmark-recipe)
 - [Testing](#testing)
@@ -212,7 +213,7 @@ $tlsClient = new NatsClient(new NatsOptions(
 
 ### Connect and Publish/Subscribe
 
-_Verified by: [NatsClientTest::testClientSubscribeAndProcessIncoming](tests/Unit/NatsClientTest.php); [features/core/connection.feature](features/core/connection.feature)._
+_Verified by: [NatsClientTest::testClientSubscribeAndProcessIncoming](tests/Unit/NatsClientTest.php); [NatsClientIntegrationTest::testFlushRoundTripConfirmsServerProcessing](tests/Integration/NatsClientIntegrationTest.php) (`flush()` round-trip); [features/core/connection.feature](features/core/connection.feature)._
 
 ```php
 <?php
@@ -447,7 +448,7 @@ $client->disconnect()->await();
 
 ### Polling Subscribe (SubscriptionQueue)
 
-_Verified by: [SubscriptionQueueTest](tests/Unit/SubscriptionQueueTest.php) (`fetch`/`next`/`fetchAll`/`setTimeout`); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
+_Verified by: [SubscriptionQueueTest](tests/Unit/SubscriptionQueueTest.php) (`fetch`/`next`/`fetchAll`/`setTimeout`); [NatsClientIntegrationTest::testSubscriptionQueuePollingDeliversLive](tests/Integration/NatsClientIntegrationTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
 ```php
 <?php
@@ -1346,7 +1347,7 @@ The client also applies asynchronous `INFO` updates received after connect, so `
 
 ### Heartbeat and Request Timeouts
 
-_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testIdleConnectionStaysOpenViaHeartbeatSelfRead`, `testHeartbeatReadHandlesEmptyErrorAndFatalFrames`, `testRequestTimeoutCancelsReadAndAllowsSubsequentRequest`)._
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testIdleConnectionStaysOpenViaHeartbeatSelfRead`, `testHeartbeatReadHandlesEmptyErrorAndFatalFrames`, `testRequestTimeoutCancelsReadAndAllowsSubsequentRequest`); live: [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testIdleConnectionStaysOpenViaHeartbeat`, `testRequestTimeoutDoesNotPoisonConnection`, `testMaxPingsOutTriggersReconnect`)._
 
 The heartbeat timer answers its own `PONG`: after sending a `PING` it performs a short, bounded read to consume the reply (unless an application `processIncoming()` read is already in flight). Liveness detection therefore does not depend on the application continuously calling `processIncoming()`, so an otherwise idle connection (for example a pure publisher) is not closed by spurious `maxPingsOut` detection. Only an actual server `PONG` resets the outstanding-ping counter — other inbound frames (data, `INFO`, `PING`) do not — so a server that keeps sending data but stops answering `PING`s is still detected via `maxPingsOut`.
 
@@ -1354,7 +1355,7 @@ Request and pull-fetch timeouts cancel the underlying socket read rather than le
 
 ### Reconnect Behavior
 
-_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testBackoffDelayIsExponential`, `testConnectRotatesServersOnReconnectAttempts`, `testReconnectRetriesWhenResubscribeGetsFatalServerError`)._
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testBackoffDelayIsExponential`, `testConnectRotatesServersOnReconnectAttempts`, `testReconnectRetriesWhenResubscribeGetsFatalServerError`); live: [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testReconnectAfterTransportLossReplaysSubscriptions`, `testReconnectBackoffDelayProgression`, `testReconnectAttemptsExhaustedReturnsClosed`)._
 
 When a connection drops and `reconnectEnabled` is `true`:
 
@@ -1373,6 +1374,16 @@ The initial handshake is bounded by `connectTimeoutMs`, not by a fixed number of
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testSubscribeOrderedConsumerRecreatesOnSequenceGap`, `testSubscribeOrderedConsumerDeliversFilteredMessagesWithoutSpuriousRecreate`); [JetStreamIntegrationTest::testJetStreamOrderedConsumerWithFilteredSubjectAfterPriorMessages](tests/Integration/JetStreamIntegrationTest.php)._
 
 `subscribeOrderedConsumer()` tracks the JetStream **consumer** delivery sequence (which is contiguous per delivery, even for a filtered consumer over a stream that also carries non-matching subjects). If a push is missed — the consumer sequence skips — the consumer is transparently deleted and recreated starting just after the last in-order message; the out-of-order message that exposed the gap is **discarded** (not forwarded), and the recreated consumer replays the missing range in order. Delivery to your callback therefore stays in order and gap-free, with no duplicates and no recreate storm. If the restart point has been pruned/expired, recovery resumes from the next available message. If the recreate itself fails (for example the stream was deleted or a leadership change is in progress), the error is contained to this ordered consumer rather than disrupting delivery to other subscriptions on the connection.
+
+## Production Notes and Limitations
+
+- **Runtime requirements.** PHP 8.2+ with the `sockets` extension, on the async runtime `amphp/amp ^3.1` and `amphp/socket ^2.3`. The library is async-first; it does not require Swoole/ReactPHP.
+- **Concurrency model.** Message delivery, request replies, and JetStream pull/push consumption are driven by reads. An application must run a `processIncoming()` loop (directly, or indirectly via helpers such as `request()`, `flush()`, `SubscriptionQueue::next()`, or the consumer iterators, which pump it for you) for callbacks to fire. An idle, publisher-only connection stays alive on its own because the heartbeat timer self-reads `PONG`s — see [Heartbeat and Request Timeouts](#heartbeat-and-request-timeouts).
+- **One connection per fiber/process boundary.** A `NatsConnection` serializes its writes and owns a single socket read; share a connection within a coroutine tree, not across independent concurrent readers.
+- **Interoperability.** KeyValue and Object Store buckets use the official NATS layouts (`KV_`/`OBJ_` streams, base64url object-name encoding, `SHA-256=`-prefixed base64url digests), so buckets written by this client are readable by the `nats` CLI and other official clients, and vice-versa.
+- **Observability.** Pass a PSR-3 `LoggerInterface` via `new NatsOptions(logger: $logger)` to capture lifecycle events (connect, disconnect, reconnect, close, server discovery, lame-duck), per-attempt reconnect/backoff, and async errors. It defaults to a `NullLogger`. _Verified by: [NatsConnectionTest::testLoggerCapturesLifecycleEvents](tests/Unit/NatsConnectionTest.php)._
+- **Server version requirements.** Newer features (per-message TTL, atomic batch publish, scheduled publish, priority groups, counters, batched Direct Get) require recent NATS servers — see [NATS Server Version Requirements](#nats-server-version-requirements).
+- **Not yet implemented.** A dedicated high-throughput fast-ingest batch publisher ([#12](https://github.com/ideaconnect/php-nats-jetstream-client/issues/12)) is tracked but blocked on an upstream reference; standard JetStream publish with in-flight pipelining is available today and is sufficient for most workloads.
 
 ## Configuration Option Mapping
 

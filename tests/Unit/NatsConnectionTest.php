@@ -1958,6 +1958,35 @@ final class NatsConnectionTest extends TestCase
         self::assertSame(['start:A', 'end:A', 'start:B', 'end:B'], $log);
     }
 
+    /**
+     * Verifies an injected PSR-3 logger records connection lifecycle events (#69).
+     */
+    public function testLoggerCapturesLifecycleEvents(): void
+    {
+        $logger = new class extends \Psr\Log\AbstractLogger {
+            /** @var list<array{level:string,message:string}> */
+            public array $records = [];
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->records[] = ['level' => (string) $level, 'message' => (string) $message];
+            }
+        };
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, logger: $logger), $transport);
+        $connection->connect()->await();
+        $connection->disconnect()->await();
+
+        $messages = array_column($logger->records, 'message');
+        self::assertContains('NATS connection Connected', $messages);
+        self::assertContains('NATS connection Closed', $messages);
+    }
+
     public function testFlushSendsPingAndResolvesOnPong(): void
     {
         $transport = new FakeTransport([

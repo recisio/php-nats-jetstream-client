@@ -29,6 +29,8 @@ use IDCT\NATS\Protocol\ServerInfo;
 use IDCT\NATS\Transport\TlsAwareTransportInterface;
 use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Revolt\EventLoop;
 use SplQueue;
 
@@ -109,6 +111,9 @@ final class NatsConnection
      */
     private readonly array $orderedServers;
 
+    /** Structured logger for lifecycle/error events; NullLogger when none is configured (#69). */
+    private readonly LoggerInterface $logger;
+
     /**
      * Creates a connection runtime with transport and protocol dependencies.
      *
@@ -129,6 +134,7 @@ final class NatsConnection
             shuffle($servers);
         }
         $this->orderedServers = $servers;
+        $this->logger = $this->options->logger ?? new NullLogger();
 
         $this->messageResponder = fn(string $subject, string $payload, ?array $headers): Future => $headers === null
                 ? $this->publish($subject, $payload)
@@ -1203,6 +1209,10 @@ final class NatsConnection
             } catch (\Throwable $e) {
                 $lastError = $e;
                 $delayMs = $this->backoffDelayMs($attempt);
+                $this->logger->warning(
+                    sprintf('NATS reconnect attempt %d/%d failed; retrying in %dms', $attempt, $maxAttempts, $delayMs),
+                    ['attempt' => $attempt, 'maxAttempts' => $maxAttempts, 'delayMs' => $delayMs, 'exception' => $e],
+                );
                 delay($delayMs / 1000);
             }
         }
@@ -1515,9 +1525,9 @@ final class NatsConnection
         if ($queue->count() >= $limit) {
             if ($this->options->slowConsumerPolicy === SlowConsumerPolicy::DropOldest) {
                 $queue->dequeue();
-                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped oldest message'));
+                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped oldest message'), 'debug');
             } elseif ($this->options->slowConsumerPolicy === SlowConsumerPolicy::DropNewest) {
-                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped newest message'));
+                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped newest message'), 'debug');
 
                 return;
             } else {
@@ -1738,6 +1748,13 @@ final class NatsConnection
      */
     private function emitEvent(ConnectionEvent $event, ?\Throwable $error = null): void
     {
+        // Log every lifecycle transition regardless of whether a connection listener is configured (#69).
+        if ($error !== null) {
+            $this->logger->warning('NATS connection ' . $event->name, ['event' => $event->name, 'exception' => $error]);
+        } else {
+            $this->logger->info('NATS connection ' . $event->name, ['event' => $event->name]);
+        }
+
         $listener = $this->options->connectionListener;
         if ($listener === null) {
             return;
@@ -1753,8 +1770,13 @@ final class NatsConnection
     /**
      * Invokes the configured asynchronous-error listener, swallowing any exception it raises.
      */
-    private function emitError(\Throwable $error): void
+    private function emitError(\Throwable $error, string $logLevel = 'error'): void
     {
+        // Routine, high-frequency conditions (slow-consumer drops) log at debug so they cannot flood
+        // error logs on a per-message hot path; genuine errors stay at error level. The error listener
+        // is always notified regardless of level (callers opted in and can throttle themselves).
+        $this->logger->log($logLevel, 'NATS connection error: ' . $error->getMessage(), ['exception' => $error]);
+
         $listener = $this->options->errorListener;
         if ($listener === null) {
             return;

@@ -11,7 +11,28 @@ on:
         default: "2"
 
 jobs:
-  validate:
+  unit:
+    name: Unit + Static (PHP ${{ matrix.php-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The package targets php ^8.2 — verify unit + static analysis on every supported minor.
+        php-version: ["8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: sockets
+      - uses: ramsey/composer-install@v3
+      - name: Static Analysis
+        run: composer stan
+      - name: Unit Tests
+        run: composer test:unit
+
+  e2e:
+    name: E2E + Coverage (PHP 8.5)
     runs-on: ubuntu-latest
     env:
       NATS_WAIT_TIMEOUT_SECONDS: "120"
@@ -26,10 +47,6 @@ jobs:
       - uses: ramsey/composer-install@v3
       - name: JWT Fixtures
         run: composer fixture:jwt
-      - name: Static Analysis
-        run: composer stan
-      - name: Unit Tests
-        run: composer test:unit
       - name: End-to-End Tests
         run: composer test:e2e
         env:
@@ -38,6 +55,10 @@ jobs:
         # Combined unit + integration coverage (against the stack kept up above) so that
         # integration-only code (TLS upgrade, Object Store download, etc.) is counted.
         run: composer coverage:clover:all
+      - name: Enforce Coverage Threshold
+        # Reuses the clover report above (no extra test run); threshold is defined in composer.json
+        # (coverage:check:clover) and currently fails the build below 89% (a ratchet on ~89.6%).
+        run: composer coverage:check:clover
       - name: Stop NATS services
         if: always()
         run: docker compose down
