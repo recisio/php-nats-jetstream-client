@@ -72,6 +72,17 @@ final class NatsOptions
       * @param ClientTlsContext|null $tlsContext Escape hatch: a pre-built Amp TLS context used verbatim
       *        for the handshake (in-memory PEM material, ALPN, custom verification, ...), overriding the
       *        individual tls* options. When set, the connection is treated as TLS-required.
+      * @param bool $randomizeServers Shuffle the configured server pool once at construction so a fleet
+      *        of clients spreads its initial connections across the cluster (no-randomize is the default,
+      *        preserving the configured order).
+      * @param bool $retryOnFailedInitialConnect Retry the very first connection (up to
+      *        maxReconnectAttempts, with backoff) when it fails, even if {@see $reconnectEnabled} is off.
+      *        With reconnect enabled the initial connect already retries; this decouples "try hard to
+      *        connect once" from "reconnect forever after".
+      * @param array<string,string> $webSocketHeaders Extra HTTP headers added to the WebSocket upgrade
+      *        request (e.g. cookies, proxy auth) — used by {@see \IDCT\NATS\Transport\WebSocketTransport}.
+      * @param bool $webSocketCompression Request permessage-deflate compression on the WebSocket
+      *        connection; payloads are (de)compressed only when the server agrees in the handshake.
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -111,6 +122,10 @@ final class NatsOptions
         public readonly ?\Closure $tokenProvider = null,
         public readonly int $reconnectBufferSize = 8_388_608,
         public readonly ?ClientTlsContext $tlsContext = null,
+        public readonly bool $randomizeServers = false,
+        public readonly bool $retryOnFailedInitialConnect = false,
+        public readonly array $webSocketHeaders = [],
+        public readonly bool $webSocketCompression = false,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

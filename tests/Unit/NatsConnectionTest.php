@@ -1000,6 +1000,95 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies randomizeServers=false dials the configured pool in order (#55).
+     */
+    public function testServerPoolPreservesOrderWithoutRandomize(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(servers: ['nats://127.0.0.1:4001', 'nats://127.0.0.1:4002', 'nats://127.0.0.1:4003']),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertSame('tcp://127.0.0.1:4001|5000', $transport->connectCalls[0]);
+    }
+
+    /**
+     * Verifies randomizeServers=true still dials a member of the configured pool (#55).
+     */
+    public function testRandomizeServersDialsFromPool(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                servers: ['nats://127.0.0.1:4001', 'nats://127.0.0.1:4002', 'nats://127.0.0.1:4003'],
+                randomizeServers: true,
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertContains($transport->connectCalls[0], [
+            'tcp://127.0.0.1:4001|5000',
+            'tcp://127.0.0.1:4002|5000',
+            'tcp://127.0.0.1:4003|5000',
+        ]);
+    }
+
+    /**
+     * Verifies retryOnFailedInitialConnect retries the first connect (reconnect disabled) until it succeeds (#56).
+     */
+    public function testRetryOnFailedInitialConnectSucceedsAfterRetry(): void
+    {
+        $transport = new FlakyTransport([
+            ['INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n", "PONG\r\n"],
+        ], connectFailures: 1);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: false,
+                retryOnFailedInitialConnect: true,
+                maxReconnectAttempts: 3,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+            ),
+            $transport,
+        );
+
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertGreaterThanOrEqual(2, count($transport->connectCalls));
+    }
+
+    /**
+     * Verifies a failed first connect throws when retryOnFailedInitialConnect is off and reconnect is off (#56).
+     */
+    public function testFailedInitialConnectThrowsWithoutRetryOption(): void
+    {
+        $transport = new FlakyTransport([
+            ['INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n", "PONG\r\n"],
+        ], connectFailures: 1);
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false, retryOnFailedInitialConnect: false),
+            $transport,
+        );
+
+        $this->expectException(ConnectionException::class);
+        $connection->connect()->await();
+    }
+
+    /**
      * Verifies credentials embedded in the server URL are applied to CONNECT and stripped from the dial (#37).
      */
     public function testConnectExtractsUrlCredentials(): void

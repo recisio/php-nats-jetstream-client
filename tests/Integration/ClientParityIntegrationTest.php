@@ -507,6 +507,31 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #60 — KV and Object Store bucket discovery lists created buckets.
+     */
+    public function testBucketDiscovery(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $kvName = 'disc' . strtolower(bin2hex(random_bytes(2)));
+        $osName = 'disc' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $js = $client->jetStream();
+
+        $js->keyValue($kvName)->create()->await();
+        $js->objectStore($osName)->create()->await();
+
+        self::assertContains($kvName, $js->keyValueBucketNames()->await());
+        self::assertContains($osName, $js->objectStoreBucketNames()->await());
+        // KV discovery must not list the object-store bucket and vice versa.
+        self::assertNotContains($osName, $js->keyValueBucketNames()->await());
+
+        $js->keyValue($kvName)->deleteBucket()->await();
+        $js->objectStore($osName)->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #33 + #41 — KV getRevision reads a historical revision and history() returns all revisions.
      */
     public function testKeyValueGetRevisionAndHistory(): void
@@ -532,6 +557,29 @@ final class ClientParityIntegrationTest extends TestCase
         self::assertSame(['red', 'green', 'blue'], array_map(static fn($e): ?string => $e->value, $history));
 
         $kv->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #62 — a KV mirror bucket is created with its mirror pointing at the source bucket's KV_ stream.
+     */
+    public function testKeyValueMirrorBucketConfig(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $primary = 'pri' . strtolower(bin2hex(random_bytes(2)));
+        $replica = 'rep' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $js = $client->jetStream();
+
+        $js->keyValue($primary)->create()->await();
+        $js->keyValue($replica)->create(['mirror' => $primary])->await();
+
+        $stream = $js->getStream('KV_' . $replica)->await();
+        self::assertSame('KV_' . $primary, $stream->raw['config']['mirror']['name'] ?? null);
+
+        $js->keyValue($replica)->deleteBucket()->await();
+        $js->keyValue($primary)->deleteBucket()->await();
         $client->disconnect()->await();
     }
 
@@ -883,6 +931,54 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #58 — an object description is stored and surfaced on ObjectInfo.
+     */
+    public function testObjectStoreDescriptionStored(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'ds' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $put = $store->put('readme.txt', 'hello', [], 'Project readme')->await();
+        self::assertSame('Project readme', $put->description);
+
+        $info = $store->info('readme.txt')->await();
+        self::assertNotNull($info);
+        self::assertSame('Project readme', $info->description);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #59 — get() transparently follows an object link to the target's content.
+     */
+    public function testObjectStoreGetFollowsLink(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'lr' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        $store->put('target.bin', 'the-payload')->await();
+        $store->addLink('shortcut', 'target.bin')->await();
+
+        // get() on the link resolves to the target's bytes.
+        $fetched = $store->get('shortcut')->await();
+        self::assertNotNull($fetched);
+        self::assertSame('the-payload', $fetched->data);
+        self::assertSame('target.bin', $fetched->info->name);
+
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #48 — addLink writes a resolvable link object pointing at a target object.
      */
     public function testObjectStoreAddLink(): void
@@ -984,6 +1080,31 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #57 — the service done handler fires when run() stops.
+     */
+    public function testServiceDoneHandlerFiresWhenRunStops(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.done.' . bin2hex(random_bytes(4));
+        $serviceClient = $this->client();
+
+        $done = false;
+        $service = $serviceClient->service('donesvc', '1.0.0')
+            ->addEndpoint('echo', $subject, static fn(NatsMessage $message): string => 'r', queueGroup: null)
+            ->onDone(static function () use (&$done): void {
+                $done = true;
+            });
+
+        // run() starts, processes for the timeout window, then stops (firing the done handler).
+        $service->run(0.3)->await();
+
+        self::assertTrue($done, 'The done handler must fire when run() stops');
+
+        $serviceClient->disconnect()->await();
+    }
+
+    /**
      * #51 — drain() stops the service serving requests (subsequent requests get no responder).
      */
     public function testServiceDrainStopsServing(): void
@@ -1063,6 +1184,43 @@ final class ClientParityIntegrationTest extends TestCase
         }
 
         self::assertSame(['one'], $delivered);
+
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #61 — WebSocket with permessage-deflate compression + a custom upgrade header round-trips.
+     */
+    public function testWebSocketCompressionAndCustomHeaders(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $options = new NatsOptions(
+            servers: [$this->integrationWsServerUrl()],
+            webSocketCompression: true,
+            webSocketHeaders: ['X-Client' => 'idct-nats'],
+        );
+        $client = new NatsClient($options, new WebSocketTransport($options));
+        $client->connect()->await();
+
+        // A larger, compressible payload exercises the deflate/inflate path.
+        $subject = 'it.wsz.' . bin2hex(random_bytes(4));
+        $payload = str_repeat('compressible-nats-payload ', 100);
+        $received = null;
+        $client->subscribe($subject, static function (NatsMessage $m) use (&$received): void {
+            $received = $m->payload;
+        })->await();
+        $client->publish($subject, $payload)->await();
+
+        $cancellation = new TimeoutCancellation(4.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        self::assertSame($payload, $received);
 
         $client->disconnect()->await();
     }

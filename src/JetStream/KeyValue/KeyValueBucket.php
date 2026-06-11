@@ -57,12 +57,47 @@ final class KeyValueBucket
 
             $mapped = $this->mapKvOptions($options);
 
+            // Mirror/source KV buckets reference other buckets by name; translate them to the backing
+            // `KV_`-prefixed stream names (#62). A mirrored bucket defines no subjects of its own.
+            $subjects = [$this->subjectPrefix() . '>'];
+            if (isset($mapped['mirror'])) {
+                $mapped['mirror'] = $this->kvSourceConfig($mapped['mirror']);
+                $subjects = [];
+            }
+            if (isset($mapped['sources']) && is_array($mapped['sources'])) {
+                $mapped['sources'] = array_values(array_map(
+                    fn(string|array $source): array => $this->kvSourceConfig($source),
+                    $mapped['sources'],
+                ));
+            }
+
             return $this->jetStream->createStream(
                 $this->streamName(),
-                [$this->subjectPrefix() . '>'],
+                $subjects,
                 array_merge($defaults, $mapped),
             )->await();
         });
+    }
+
+    /**
+     * Normalizes a KV mirror/source entry to a stream-source config: a bare bucket name (or a `bucket`
+     * key) becomes the backing `KV_`-prefixed stream name; an explicit `name` is used as-is.
+     *
+     * @param string|array<string,mixed> $source
+     * @return array<string,mixed>
+     */
+    private function kvSourceConfig(string|array $source): array
+    {
+        if (is_string($source)) {
+            return ['name' => 'KV_' . $source];
+        }
+
+        if (isset($source['bucket'])) {
+            $source['name'] = 'KV_' . $source['bucket'];
+            unset($source['bucket']);
+        }
+
+        return $source;
     }
 
     /**
