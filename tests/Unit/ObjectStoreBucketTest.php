@@ -539,6 +539,105 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
+     * Verifies create() accepts a typed ObjectStoreConfig and maps it to stream config (#39).
+     */
+    public function testCreateWithTypedConfig(): void
+    {
+        $reply = '{"config":{"name":"OBJ_assets"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->objectStore('assets')->create(
+            new \IDCT\NATS\JetStream\ObjectStore\ObjectStoreConfig(ttlSeconds: 60, maxBytes: 4096, storage: 'memory', replicas: 3, compression: 's2'),
+        )->await();
+
+        $create = $transport->writes[3];
+        self::assertStringContainsString('$JS.API.STREAM.CREATE.OBJ_assets', $create);
+        self::assertStringContainsString('"max_age":60000000000', $create);
+        self::assertStringContainsString('"max_bytes":4096', $create);
+        self::assertStringContainsString('"storage":"memory"', $create);
+        self::assertStringContainsString('"num_replicas":3', $create);
+        self::assertStringContainsString('"compression":"s2"', $create);
+    }
+
+    /**
+     * Verifies seal() updates the backing stream with sealed=true, preserving existing config (#38).
+     */
+    public function testSeal(): void
+    {
+        $info = '{"config":{"name":"OBJ_assets","subjects":["$O.assets.>"],"max_bytes":1000}}';
+        $updated = '{"config":{"name":"OBJ_assets","sealed":true}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($info), $info),       // STREAM.INFO
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($updated), $updated), // STREAM.UPDATE
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        self::assertTrue($client->jetStream()->objectStore('assets')->seal()->await());
+
+        self::assertStringContainsString('$JS.API.STREAM.UPDATE.OBJ_assets', $transport->writes[6]);
+        self::assertStringContainsString('"sealed":true', $transport->writes[6]);
+        self::assertStringContainsString('"max_bytes":1000', $transport->writes[6]);
+    }
+
+    /**
+     * Verifies addLink() writes a link meta record pointing at a target object (#48).
+     */
+    public function testAddLink(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->pubAck(3)), $this->pubAck(3)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $link = $client->jetStream()->objectStore('assets')->addLink('shortcut', 'real.bin')->await();
+
+        self::assertTrue($link->isLink());
+        self::assertSame(['bucket' => 'assets', 'name' => 'real.bin'], $link->link);
+
+        $write = $transport->writes[3];
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('shortcut') . ' ', $write);
+        self::assertStringContainsString('"link":{"bucket":"assets","name":"real.bin"}', $write);
+    }
+
+    /**
+     * Verifies addBucketLink() writes a link meta record pointing at a whole bucket (#48).
+     */
+    public function testAddBucketLink(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->pubAck(3)), $this->pubAck(3)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $link = $client->jetStream()->objectStore('assets')->addBucketLink('mirror', 'other-bucket')->await();
+
+        self::assertTrue($link->isLink());
+        self::assertSame(['bucket' => 'other-bucket'], $link->link);
+        self::assertStringContainsString('"link":{"bucket":"other-bucket"}', $transport->writes[3]);
+    }
+
+    /**
      * Verifies updateMeta() renames an object without re-upload: preserves the NUID, writes the new
      * meta, and tombstones the old name without purging chunks (#28).
      */

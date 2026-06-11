@@ -180,6 +180,119 @@ final class KeyValueBucketTest extends TestCase
     }
 
     /**
+     * Verifies getRevision returns the entry stored at a specific sequence (#33).
+     */
+    public function testGetRevisionReturnsEntryAtSequence(): void
+    {
+        $reply = '{"message":{"subject":"$KV.cfg.theme","seq":2,"data":"' . base64_encode('blue') . '"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->getRevision('theme', 2)->await();
+
+        self::assertNotNull($entry);
+        self::assertSame('theme', $entry->key);
+        self::assertSame('blue', $entry->value);
+        self::assertSame(2, $entry->revision);
+        self::assertStringContainsString('$JS.API.STREAM.MSG.GET.KV_cfg', $transport->writes[3]);
+        self::assertStringContainsString('"seq":2', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies getRevision returns null when the sequence stores a different key (#33).
+     */
+    public function testGetRevisionReturnsNullForDifferentKey(): void
+    {
+        $reply = '{"message":{"subject":"$KV.cfg.other","seq":2,"data":"' . base64_encode('x') . '"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        self::assertNull($client->jetStream()->keyValue('cfg')->getRevision('theme', 2)->await());
+    }
+
+    /**
+     * Verifies delete() with an expected revision emits the compare-and-delete header (#34).
+     */
+    public function testDeleteWithExpectedRevisionSendsHeader(): void
+    {
+        $ack = '{"stream":"KV_cfg","seq":5,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ack), $ack),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->delete('theme', null, 4)->await();
+
+        self::assertStringStartsWith('HPUB $KV.cfg.theme _INBOX.', $transport->writes[3]);
+        self::assertStringContainsString('KV-Operation:DEL', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:4', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies history() returns an empty list when the key has no stored revisions (#41).
+     */
+    public function testHistoryReturnsEmptyWhenNoPending(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"HIST","num_pending":0,"config":{"deliver_subject":"d","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        self::assertSame([], $client->jetStream()->keyValue('cfg')->history('theme')->await());
+    }
+
+    /**
+     * Verifies history() collects all stored revisions in order, stopping when caught up (#41).
+     */
+    public function testHistoryCollectsAllRevisions(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"HIST","num_pending":2,"config":{"deliver_subject":"d","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            // Two deliveries on the push deliver subject (sid 2); pending counts down to 0.
+            "MSG dlv 2 \$JS.ACK.KV_cfg.HIST.1.5.1.0.1 2\r\nv1\r\n",
+            "MSG dlv 2 \$JS.ACK.KV_cfg.HIST.1.6.2.0.0 2\r\nv2\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $history = $client->jetStream()->keyValue('cfg')->history('theme')->await();
+
+        self::assertCount(2, $history);
+        self::assertSame(['v1', 'v2'], array_map(static fn($e): ?string => $e->value, $history));
+        self::assertSame([5, 6], array_map(static fn($e): ?int => $e->revision, $history));
+    }
+
+    /**
      * Verifies keys() returns the live key names (deleted keys excluded) (#25).
      */
     public function testKeysReturnsLiveKeyNames(): void

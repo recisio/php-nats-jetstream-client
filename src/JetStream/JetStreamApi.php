@@ -25,5 +25,7 @@ final class JetStreamApi
     public const CONSUMER_MSG_NEXT_PREFIX = '$JS.API.CONSUMER.MSG.NEXT.';
     public const STREAM_PURGE_PREFIX = '$JS.API.STREAM.PURGE.';
     public const STREAM_LIST = '$JS.API.STREAM.LIST';
+    public const STREAM_NAMES = '$JS.API.STREAM.NAMES';
+    public const CONSUMER_NAMES_PREFIX = '$JS.API.CONSUMER.NAMES.';
     public const STREAM_DIRECT_GET_PREFIX = '$JS.API.DIRECT.GET.';
 }

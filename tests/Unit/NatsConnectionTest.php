@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Unit;
 
+use Amp\Cancellation;
 use Amp\CancelledException;
 use Amp\DeferredCancellation;
+use Amp\DeferredFuture;
+use Amp\Future;
+use IDCT\NATS\Connection\ConnectionStats;
 use IDCT\NATS\Connection\Enum\ConnectionEvent;
 use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
@@ -19,6 +23,7 @@ use IDCT\NATS\Exception\TimeoutException;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FixedNonceSigner;
 use IDCT\NATS\Tests\Support\FlakyTransport;
+use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
 
@@ -159,7 +164,7 @@ final class NatsConnectionTest extends TestCase
     {
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
-            "-ERR Authentication Violation\r\n",
+            "-ERR Maximum Connections Exceeded\r\n",
         ]);
 
         $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
@@ -168,6 +173,34 @@ final class NatsConnectionTest extends TestCase
         $this->expectExceptionMessage('Server error during connect');
 
         $connection->connect()->await();
+    }
+
+    /**
+     * Verifies an authorization error during connect raises AuthenticationException and is NOT retried (#46).
+     */
+    public function testConnectAuthErrorThrowsAuthenticationExceptionWithoutRetry(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "-ERR Authorization Violation\r\n",
+        ]);
+
+        // Reconnect is ENABLED, yet an auth error must fail fast (a single connect attempt).
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 5),
+            $transport,
+        );
+
+        try {
+            $connection->connect()->await();
+            self::fail('Expected AuthenticationException');
+        } catch (\IDCT\NATS\Exception\AuthenticationException $e) {
+            self::assertStringContainsString('authentication', strtolower($e->getMessage()));
+        }
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        // Exactly one connect attempt was made (CONNECT written once), not maxReconnectAttempts.
+        self::assertSame(1, count(array_filter($transport->writes, static fn(string $w): bool => str_starts_with($w, 'CONNECT '))));
     }
 
     /**
@@ -408,7 +441,8 @@ final class NatsConnectionTest extends TestCase
         ]);
 
         $connection = new NatsConnection(
-            new NatsOptions(connectionListener: static function (ConnectionEvent $e) use (&$events): void {
+            // reconnectEnabled: false isolates event emission from the lame-duck auto-failover (#47).
+            new NatsOptions(reconnectEnabled: false, connectionListener: static function (ConnectionEvent $e) use (&$events): void {
                 $events[] = $e;
             }),
             $transport,
@@ -417,10 +451,11 @@ final class NatsConnectionTest extends TestCase
         $connection->connect()->await();
         $connection->processIncoming()->await();
 
+        // Discovery is applied before lame-duck (so a failover can use freshly-advertised peers).
         self::assertSame([
             ConnectionEvent::Connected,
-            ConnectionEvent::LameDuck,
             ConnectionEvent::DiscoveredServers,
+            ConnectionEvent::LameDuck,
         ], $events);
     }
 
@@ -480,6 +515,195 @@ final class NatsConnectionTest extends TestCase
         self::assertSame(ConnectionState::Open, $connection->state());
         self::assertCount(1, $errors);
         self::assertStringContainsString('recoverable error frame', $errors[0]);
+    }
+
+    /**
+     * Verifies drainSubscription() UNSUBs, flushes, delivers the in-flight message, then drops the sub (#43).
+     */
+    public function testDrainSubscriptionDeliversInFlightThenRemoves(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // The drain flush reads this chunk: an in-flight message for sid 1, then the flush PONG.
+            "MSG updates 1 4\r\nlast\r\nPONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $delivered = [];
+        $sid = $connection->subscribe('updates', static function (NatsMessage $m) use (&$delivered): void {
+            $delivered[] = $m->payload;
+        })->await();
+
+        $connection->drainSubscription($sid)->await();
+
+        self::assertSame(['last'], $delivered);
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('UNSUB ' . $sid . "\r\n", $writes);
+        self::assertStringContainsString("PING\r\n", $writes);
+
+        // The subscription is gone: a further frame for that sid is ignored.
+        self::assertSame(0, $connection->processIncoming()->await());
+    }
+
+    /**
+     * Verifies connection accessors + traffic statistics (#52).
+     */
+    public function testConnectionAccessorsAndStatistics(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG x 1 5\r\nhello\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(servers: ['nats://127.0.0.1:4222']), $transport);
+        $connection->connect()->await();
+
+        self::assertSame('nats://127.0.0.1:4222', $connection->connectedUrl());
+        self::assertSame(1048576, $connection->maxPayload());
+
+        $connection->subscribe('x', static function (NatsMessage $m): void {})->await();
+        $connection->publish('a.b', 'hi')->await();
+        $connection->processIncoming()->await();
+
+        $stats = $connection->statistics();
+        self::assertInstanceOf(ConnectionStats::class, $stats);
+        self::assertSame(1, $stats->outMsgs);
+        self::assertSame(2, $stats->outBytes);
+        self::assertSame(1, $stats->inMsgs);
+        self::assertSame(5, $stats->inBytes);
+
+        $connection->disconnect()->await();
+        self::assertNull($connection->connectedUrl());
+    }
+
+    /**
+     * Verifies rtt() measures a PING/PONG round trip (#52).
+     */
+    public function testRttMeasuresPingPong(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $rtt = $connection->rtt()->await();
+
+        self::assertGreaterThanOrEqual(0.0, $rtt);
+        self::assertLessThan(5.0, $rtt);
+    }
+
+    /**
+     * Verifies discoveredServers() reflects connect_urls from an async INFO (#47).
+     */
+    public function testDiscoveredServersFromAsyncInfo(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            'INFO {"server_id":"S1","version":"2.12.0","max_payload":1048576,"connect_urls":["10.0.0.2:4222","10.0.0.3:4222"]}' . "\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        self::assertSame([], $connection->discoveredServers());
+
+        $connection->processIncoming()->await();
+
+        self::assertSame(['10.0.0.2:4222', '10.0.0.3:4222'], $connection->discoveredServers());
+    }
+
+    /**
+     * Verifies publishes during an in-flight reconnect are buffered and flushed on reconnect (#49).
+     */
+    public function testPublishBuffersDuringReconnectAndFlushesOnReconnect(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+        $release = new DeferredFuture();
+
+        $transport = new class ($info, $release) implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            private int $connects = 0;
+            /** @var list<list<string>> */
+            private array $reads;
+
+            /** @param DeferredFuture<void> $release */
+            public function __construct(string $info, private DeferredFuture $release)
+            {
+                $this->reads = [
+                    [$info, "PONG\r\n", '__EOF__'], // connection 0: handshake, then EOF -> reconnect
+                    [$info, "PONG\r\n"],            // connection 1: reconnect handshake
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function (): void {
+                    // Hold the reconnect (second connect) open so a publish lands mid-reconnect.
+                    if ($this->connects === 1) {
+                        $this->release->getFuture()->await();
+                    }
+                    $this->connects++;
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+                    $next = array_shift($this->reads[$conn]) ?? '';
+                    if ($next === '__EOF__') {
+                        throw new TransportClosedException('eof');
+                    }
+
+                    return $next;
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static fn(): null => null);
+            }
+        };
+
+        $connection = new NatsConnection(new NatsOptions(reconnectDelayMs: 1, reconnectJitterMs: 0), $transport);
+        $connection->connect()->await();
+
+        // Drive the read loop in the background: it reads EOF, starts reconnect, and blocks in connect().
+        $pump = async(static fn(): int => $connection->processIncoming()->await());
+        delay(0.05); // let the reconnect begin and suspend on the held connect()
+
+        self::assertSame(ConnectionState::Connecting, $connection->state());
+        // This publish lands during the reconnect window: it must buffer (not throw).
+        $connection->publish('a.b', 'buffered')->await();
+
+        $release->complete();   // let the reconnect finish
+        $pump->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertContains("PUB a.b 8\r\nbuffered\r\n", $transport->writes);
+        self::assertSame(1, $connection->statistics()->reconnects);
     }
 
     /**
@@ -773,6 +997,31 @@ final class NatsConnectionTest extends TestCase
         $connection->processIncoming()->await();
 
         self::assertSame(['first'], $delivered);
+    }
+
+    /**
+     * Verifies credentials embedded in the server URL are applied to CONNECT and stripped from the dial (#37).
+     */
+    public function testConnectExtractsUrlCredentials(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(servers: ['nats://alice:s3cret@127.0.0.1:4222']),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // The userinfo is stripped from the dialed DSN...
+        self::assertSame('tcp://127.0.0.1:4222|5000', $transport->connectCalls[0]);
+        // ...and applied to the CONNECT payload.
+        $connect = $transport->writes[0];
+        self::assertStringStartsWith('CONNECT ', $connect);
+        self::assertStringContainsString('"user":"alice"', $connect);
+        self::assertStringContainsString('"pass":"s3cret"', $connect);
     }
 
     /**

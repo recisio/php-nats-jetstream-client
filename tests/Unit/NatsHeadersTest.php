@@ -9,6 +9,48 @@ use PHPUnit\Framework\TestCase;
 
 final class NatsHeadersTest extends TestCase
 {
+    /**
+     * Verifies a list header value emits one line per value (multimap encoding, #42).
+     */
+    public function testToWireBlockEmitsRepeatedLinesForListValue(): void
+    {
+        $raw = NatsHeaders::toWireBlock([
+            'Link' => ['a.txt', 'b.txt'],
+            'Nats-Msg-Id' => '1',
+        ]);
+
+        self::assertStringContainsString("Link:a.txt\r\n", $raw);
+        self::assertStringContainsString("Link:b.txt\r\n", $raw);
+        self::assertStringContainsString("Nats-Msg-Id:1\r\n", $raw);
+    }
+
+    /**
+     * Verifies fromWireBlockMulti preserves every value of a repeated header, while fromWireBlock stays
+     * last-value-wins (#42).
+     */
+    public function testFromWireBlockMultiPreservesAllValues(): void
+    {
+        $raw = NatsHeaders::toWireBlock(['Link' => ['a.txt', 'b.txt'], 'Single' => 'one']);
+
+        $multi = NatsHeaders::fromWireBlockMulti($raw);
+        self::assertSame(['a.txt', 'b.txt'], $multi['Link'] ?? null);
+        self::assertSame(['one'], $multi['Single'] ?? null);
+
+        $single = NatsHeaders::fromWireBlock($raw);
+        self::assertSame('b.txt', $single['Link'] ?? null);
+    }
+
+    /**
+     * Verifies fromWireBlockMulti parses the status line into single-element lists (#42).
+     */
+    public function testFromWireBlockMultiParsesStatusLine(): void
+    {
+        $multi = NatsHeaders::fromWireBlockMulti("NATS/1.0 503 No Responders\r\n\r\n");
+
+        self::assertSame(['503'], $multi['Status'] ?? null);
+        self::assertSame(['No Responders'], $multi['Description'] ?? null);
+    }
+
     public function testRoundTripWireEncoding(): void
     {
         $raw = NatsHeaders::toWireBlock([

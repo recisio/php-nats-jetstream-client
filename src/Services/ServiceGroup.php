@@ -25,11 +25,13 @@ final class ServiceGroup
     /**
      * @param callable(NatsMessage):(string|array<string,mixed>|null)|ServiceEndpointHandlerInterface|class-string<ServiceEndpointHandlerInterface>|object $handler
      * @param array<string,mixed>|null $schema
+     * @param array<string,string> $metadata Per-endpoint metadata, forwarded to the underlying endpoint (#40).
+     * @param (callable(ServiceEndpoint):array<string,mixed>)|null $statsHandler Per-endpoint stats supplier, forwarded (#40/#50).
      */
-    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = Service::DEFAULT_QUEUE_GROUP, ?array $schema = null): self
+    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = Service::DEFAULT_QUEUE_GROUP, ?array $schema = null, array $metadata = [], ?callable $statsHandler = null): self
     {
         $fullSubject = $this->joinSubject($this->prefix, $subject);
-        $this->service->addEndpoint($name, $fullSubject, $handler, $queueGroup, $schema);
+        $this->service->addEndpoint($name, $fullSubject, $handler, $queueGroup, $schema, $metadata, $statsHandler);
 
         return $this;
     }

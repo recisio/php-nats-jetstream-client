@@ -159,6 +159,12 @@ final class AmpSocketTransport implements TlsAwareTransportInterface
 
     private function withTlsContext(ConnectContext $context, string $dsn): ConnectContext
     {
+        // Escape hatch: a caller-supplied TLS context is used verbatim (and implies TLS-required), so
+        // advanced setups (in-memory PEM, ALPN, custom verification) bypass option-driven assembly.
+        if ($this->options->tlsContext !== null) {
+            return $context->withTlsContext($this->options->tlsContext);
+        }
+
         $dsnScheme = strtolower((string) (parse_url($dsn, PHP_URL_SCHEME) ?? ''));
         $requiresTls = $this->options->tlsRequired || $dsnScheme === 'tls';
 

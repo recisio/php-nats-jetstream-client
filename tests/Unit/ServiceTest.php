@@ -59,6 +59,76 @@ final class ServiceTest extends TestCase
     }
 
     /**
+     * Verifies a per-endpoint stats supplier merges custom data into STATS (#50).
+     */
+    public function testEndpointStatsHandlerMergesCustomData(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $service = $client->service('metrics', '1.0.0')->addEndpoint(
+            'work',
+            'svc.work',
+            static fn(NatsMessage $message): string => $message->payload,
+            'q',
+            null,
+            [],
+            static fn(\IDCT\NATS\Services\ServiceEndpoint $e): array => ['queue_depth' => 7, 'name' => $e->name],
+        );
+
+        $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
+        self::assertSame(['queue_depth' => 7, 'name' => 'work'], $endpoint['data'] ?? null);
+    }
+
+    /**
+     * Verifies a grouped endpoint forwards metadata and the stats supplier (#40).
+     */
+    public function testGroupedEndpointForwardsMetadataAndStatsHandler(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $service = $client->service('grp', '1.0.0');
+        $service->addGroup('v1')->addEndpoint(
+            'work',
+            'work',
+            static fn(NatsMessage $message): string => $message->payload,
+            'q',
+            null,
+            ['team' => 'core'],
+            static fn(\IDCT\NATS\Services\ServiceEndpoint $e): array => ['ok' => true],
+        );
+
+        $endpoint = $service->statsSnapshot()['endpoints'][0] ?? [];
+        self::assertSame('v1.work', $endpoint['subject'] ?? null);
+        self::assertSame(['ok' => true], $endpoint['data'] ?? null);
+    }
+
+    /**
+     * Verifies drain() unsubscribes endpoints and flushes, leaving the service stoppable/restartable (#51).
+     */
+    public function testDrainUnsubscribesAndFlushes(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "PONG\r\n", // answers the drain flush
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
+        $service->start()->await();
+
+        $service->drain()->await();
+
+        $writes = implode('', $transport->writes);
+        // Endpoints/discovery were unsubscribed and a PING was sent to flush the UNSUBs.
+        self::assertStringContainsString('UNSUB ', $writes);
+        self::assertStringContainsString("PING\r\n", $writes);
+    }
+
+    /**
      * Verifies service start registers discovery and endpoint subscriptions.
      */
     public function testStartRegistersSubscriptions(): void

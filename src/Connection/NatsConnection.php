@@ -16,6 +16,7 @@ use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Core\Inbox;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
+use IDCT\NATS\Exception\AuthenticationException;
 use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Exception\NatsException;
 use IDCT\NATS\Exception\ProtocolException;
@@ -85,11 +86,21 @@ final class NatsConnection
     private bool $lameDuckAnnounced = false;
     /**
      * The last set of discovered cluster endpoints, so a DiscoveredServers event fires only when the
-     * advertised `connect_urls` actually change.
+     * advertised `connect_urls` actually change. Also merged into the reconnect server pool.
      *
      * @var list<string>
      */
     private array $knownConnectUrls = [];
+    /** The server URL the transport is currently attached to (set on each successful connect). */
+    private ?string $connectedServer = null;
+    /** Traffic counters surfaced via {@see statistics()}. */
+    private int $inMsgs = 0;
+    private int $outMsgs = 0;
+    private int $inBytes = 0;
+    private int $outBytes = 0;
+    private int $reconnectCount = 0;
+    /** Encoded publishes buffered while reconnecting (flushed on a successful reconnect); see #49. */
+    private string $reconnectBuffer = '';
 
     /**
      * Creates a connection runtime with transport and protocol dependencies.
@@ -127,6 +138,65 @@ final class NatsConnection
     }
 
     /**
+     * The server URL the connection is currently attached to, or null when not connected.
+     */
+    public function connectedUrl(): ?string
+    {
+        return $this->state === ConnectionState::Open ? $this->connectedServer : null;
+    }
+
+    /**
+     * Additional cluster endpoints advertised by the server (INFO `connect_urls`).
+     *
+     * @return list<string>
+     */
+    public function discoveredServers(): array
+    {
+        return $this->knownConnectUrls;
+    }
+
+    /**
+     * The server's maximum accepted payload size (`max_payload`), or null when unknown.
+     */
+    public function maxPayload(): ?int
+    {
+        return $this->serverInfo?->maxPayload;
+    }
+
+    /**
+     * Returns a snapshot of traffic counters for this connection.
+     */
+    public function statistics(): ConnectionStats
+    {
+        return new ConnectionStats(
+            inMsgs: $this->inMsgs,
+            outMsgs: $this->outMsgs,
+            inBytes: $this->inBytes,
+            outBytes: $this->outBytes,
+            reconnects: $this->reconnectCount,
+        );
+    }
+
+    /**
+     * Measures the round-trip time to the server by timing a PING/PONG exchange.
+     *
+     * @return Future<float> Round-trip time in seconds.
+     */
+    public function rtt(): Future
+    {
+        return async(function (): float {
+            if ($this->state !== ConnectionState::Open) {
+                throw new ConnectionException('Connection is not open');
+            }
+
+            $start = microtime(true);
+            $this->flush()->await();
+
+            return microtime(true) - $start;
+        });
+    }
+
+    /**
      * Opens a transport connection and completes NATS CONNECT/PING handshake.
      *
      * @return Future<void>
@@ -141,6 +211,12 @@ final class NatsConnection
             try {
                 $this->connectOnce();
                 $this->emitEvent(ConnectionEvent::Connected);
+            } catch (AuthenticationException $e) {
+                // An auth failure will not resolve by retrying: fail fast instead of entering reconnect.
+                $this->state = ConnectionState::Closed;
+                $this->emitEvent(ConnectionEvent::Closed, $e);
+
+                throw $e;
             } catch (\Throwable $e) {
                 if ($this->options->reconnectEnabled && $this->options->maxReconnectAttempts > 0) {
                     $this->recoverConnection();
@@ -245,29 +321,41 @@ final class NatsConnection
     public function publish(string $subject, string $payload, ?string $replyTo = null): Future
     {
         return async(function () use ($subject, $payload, $replyTo): void {
-            if ($this->state !== ConnectionState::Open) {
-                throw new ConnectionException('Connection is not open');
-            }
-
             $this->validateSubject($subject);
             if ($replyTo !== null) {
                 $this->validateSubject($replyTo);
             }
             $this->enforceMaxPayload(strlen($payload));
 
+            $frame = $this->codec->encodePublish($subject, $payload, $replyTo);
+
+            if ($this->state !== ConnectionState::Open) {
+                // Buffer while a reconnect is in flight (flushed on reconnect); otherwise unusable.
+                if (!$this->bufferFrame($frame)) {
+                    throw new ConnectionException('Connection is not open');
+                }
+
+                $this->recordOutbound($payload);
+
+                return;
+            }
+
             try {
-                $this->transport->write($this->codec->encodePublish($subject, $payload, $replyTo))->await();
+                $this->transport->write($frame)->await();
             } catch (\Throwable) {
                 $this->recoverConnection();
-                $this->transport->write($this->codec->encodePublish($subject, $payload, $replyTo))->await();
+                $this->transport->write($frame)->await();
             }
+
+            $this->recordOutbound($payload);
         });
     }
 
     /**
-     * Publishes payload bytes with NATS headers to the given subject.
+     * Publishes payload bytes with NATS headers to the given subject. A header value may be a single
+     * string or a list of strings for multi-value (multimap) headers (ADR-4).
      *
-     * @param array<string,string> $headers
+     * @param array<string,string|list<string>> $headers
      * @return Future<void>
      */
     public function publishWithHeaders(
@@ -277,10 +365,6 @@ final class NatsConnection
         ?string $replyTo = null,
     ): Future {
         return async(function () use ($subject, $payload, $headers, $replyTo): void {
-            if ($this->state !== ConnectionState::Open) {
-                throw new ConnectionException('Connection is not open');
-            }
-
             $this->validateSubject($subject);
             if ($replyTo !== null) {
                 $this->validateSubject($replyTo);
@@ -290,13 +374,55 @@ final class NatsConnection
             $headerBlock = NatsHeaders::toWireBlock($headers);
             $this->enforceMaxPayload(strlen($headerBlock) + strlen($payload));
 
+            $frame = $this->codec->encodeHeaderPublishBlock($subject, $payload, $headerBlock, $replyTo);
+
+            if ($this->state !== ConnectionState::Open) {
+                if (!$this->bufferFrame($frame)) {
+                    throw new ConnectionException('Connection is not open');
+                }
+
+                $this->recordOutbound($payload);
+
+                return;
+            }
+
             try {
-                $this->transport->write($this->codec->encodeHeaderPublishBlock($subject, $payload, $headerBlock, $replyTo))->await();
+                $this->transport->write($frame)->await();
             } catch (\Throwable) {
                 $this->recoverConnection();
-                $this->transport->write($this->codec->encodeHeaderPublishBlock($subject, $payload, $headerBlock, $replyTo))->await();
+                $this->transport->write($frame)->await();
             }
+
+            $this->recordOutbound($payload);
         });
+    }
+
+    /**
+     * Buffers an encoded publish while a reconnect is in flight (flushed on reconnect). Returns false
+     * when buffering does not apply — no active reconnect, buffering disabled, or the buffer is full.
+     */
+    private function bufferFrame(string $frame): bool
+    {
+        if ($this->reconnecting === null || $this->options->reconnectBufferSize <= 0) {
+            return false;
+        }
+
+        if (strlen($this->reconnectBuffer) + strlen($frame) > $this->options->reconnectBufferSize) {
+            return false;
+        }
+
+        $this->reconnectBuffer .= $frame;
+
+        return true;
+    }
+
+    /**
+     * Records an outbound message in the traffic counters.
+     */
+    private function recordOutbound(string $payload): void
+    {
+        $this->outMsgs++;
+        $this->outBytes += strlen($payload);
     }
 
     /**
@@ -340,6 +466,41 @@ final class NatsConnection
             }
 
             $this->transport->write($this->codec->encodeUnsubscribe($sid, $maxMessages))->await();
+            $this->dropSubscriptionState($sid);
+        });
+    }
+
+    /**
+     * Drains a single subscription: sends UNSUB so the server stops delivering, flushes so any
+     * messages already in flight are received and dispatched to the handler, then removes the local
+     * subscription state. Mirrors nats.go / nats.java per-subscription `Drain()` (#43).
+     *
+     * @return Future<void>
+     */
+    public function drainSubscription(int $sid): Future
+    {
+        return async(function () use ($sid): void {
+            if ($this->state !== ConnectionState::Open) {
+                // Nothing to drain on a connection that is not open; just drop any local state.
+                $this->dropSubscriptionState($sid);
+
+                return;
+            }
+
+            if (!isset($this->subscriptionMeta[$sid])) {
+                return;
+            }
+
+            // Stop new deliveries for this sid, then flush so in-flight messages are received...
+            $this->transport->write($this->codec->encodeUnsubscribe($sid))->await();
+            try {
+                $this->flush()->await();
+            } catch (\Throwable) {
+                // A flush failure (timeout/closed) still leaves us safe to drop the subscription below.
+            }
+
+            // ...deliver whatever arrived for it, then remove the handler and local state.
+            $this->drainPendingForSid($sid);
             $this->dropSubscriptionState($sid);
         });
     }
@@ -773,6 +934,11 @@ final class NatsConnection
      */
     private function normalizeDsn(string $server): string
     {
+        // Strip URL-embedded credentials (user:pass@ / token@): they are applied to the CONNECT
+        // payload (see extractUrlCredentials()), not dialed by the socket transport.
+        $stripped = preg_replace('#^([a-z][a-z0-9+.\-]*://)[^@/]*@#i', '$1', $server);
+        $server = $stripped ?? $server;
+
         $normalized = preg_replace('#^nats://#', 'tcp://', $server);
         if ($normalized === null) {
             throw new ConnectionException('Invalid server DSN');
@@ -782,13 +948,41 @@ final class NatsConnection
     }
 
     /**
+     * Extracts credentials embedded in a server URL's userinfo (#37): `user:pass@host` yields a
+     * user/password pair, a single `token@host` component yields a token. Returns an empty array when
+     * the URL carries no credentials.
+     *
+     * @return array{user?:string,pass?:string,token?:string}
+     */
+    private function extractUrlCredentials(string $server): array
+    {
+        $user = parse_url($server, PHP_URL_USER);
+        if (!is_string($user) || $user === '') {
+            return [];
+        }
+
+        $user = rawurldecode($user);
+        $pass = parse_url($server, PHP_URL_PASS);
+        if (is_string($pass) && $pass !== '') {
+            return ['user' => $user, 'pass' => rawurldecode($pass)];
+        }
+
+        // A lone userinfo component (no password) is a token.
+        return ['token' => $user];
+    }
+
+    /**
      * Establishes a fresh connection against the next available server.
      */
     private function connectOnce(): void
     {
         $this->state = ConnectionState::Connecting;
+        // A fresh connection is not (yet) draining; allow a new lame-duck signal to be observed.
+        $this->lameDuckAnnounced = false;
 
         $server = $this->nextServer();
+        $this->connectedServer = $server;
+        $urlCredentials = $this->extractUrlCredentials($server);
         $dsn = $this->normalizeDsn($server);
         $this->transport->connect($dsn, $this->options->connectTimeoutMs)->await();
 
@@ -815,30 +1009,55 @@ final class NatsConnection
             );
         }
 
-        $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce))->await();
+        $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce, $urlCredentials))->await();
         $this->transport->write($this->codec->encodePing())->await();
 
         $this->awaitInitialPong();
         // Reset parser state after handshake to avoid carrying partial bootstrap chunks.
         $this->parser = new ProtocolParser();
+        // Seed the discovered-servers set from the initial INFO (without emitting a discovery event —
+        // that is reserved for subsequent async INFO changes), so failover can use the cluster peers.
+        if ($this->serverInfo !== null && $this->serverInfo->connectUrls !== []) {
+            $this->knownConnectUrls = $this->serverInfo->connectUrls;
+        }
         $this->state = ConnectionState::Open;
         $this->startPingTimer();
     }
 
     /**
-     * Returns the next server endpoint using round-robin rotation.
+     * Returns the next server endpoint, round-robin over the configured servers plus any cluster peers
+     * discovered from INFO `connect_urls`.
      */
     private function nextServer(): string
     {
-        $servers = $this->options->servers;
-        if ($servers === []) {
+        $pool = $this->serverPool();
+        if ($pool === []) {
             return NatsOptions::DEFAULT_SERVER;
         }
 
-        $index = $this->serverCursor % count($servers);
+        $index = $this->serverCursor % count($pool);
         $this->serverCursor++;
 
-        return $servers[$index];
+        return $pool[$index];
+    }
+
+    /**
+     * The dial pool: configured servers followed by discovered cluster peers (deduped, normalized to a
+     * `nats://` scheme when the advertised entry is a bare host:port).
+     *
+     * @return list<string>
+     */
+    private function serverPool(): array
+    {
+        $pool = $this->options->servers;
+        foreach ($this->knownConnectUrls as $url) {
+            $normalized = str_contains($url, '://') ? $url : 'nats://' . $url;
+            if (!in_array($normalized, $pool, true)) {
+                $pool[] = $normalized;
+            }
+        }
+
+        return $pool;
     }
 
     /**
@@ -909,9 +1128,19 @@ final class NatsConnection
             try {
                 $this->connectOnce();
                 $this->resubscribeAll();
+                $this->reconnectCount++;
+                $this->flushReconnectBuffer();
                 $this->emitEvent(ConnectionEvent::Reconnected);
 
                 return;
+            } catch (AuthenticationException $e) {
+                // Credentials will not become valid by retrying: stop the reconnect loop immediately
+                // rather than hammering the server until attempts are exhausted (#46).
+                $this->state = ConnectionState::Closed;
+                $this->emitError($e);
+                $this->emitEvent(ConnectionEvent::Closed, $e);
+
+                throw $e;
             } catch (\Throwable $e) {
                 $lastError = $e;
                 $delayMs = $this->backoffDelayMs($attempt);
@@ -926,6 +1155,20 @@ final class NatsConnection
             0,
             $lastError,
         );
+    }
+
+    /**
+     * Writes any publishes buffered while the connection was down, then clears the buffer (#49).
+     */
+    private function flushReconnectBuffer(): void
+    {
+        if ($this->reconnectBuffer === '') {
+            return;
+        }
+
+        $buffered = $this->reconnectBuffer;
+        $this->reconnectBuffer = '';
+        $this->transport->write($buffered)->await();
     }
 
     /**
@@ -1028,7 +1271,7 @@ final class NatsConnection
                 }
 
                 if ($frame->type === ProtocolFrameType::Err) {
-                    throw new ConnectionException('Server error during connect: ' . ($frame->error ?? 'unknown'));
+                    throw $this->connectErrorFromFrame($frame->error);
                 }
             }
         }
@@ -1067,7 +1310,7 @@ final class NatsConnection
                 }
 
                 if ($frame->type === ProtocolFrameType::Err) {
-                    throw new ConnectionException('Server error during connect: ' . ($frame->error ?? 'unknown'));
+                    throw $this->connectErrorFromFrame($frame->error);
                 }
             }
         }
@@ -1167,6 +1410,8 @@ final class NatsConnection
                 responder: $this->messageResponder,
             );
 
+            $this->inMsgs++;
+            $this->inBytes += strlen($payload);
             $this->enqueueMessage($sid, $message);
         }
     }
@@ -1265,6 +1510,23 @@ final class NatsConnection
         $data = json_decode($infoPayload, true, 512, JSON_THROW_ON_ERROR);
 
         return ServerInfo::fromInfoPayload($data);
+    }
+
+    /**
+     * Builds the exception for a server -ERR received during the connect handshake, classifying
+     * authorization/authentication failures as {@see AuthenticationException} so the reconnect loop
+     * does not retry them (#46).
+     */
+    private function connectErrorFromFrame(?string $error): ConnectionException
+    {
+        $error ??= 'unknown';
+        $normalized = strtolower($error);
+
+        if (str_contains($normalized, 'authorization') || str_contains($normalized, 'authentication')) {
+            return new AuthenticationException('Server rejected authentication during connect: ' . $error);
+        }
+
+        return new ConnectionException('Server error during connect: ' . $error);
     }
 
     /**
@@ -1457,14 +1719,26 @@ final class NatsConnection
             return;
         }
 
+        if ($info->connectUrls !== [] && $info->connectUrls !== $this->knownConnectUrls) {
+            // Update the discovery pool first so a lame-duck failover can dial a freshly-advertised peer.
+            $this->knownConnectUrls = $info->connectUrls;
+            $this->emitEvent(ConnectionEvent::DiscoveredServers);
+        }
+
         if ($info->lameDuckMode && !$this->lameDuckAnnounced) {
             $this->lameDuckAnnounced = true;
             $this->emitEvent(ConnectionEvent::LameDuck);
-        }
 
-        if ($info->connectUrls !== [] && $info->connectUrls !== $this->knownConnectUrls) {
-            $this->knownConnectUrls = $info->connectUrls;
-            $this->emitEvent(ConnectionEvent::DiscoveredServers);
+            // The server is draining and will close this connection; proactively fail over to another
+            // pool member now (rather than waiting for the eventual EOF) when reconnect is enabled and
+            // more than one endpoint is available to move to (#47).
+            if ($this->options->reconnectEnabled && count($this->serverPool()) > 1) {
+                try {
+                    $this->recoverConnection();
+                } catch (\Throwable $e) {
+                    $this->emitError($e);
+                }
+            }
         }
     }
 

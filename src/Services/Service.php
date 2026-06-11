@@ -84,8 +84,10 @@ final class Service
      * @param callable(NatsMessage):(string|array<string,mixed>|null)|ServiceEndpointHandlerInterface|class-string<ServiceEndpointHandlerInterface>|object $handler
      * @param array<string,mixed>|null $schema Optional JSON Schema for the endpoint.
      * @param array<string,string> $metadata Optional per-endpoint metadata advertised in $SRV.INFO.
+     * @param (callable(ServiceEndpoint):array<string,mixed>)|null $statsHandler Optional supplier of
+     *        extra per-endpoint data merged into $SRV.STATS (nats.go StatsHandler).
      */
-    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = self::DEFAULT_QUEUE_GROUP, ?array $schema = null, array $metadata = []): self
+    public function addEndpoint(string $name, string $subject, callable|object|string $handler, ?string $queueGroup = self::DEFAULT_QUEUE_GROUP, ?array $schema = null, array $metadata = [], ?callable $statsHandler = null): self
     {
         // Per the NATS micro spec endpoints share a queue group ("q" by default) so multiple
         // service instances load-balance requests. Pass null or '' to opt out (fan-out: every
@@ -105,7 +107,14 @@ final class Service
         }
 
         $resolvedQueueGroup = ($queueGroup === null || $queueGroup === '') ? null : $queueGroup;
-        $endpoint = new ServiceEndpoint($name, $subject, $resolvedQueueGroup, $schema, $metadata);
+        $endpoint = new ServiceEndpoint(
+            $name,
+            $subject,
+            $resolvedQueueGroup,
+            $schema,
+            $metadata,
+            statsHandler: $statsHandler !== null ? \Closure::fromCallable($statsHandler) : null,
+        );
         $this->endpoints[$subject] = $endpoint;
         $this->handlers[$subject] = $this->resolveHandler($handler);
 
@@ -332,6 +341,41 @@ final class Service
     }
 
     /**
+     * Gracefully drains the service: unsubscribes every endpoint and flushes so the server stops
+     * delivering new requests, while in-flight handlers (already dispatched on the event loop) run to
+     * completion, then clears state. Mirrors nats.go / nats.java micro `Stop()` drain semantics (#51).
+     *
+     * @return Future<void>
+     */
+    public function drain(): Future
+    {
+        return async(function (): void {
+            try {
+                foreach ($this->subscriptionSids as $sid) {
+                    try {
+                        $this->client->unsubscribe($sid)->await();
+                    } catch (\Throwable) {
+                        // The connection may already be gone; keep draining the rest.
+                    }
+                }
+
+                if ($this->started) {
+                    try {
+                        // Flush so the UNSUBs are processed server-side before we consider the drain
+                        // complete (no new request will be delivered after this resolves).
+                        $this->client->flush()->await();
+                    } catch (\Throwable) {
+                        // Best effort: a closed connection needs no flush.
+                    }
+                }
+            } finally {
+                $this->subscriptionSids = [];
+                $this->started = false;
+            }
+        });
+    }
+
+    /**
      * Starts the service and continuously processes incoming messages.
      *
      * The loop exits when timeout/cancellation is requested, then the service
@@ -412,7 +456,7 @@ final class Service
                 ? intdiv($endpoint->processingTimeNs, $endpoint->requests)
                 : 0;
 
-            $endpointStats[] = [
+            $entry = [
                 'name' => $endpoint->name,
                 'subject' => $endpoint->subject,
                 'queue_group' => $endpoint->queueGroup,
@@ -422,6 +466,18 @@ final class Service
                 'processing_time' => $endpoint->processingTimeNs,
                 'average_processing_time' => $averageProcessingTime,
             ];
+
+            // Merge any custom per-endpoint data from the configured stats supplier (#50). A throwing
+            // supplier must not break the discovery response.
+            if ($endpoint->statsHandler !== null) {
+                try {
+                    $entry['data'] = ($endpoint->statsHandler)($endpoint);
+                } catch (\Throwable) {
+                    // Skip custom data on failure.
+                }
+            }
+
+            $endpointStats[] = $entry;
         }
 
         return [

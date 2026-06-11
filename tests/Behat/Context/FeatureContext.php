@@ -2714,11 +2714,13 @@ final class FeatureContext implements Context
             throw new RuntimeException('Expected connection rejection but the connection succeeded.');
         }
 
-        if ($this->state->lastConnectionErrorClass !== ConnectionException::class) {
+        // Accept ConnectionException or any subclass (e.g. AuthenticationException for auth failures).
+        $errorClass = $this->state->lastConnectionErrorClass;
+        if ($errorClass === null || !is_a($errorClass, ConnectionException::class, true)) {
             throw new RuntimeException(sprintf(
-                'Expected %s but got %s.',
+                'Expected %s (or a subclass) but got %s.',
                 ConnectionException::class,
-                (string) $this->state->lastConnectionErrorClass,
+                (string) $errorClass,
             ));
         }
     }

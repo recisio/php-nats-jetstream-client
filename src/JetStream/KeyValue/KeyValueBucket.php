@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\JetStream\KeyValue;
 
+use Amp\CancelledException;
 use Amp\Future;
+use Amp\TimeoutCancellation;
+use IDCT\NATS\Core\Inbox;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
@@ -16,6 +19,7 @@ use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 
 use function Amp\async;
+use function Amp\delay;
 
 /**
  * Implements NATS JetStream Key-Value bucket operations.
@@ -114,16 +118,21 @@ final class KeyValueBucket
      * ages out (`Nats-TTL`; requires `allow_msg_ttl` on the bucket/stream).
      *
      * @param int|string|null $tombstoneTtl Optional TTL for the delete marker.
+     * @param int|null $expectedRevision Optional compare-and-delete: only delete when this is the key's
+     *                                   current revision (else the server rejects with a JetStreamException).
      * @return Future<PubAck>
      */
-    public function delete(string $key, int|string|null $tombstoneTtl = null): Future
+    public function delete(string $key, int|string|null $tombstoneTtl = null, ?int $expectedRevision = null): Future
     {
-        return async(function () use ($key, $tombstoneTtl): PubAck {
+        return async(function () use ($key, $tombstoneTtl, $expectedRevision): PubAck {
             $this->assertValidKey($key);
 
             $headers = ['KV-Operation' => 'DEL'];
             if ($tombstoneTtl !== null) {
                 $headers['Nats-TTL'] = MessageTtl::format($tombstoneTtl);
+            }
+            if ($expectedRevision !== null) {
+                $headers['Nats-Expected-Last-Subject-Sequence'] = (string) $expectedRevision;
             }
 
             return $this->publishWithHeadersAck($this->subjectForKey($key), '', $headers)->await();
@@ -135,16 +144,21 @@ final class KeyValueBucket
      * purge marker itself ages out (`Nats-TTL`; requires `allow_msg_ttl` on the bucket/stream).
      *
      * @param int|string|null $tombstoneTtl Optional TTL for the purge marker.
+     * @param int|null $expectedRevision Optional compare-and-purge: only purge when this is the key's
+     *                                   current revision (else the server rejects with a JetStreamException).
      * @return Future<PubAck>
      */
-    public function purge(string $key, int|string|null $tombstoneTtl = null): Future
+    public function purge(string $key, int|string|null $tombstoneTtl = null, ?int $expectedRevision = null): Future
     {
-        return async(function () use ($key, $tombstoneTtl): PubAck {
+        return async(function () use ($key, $tombstoneTtl, $expectedRevision): PubAck {
             $this->assertValidKey($key);
 
             $headers = ['KV-Operation' => 'PURGE', 'Nats-Rollup' => 'sub'];
             if ($tombstoneTtl !== null) {
                 $headers['Nats-TTL'] = MessageTtl::format($tombstoneTtl);
+            }
+            if ($expectedRevision !== null) {
+                $headers['Nats-Expected-Last-Subject-Sequence'] = (string) $expectedRevision;
             }
 
             return $this->publishWithHeadersAck($this->subjectForKey($key), '', $headers)->await();
@@ -192,6 +206,42 @@ final class KeyValueBucket
             $revision = isset($headers['Nats-Sequence']) ? (int) $headers['Nats-Sequence'] : null;
 
             return $this->buildEntry($key, $message->payload, $operation, $revision);
+        });
+    }
+
+    /**
+     * Loads a specific historical revision (stream sequence) of a key. Returns null when no message
+     * exists at that sequence, or when the message at that sequence belongs to a different key.
+     * Mirrors nats.go / nats.java `KeyValue.GetRevision` (#33).
+     *
+     * @return Future<KeyValueEntry|null>
+     */
+    public function getRevision(string $key, int $revision): Future
+    {
+        return async(function () use ($key, $revision): ?KeyValueEntry {
+            $this->assertValidKey($key);
+            if ($revision <= 0) {
+                throw new JetStreamException('Revision must be greater than zero');
+            }
+
+            try {
+                $message = $this->jetStream->getStreamMessage($this->streamName(), $revision)->await();
+            } catch (JetStreamException $e) {
+                if ($e->getCode() === 404) {
+                    return null;
+                }
+
+                throw $e;
+            }
+
+            // A sequence is global to the stream: ensure it actually stores this key's subject.
+            if ($message->subject !== $this->subjectForKey($key)) {
+                return null;
+            }
+
+            $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+
+            return $this->buildEntry($key, $message->payload, $this->operationFromHeaders($headers), $revision);
         });
     }
 
@@ -386,6 +436,64 @@ final class KeyValueBucket
     public function listKeys(): Future
     {
         return $this->keys();
+    }
+
+    /**
+     * Returns the full ordered history of a key — every stored revision (puts and delete/purge
+     * tombstones), oldest first. Requires the bucket to retain history (created with a `history` > 1);
+     * a history-1 bucket yields only the latest record. Mirrors nats.go / nats.java `KeyValue.History`
+     * (#41).
+     *
+     * @return Future<list<KeyValueEntry>>
+     */
+    public function history(string $key): Future
+    {
+        return async(function () use ($key): array {
+            $this->assertValidKey($key);
+
+            $deliver = Inbox::generate('_INBOX.KV.HIST');
+            $consumer = $this->jetStream->createEphemeralPushConsumer(
+                $this->streamName(),
+                $deliver,
+                $this->subjectForKey($key),
+                ['deliver_policy' => 'all', 'ack_policy' => 'none'],
+            )->await();
+
+            $pending = (int) ($consumer->raw['num_pending'] ?? 0);
+            if ($pending === 0) {
+                return [];
+            }
+
+            /** @var list<KeyValueEntry> $entries */
+            $entries = [];
+            $caughtUp = false;
+            $sid = $this->client->subscribe($deliver, function (NatsMessage $message) use (&$entries, &$caughtUp, $key): void {
+                $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+                $meta = $this->jetStream->messageMetadata($message);
+
+                $entries[] = $this->buildEntry($key, $message->payload, $this->operationFromHeaders($headers), $meta->streamSequence);
+
+                if ($meta->numPending === 0) {
+                    $caughtUp = true;
+                }
+            })->await();
+
+            $cancellation = new TimeoutCancellation(5.0);
+            try {
+                while (!$caughtUp) {
+                    $frames = $this->client->processIncoming($cancellation)->await();
+                    if ($frames === 0) {
+                        delay(0.001, cancellation: $cancellation);
+                    }
+                }
+            } catch (CancelledException) {
+                // Bounded wait elapsed; return whatever history was collected.
+            } finally {
+                $this->client->unsubscribe($sid)->await();
+            }
+
+            return $entries;
+        });
     }
 
     /**

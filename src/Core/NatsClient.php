@@ -6,6 +6,7 @@ namespace IDCT\NATS\Core;
 
 use Amp\Cancellation;
 use Amp\Future;
+use IDCT\NATS\Connection\ConnectionStats;
 use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
@@ -84,9 +85,10 @@ final class NatsClient
     }
 
     /**
-     * Publishes a payload with NATS headers to a subject.
+     * Publishes a payload with NATS headers to a subject. A header value may be a single string or a
+     * list of strings for multi-value (multimap) headers (ADR-4).
      *
-     * @param array<string,string> $headers
+     * @param array<string,string|list<string>> $headers
      * @return Future<void>
      */
     public function publishWithHeaders(
@@ -145,6 +147,17 @@ final class NatsClient
     public function unsubscribe(int $sid, ?int $maxMessages = null): Future
     {
         return $this->connection->unsubscribe($sid, $maxMessages);
+    }
+
+    /**
+     * Drains a single subscription: stops new deliveries (UNSUB), flushes so in-flight messages are
+     * dispatched to the handler, then removes the subscription. Mirrors per-subscription Drain().
+     *
+     * @return Future<void>
+     */
+    public function drainSubscription(int $sid): Future
+    {
+        return $this->connection->drainSubscription($sid);
     }
 
     /**
@@ -239,6 +252,50 @@ final class NatsClient
     public function serverInfo(): ?ServerInfo
     {
         return $this->connection->serverInfo();
+    }
+
+    /**
+     * The server URL currently connected to, or null when not connected.
+     */
+    public function connectedUrl(): ?string
+    {
+        return $this->connection->connectedUrl();
+    }
+
+    /**
+     * Cluster endpoints discovered from the server's INFO `connect_urls`.
+     *
+     * @return list<string>
+     */
+    public function discoveredServers(): array
+    {
+        return $this->connection->discoveredServers();
+    }
+
+    /**
+     * The server's maximum accepted payload size, or null when unknown.
+     */
+    public function maxPayload(): ?int
+    {
+        return $this->connection->maxPayload();
+    }
+
+    /**
+     * A snapshot of connection traffic counters.
+     */
+    public function statistics(): ConnectionStats
+    {
+        return $this->connection->statistics();
+    }
+
+    /**
+     * Measures the round-trip time to the server (PING/PONG), in seconds.
+     *
+     * @return Future<float>
+     */
+    public function rtt(): Future
+    {
+        return $this->connection->rtt();
     }
 
     /**
