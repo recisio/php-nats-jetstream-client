@@ -10,6 +10,7 @@ use Amp\DeferredFuture;
 use Amp\Future;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Auth\NkeySeedSigner;
+use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
@@ -1846,5 +1847,135 @@ final class NatsClientIntegrationTest extends TestCase
         $a->disconnect()->await();
         $b->disconnect()->await();
         $requester->disconnect()->await();
+    }
+
+    /**
+     * flush() completes a PING/PONG round-trip against the live server, confirming prior writes were
+     * processed (#66 — flush had no dedicated functional test).
+     */
+    public function testFlushRoundTripConfirmsServerProcessing(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $subject = 'it.flush.' . bin2hex(random_bytes(4));
+        $client->subscribe($subject, static function (): void {})->await();
+        $client->publish($subject, 'x')->await();
+
+        // flush() drives its own read loop for the PONG; it must resolve without error.
+        $client->flush()->await();
+        self::assertSame(ConnectionState::Open, $client->state());
+
+        $client->disconnect()->await();
+    }
+
+    /**
+     * The polling SubscriptionQueue API delivers live messages via next() with a timeout (#66 —
+     * SubscriptionQueue had only unit/Behat coverage, no integration test).
+     */
+    public function testSubscriptionQueuePollingDeliversLive(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.pollq.' . bin2hex(random_bytes(4));
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $queue = $client->subscribeQueue($subject)->await();
+        $client->flush()->await(); // ensure the SUB is registered before publishing
+
+        $client->publish($subject, 'q1')->await();
+        $client->publish($subject, 'q2')->await();
+
+        $queue->setTimeout(3.0); // next() self-pumps processIncoming within this window
+        $first = $queue->next();
+        $second = $queue->next();
+
+        self::assertSame('q1', $first?->payload);
+        self::assertSame('q2', $second?->payload);
+
+        $client->disconnect()->await();
+    }
+
+    /**
+     * An idle (publisher-only) connection stays open across multiple ping intervals without the app
+     * pumping processIncoming, because the heartbeat self-read consumes the PONGs (#67 — P0-2 guard).
+     */
+    public function testIdleConnectionStaysOpenViaHeartbeat(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $client = new NatsClient(new NatsOptions(
+            servers: [$this->integrationServerUrl()],
+            pingIntervalSeconds: 1,
+            maxPingsOut: 2,
+        ));
+        $client->connect()->await();
+
+        // Stay completely idle for longer than maxPingsOut * pingInterval. If the heartbeat did not
+        // self-read PONGs, outstandingPings would exceed maxPingsOut and force a disconnect.
+        delay(3.5);
+
+        self::assertSame(ConnectionState::Open, $client->state(), 'Idle connection must survive via heartbeat self-read');
+        $client->flush()->await(); // still usable
+
+        $client->disconnect()->await();
+    }
+
+    /**
+     * A request timeout cancels the in-flight read and does NOT poison the transport: a subsequent
+     * request on the same connection succeeds (#67 — P0-1 guard).
+     */
+    public function testRequestTimeoutDoesNotPoisonConnection(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $silent = 'it.silent.' . bin2hex(random_bytes(4));
+        $echo = 'it.echo.' . bin2hex(random_bytes(4));
+        $server = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $server->connect()->await();
+        $client->connect()->await();
+
+        // One responder receives but never replies (forces a timeout, not a 503 no-responders).
+        $server->subscribe($silent, static function (): void {})->await();
+        // A second responder echoes, to prove the connection is healthy after the timeout.
+        $server->subscribe($echo, static function (NatsMessage $message): void {
+            $message->respond('pong:' . $message->payload)->await();
+        })->await();
+        $server->flush()->await();
+
+        $pump = new DeferredCancellation();
+        $pumpFuture = async(static function () use ($server, $pump): void {
+            $cancellation = $pump->getCancellation();
+            try {
+                while (!$cancellation->isRequested()) {
+                    $server->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+            }
+        });
+
+        try {
+            try {
+                $client->request($silent, 'hello', 300)->await();
+                self::fail('Expected request timeout exception.');
+            } catch (TimeoutException) {
+                // Expected — the read should have been cancelled, not orphaned.
+            }
+
+            // The connection must still be open and usable: the next request succeeds.
+            self::assertSame(ConnectionState::Open, $client->state());
+            $reply = $client->request($echo, 'after-timeout', 3000)->await();
+            self::assertSame('pong:after-timeout', $reply->payload);
+        } finally {
+            $pump->cancel();
+            $pumpFuture->await();
+        }
+
+        $client->disconnect()->await();
+        $server->disconnect()->await();
     }
 }
