@@ -65,6 +65,9 @@ final class NatsOptions
       *        {@see $nonceSigner} that reads the current seed for full credential reload.
       * @param (\Closure():?string)|null $tokenProvider Optional callback returning the auth token, invoked
       *        on every (re)connect. Takes precedence over the static {@see $token} when set.
+      * @param int $reconnectBufferSize Max bytes of outbound publishes to buffer while the connection is
+      *        down and reconnecting; the buffer is flushed on a successful reconnect. `0` disables
+      *        buffering (publishes while disconnected throw). Default 8 MiB, matching nats.go.
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -102,6 +105,7 @@ final class NatsOptions
         public readonly ?\Closure $errorListener = null,
         public readonly ?\Closure $jwtProvider = null,
         public readonly ?\Closure $tokenProvider = null,
+        public readonly int $reconnectBufferSize = 8_388_608,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

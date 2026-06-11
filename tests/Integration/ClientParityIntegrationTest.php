@@ -321,6 +321,73 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #52 — connection accessors (connectedUrl, maxPayload, RTT, statistics) against a live server.
+     */
+    public function testConnectionAccessorsLive(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $url = $this->integrationServerUrl();
+        $client = new NatsClient(new NatsOptions(servers: [$url]));
+        $client->connect()->await();
+
+        self::assertSame($url, $client->connectedUrl());
+        self::assertGreaterThan(0, $client->maxPayload());
+
+        $rtt = $client->rtt()->await();
+        self::assertGreaterThan(0.0, $rtt);
+
+        $subject = 'it.stats.' . bin2hex(random_bytes(4));
+        $client->subscribe($subject, static function (NatsMessage $m): void {})->await();
+        $client->flush()->await();
+        $client->publish($subject, 'payload-12')->await();
+
+        $cancellation = new TimeoutCancellation(3.0);
+        try {
+            while ($client->statistics()->inMsgs < 1) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        $stats = $client->statistics();
+        self::assertGreaterThanOrEqual(1, $stats->outMsgs);
+        self::assertGreaterThanOrEqual(1, $stats->inMsgs);
+
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #46 — a bad credential fails fast with AuthenticationException, not an exhausted reconnect loop.
+     */
+    public function testAuthenticationErrorFailsFast(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        // Reconnect ENABLED with several attempts; an auth failure must still return promptly.
+        $client = new NatsClient(new NatsOptions(
+            servers: [$this->integrationTokenServerUrl()],
+            reconnectEnabled: true,
+            maxReconnectAttempts: 5,
+            reconnectDelayMs: 200,
+            token: 'definitely-the-wrong-token',
+        ));
+
+        $start = microtime(true);
+        $threw = false;
+        try {
+            $client->connect()->await();
+        } catch (\IDCT\NATS\Exception\AuthenticationException) {
+            $threw = true;
+        }
+        $elapsed = microtime(true) - $start;
+
+        self::assertTrue($threw, 'A bad token must raise AuthenticationException');
+        // Fast-fail: well under the time 5 reconnect attempts (with 200ms+ backoff each) would take.
+        self::assertLessThan(2.0, $elapsed);
+    }
+
+    /**
      * #33 + #41 — KV getRevision reads a historical revision and history() returns all revisions.
      */
     public function testKeyValueGetRevisionAndHistory(): void
