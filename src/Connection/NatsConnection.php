@@ -101,6 +101,13 @@ final class NatsConnection
     private int $reconnectCount = 0;
     /** Encoded publishes buffered while reconnecting (flushed on a successful reconnect); see #49. */
     private string $reconnectBuffer = '';
+    /**
+     * Configured servers in dial order — shuffled once when {@see NatsOptions::$randomizeServers} is
+     * set (#55), otherwise the configured order. Discovered peers are appended in {@see serverPool()}.
+     *
+     * @var list<string>
+     */
+    private readonly array $orderedServers;
 
     /**
      * Creates a connection runtime with transport and protocol dependencies.
@@ -116,6 +123,13 @@ final class NatsConnection
         private readonly ProtocolCodec $codec = new ProtocolCodec(),
     ) {
         $this->parser = new ProtocolParser();
+
+        $servers = $this->options->servers;
+        if ($this->options->randomizeServers && count($servers) > 1) {
+            shuffle($servers);
+        }
+        $this->orderedServers = $servers;
+
         $this->messageResponder = fn(string $subject, string $payload, ?array $headers): Future => $headers === null
                 ? $this->publish($subject, $payload)
                 : $this->publishWithHeaders($subject, $payload, $headers);
@@ -221,6 +235,15 @@ final class NatsConnection
                 if ($this->options->reconnectEnabled && $this->options->maxReconnectAttempts > 0) {
                     $this->recoverConnection();
 
+                    return;
+                }
+
+                // retry-on-failed-initial-connect (#56): keep retrying the first connect even when
+                // ongoing reconnect is disabled.
+                if ($this->options->retryOnFailedInitialConnect
+                    && $this->options->maxReconnectAttempts > 0
+                    && $this->retryInitialConnect()
+                ) {
                     return;
                 }
 
@@ -1049,7 +1072,7 @@ final class NatsConnection
      */
     private function serverPool(): array
     {
-        $pool = $this->options->servers;
+        $pool = $this->orderedServers;
         foreach ($this->knownConnectUrls as $url) {
             $normalized = str_contains($url, '://') ? $url : 'nats://' . $url;
             if (!in_array($normalized, $pool, true)) {
@@ -1099,6 +1122,42 @@ final class NatsConnection
         // one, and the per-sid dispatch guard keeps it non-reentrant. (Only reached on success; the
         // catch above rethrows on failure.)
         $this->drainAllPending();
+    }
+
+    /**
+     * Retries the initial connect (the first attempt has already failed) up to maxReconnectAttempts
+     * with backoff, WITHOUT enabling ongoing reconnect (#56). Returns true on success. An auth failure
+     * aborts immediately.
+     */
+    private function retryInitialConnect(): bool
+    {
+        $maxAttempts = max(1, $this->options->maxReconnectAttempts);
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            delay($this->backoffDelayMs($attempt) / 1000);
+
+            try {
+                $this->transport->close()->await();
+            } catch (\Throwable) {
+                // Ignore close failures between attempts.
+            }
+
+            try {
+                $this->connectOnce();
+                $this->emitEvent(ConnectionEvent::Connected);
+
+                return true;
+            } catch (AuthenticationException $e) {
+                $this->state = ConnectionState::Closed;
+                $this->emitEvent(ConnectionEvent::Closed, $e);
+
+                throw $e;
+            } catch (\Throwable) {
+                // Keep retrying until attempts are exhausted.
+            }
+        }
+
+        return false;
     }
 
     /**
