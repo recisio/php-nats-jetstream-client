@@ -149,6 +149,17 @@ final class NatsClient
     }
 
     /**
+     * Drains a single subscription: stops new deliveries (UNSUB), flushes so in-flight messages are
+     * dispatched to the handler, then removes the subscription. Mirrors per-subscription Drain().
+     *
+     * @return Future<void>
+     */
+    public function drainSubscription(int $sid): Future
+    {
+        return $this->connection->drainSubscription($sid);
+    }
+
+    /**
      * Processes a single incoming transport chunk and dispatches parsed frames.
      *
      * @param Cancellation|null $cancellation Optional token that cancels the underlying socket read.

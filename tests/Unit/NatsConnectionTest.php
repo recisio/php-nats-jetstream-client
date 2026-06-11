@@ -518,6 +518,37 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies drainSubscription() UNSUBs, flushes, delivers the in-flight message, then drops the sub (#43).
+     */
+    public function testDrainSubscriptionDeliversInFlightThenRemoves(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // The drain flush reads this chunk: an in-flight message for sid 1, then the flush PONG.
+            "MSG updates 1 4\r\nlast\r\nPONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $delivered = [];
+        $sid = $connection->subscribe('updates', static function (NatsMessage $m) use (&$delivered): void {
+            $delivered[] = $m->payload;
+        })->await();
+
+        $connection->drainSubscription($sid)->await();
+
+        self::assertSame(['last'], $delivered);
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('UNSUB ' . $sid . "\r\n", $writes);
+        self::assertStringContainsString("PING\r\n", $writes);
+
+        // The subscription is gone: a further frame for that sid is ignored.
+        self::assertSame(0, $connection->processIncoming()->await());
+    }
+
+    /**
      * Verifies connection accessors + traffic statistics (#52).
      */
     public function testConnectionAccessorsAndStatistics(): void

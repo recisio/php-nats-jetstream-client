@@ -873,6 +873,39 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #43 — drainSubscription delivers the in-flight message then stops further delivery.
+     */
+    public function testSubscriptionDrainStopsDelivery(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.subdrain.' . bin2hex(random_bytes(4));
+        $client = $this->client();
+
+        $delivered = [];
+        $sid = $client->subscribe($subject, static function (NatsMessage $m) use (&$delivered): void {
+            $delivered[] = $m->payload;
+        })->await();
+        $client->flush()->await();
+
+        $client->publish($subject, 'one')->await();
+        // Drain: receives 'one' in-flight, then removes the subscription.
+        $client->drainSubscription($sid)->await();
+
+        // After drain, this publish has no subscriber on the client.
+        $client->publish($subject, 'two')->await();
+        $client->flush()->await();
+        try {
+            $client->processIncoming(new TimeoutCancellation(0.3))->await();
+        } catch (CancelledException) {
+        }
+
+        self::assertSame(['one'], $delivered);
+
+        $client->disconnect()->await();
+    }
+
+    /**
      * #31 — the WebSocket transport carries core pub/sub and JetStream over ws://.
      */
     public function testWebSocketTransportCarriesPubSubAndJetStream(): void

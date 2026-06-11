@@ -470,6 +470,41 @@ final class NatsConnection
     }
 
     /**
+     * Drains a single subscription: sends UNSUB so the server stops delivering, flushes so any
+     * messages already in flight are received and dispatched to the handler, then removes the local
+     * subscription state. Mirrors nats.go / nats.java per-subscription `Drain()` (#43).
+     *
+     * @return Future<void>
+     */
+    public function drainSubscription(int $sid): Future
+    {
+        return async(function () use ($sid): void {
+            if ($this->state !== ConnectionState::Open) {
+                // Nothing to drain on a connection that is not open; just drop any local state.
+                $this->dropSubscriptionState($sid);
+
+                return;
+            }
+
+            if (!isset($this->subscriptionMeta[$sid])) {
+                return;
+            }
+
+            // Stop new deliveries for this sid, then flush so in-flight messages are received...
+            $this->transport->write($this->codec->encodeUnsubscribe($sid))->await();
+            try {
+                $this->flush()->await();
+            } catch (\Throwable) {
+                // A flush failure (timeout/closed) still leaves us safe to drop the subscription below.
+            }
+
+            // ...deliver whatever arrived for it, then remove the handler and local state.
+            $this->drainPendingForSid($sid);
+            $this->dropSubscriptionState($sid);
+        });
+    }
+
+    /**
      * Flushes the outbound buffer and waits for the server to round-trip a PONG, confirming the server
      * has processed everything written so far. Useful to ensure a SUBSCRIBE is registered server-side
      * before relying on it (e.g. before publishing a request to a freshly-subscribed responder).
