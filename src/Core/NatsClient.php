@@ -85,9 +85,10 @@ final class NatsClient
     }
 
     /**
-     * Publishes a payload with NATS headers to a subject.
+     * Publishes a payload with NATS headers to a subject. A header value may be a single string or a
+     * list of strings for multi-value (multimap) headers (ADR-4).
      *
-     * @param array<string,string> $headers
+     * @param array<string,string|list<string>> $headers
      * @return Future<void>
      */
     public function publishWithHeaders(

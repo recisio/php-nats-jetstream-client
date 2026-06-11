@@ -127,6 +127,40 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #42 — multi-value headers round-trip through the server and are preserved by fromWireBlockMulti.
+     */
+    public function testMultiValueHeadersRoundTrip(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.multihdr.' . bin2hex(random_bytes(4));
+        $client = $this->client();
+
+        $received = null;
+        $client->subscribe($subject, static function (NatsMessage $m) use (&$received): void {
+            $received = $m;
+        })->await();
+        $client->flush()->await();
+
+        $client->publishWithHeaders($subject, 'body', ['X-Tag' => ['one', 'two'], 'X-Single' => 'solo'])->await();
+
+        $cancellation = new TimeoutCancellation(3.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        self::assertNotNull($received);
+        $multi = \IDCT\NATS\Core\NatsHeaders::fromWireBlockMulti($received->rawHeaders);
+        self::assertSame(['one', 'two'], $multi['X-Tag'] ?? null);
+        self::assertSame(['solo'], $multi['X-Single'] ?? null);
+
+        $client->disconnect()->await();
+    }
+
+    /**
      * #22 — the connection listener observes Connected then Closed.
      */
     public function testConnectionLifecycleListenerObservesConnectAndClose(): void

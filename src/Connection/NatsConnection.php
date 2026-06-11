@@ -352,9 +352,10 @@ final class NatsConnection
     }
 
     /**
-     * Publishes payload bytes with NATS headers to the given subject.
+     * Publishes payload bytes with NATS headers to the given subject. A header value may be a single
+     * string or a list of strings for multi-value (multimap) headers (ADR-4).
      *
-     * @param array<string,string> $headers
+     * @param array<string,string|list<string>> $headers
      * @return Future<void>
      */
     public function publishWithHeaders(
