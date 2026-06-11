@@ -44,6 +44,9 @@ final class PullConsumerIterator
     /** Set by drain(): stop after the in-flight batch finishes processing; do not pull again. */
     private bool $drainRequested = false;
 
+    /** Optional diagnostics callback fired when the consume loop stops on a non-routine error (#63). */
+    private ?\Closure $onError = null;
+
     /**
      * @param JetStreamContext $context JetStream context used to issue pull requests and ACK-related commands.
      * @param string $stream Stream name that owns the target consumer.
@@ -182,6 +185,22 @@ final class PullConsumerIterator
     }
 
     /**
+     * Registers a diagnostics callback invoked when the consume loop terminates on a non-routine error
+     * (e.g. 409 "Consumer Deleted", a server error) — as opposed to a routine empty window (404/408) or
+     * an explicit stop()/drain(). Mirrors nats.go's `ConsumeErrHandler` for surfacing why a consumer
+     * stopped (#63).
+     *
+     * @param callable(JetStreamException):void $handler
+     * @return $this
+     */
+    public function setOnError(callable $handler): self
+    {
+        $this->onError = \Closure::fromCallable($handler);
+
+        return $this;
+    }
+
+    /**
      * Returns configured batch size.
      */
     public function getBatching(): int
@@ -280,6 +299,13 @@ final class PullConsumerIterator
                     }
 
                     // Finite mode, or a terminal error (e.g. 409 Consumer Deleted): stop iterating.
+                    // Surface non-routine terminations (consumer deleted, server error, ...) to the
+                    // diagnostics callback so the app learns WHY the consume loop stopped (#63); routine
+                    // empty windows (404/408) are not errors.
+                    if ($this->onError !== null && !in_array($e->getCode(), [404, 408], true)) {
+                        ($this->onError)($e);
+                    }
+
                     break;
                 }
 

@@ -185,6 +185,71 @@ final class PullConsumerIteratorTest extends TestCase
         self::assertSame(['m1', 'm2', 'm3'], $processed);
     }
 
+    /**
+     * Verifies onError surfaces a terminal consume error (e.g. Consumer Deleted) and stops the loop (#63).
+     */
+    public function testOnErrorFiresOnTerminalStatus(): void
+    {
+        $statusHeaders = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\nDescription: Consumer Deleted\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $error = null;
+        $total = $client->jetStream()
+            ->pullConsumer('STREAM', 'CONS')
+            ->setBatching(1)
+            ->setExpiresMs(200)
+            ->setIterations(1)
+            ->setOnError(static function (JetStreamException $e) use (&$error): void {
+                $error = $e;
+            })
+            ->handle(static function (): void {
+                self::fail('No message should be delivered on a terminal status');
+            })->await();
+
+        self::assertSame(0, $total);
+        self::assertInstanceOf(JetStreamException::class, $error);
+        self::assertSame(409, $error->getCode());
+        self::assertStringContainsString('Consumer Deleted', $error->getMessage());
+    }
+
+    /**
+     * Verifies a routine empty window (404) does NOT trigger onError (#63).
+     */
+    public function testOnErrorNotFiredOnRoutineEmptyWindow(): void
+    {
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            sprintf("HMSG _INBOX.JS.FETCH.any 1 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $fired = false;
+        $client->jetStream()
+            ->pullConsumer('STREAM', 'CONS')
+            ->setBatching(1)
+            ->setExpiresMs(200)
+            ->setIterations(1)
+            ->setOnError(static function (JetStreamException $e) use (&$fired): void {
+                $fired = true;
+            })
+            ->handle(static function (): void {})->await();
+
+        self::assertFalse($fired, 'A routine 404 empty window must not trigger onError');
+    }
+
     public function testHandleStopsOnNoMessages(): void
     {
         $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
