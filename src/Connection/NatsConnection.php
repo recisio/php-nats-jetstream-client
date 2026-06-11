@@ -933,12 +933,41 @@ final class NatsConnection
      */
     private function normalizeDsn(string $server): string
     {
+        // Strip URL-embedded credentials (user:pass@ / token@): they are applied to the CONNECT
+        // payload (see extractUrlCredentials()), not dialed by the socket transport.
+        $stripped = preg_replace('#^([a-z][a-z0-9+.\-]*://)[^@/]*@#i', '$1', $server);
+        $server = $stripped ?? $server;
+
         $normalized = preg_replace('#^nats://#', 'tcp://', $server);
         if ($normalized === null) {
             throw new ConnectionException('Invalid server DSN');
         }
 
         return $normalized;
+    }
+
+    /**
+     * Extracts credentials embedded in a server URL's userinfo (#37): `user:pass@host` yields a
+     * user/password pair, a single `token@host` component yields a token. Returns an empty array when
+     * the URL carries no credentials.
+     *
+     * @return array{user?:string,pass?:string,token?:string}
+     */
+    private function extractUrlCredentials(string $server): array
+    {
+        $user = parse_url($server, PHP_URL_USER);
+        if (!is_string($user) || $user === '') {
+            return [];
+        }
+
+        $user = rawurldecode($user);
+        $pass = parse_url($server, PHP_URL_PASS);
+        if (is_string($pass) && $pass !== '') {
+            return ['user' => $user, 'pass' => rawurldecode($pass)];
+        }
+
+        // A lone userinfo component (no password) is a token.
+        return ['token' => $user];
     }
 
     /**
@@ -952,6 +981,7 @@ final class NatsConnection
 
         $server = $this->nextServer();
         $this->connectedServer = $server;
+        $urlCredentials = $this->extractUrlCredentials($server);
         $dsn = $this->normalizeDsn($server);
         $this->transport->connect($dsn, $this->options->connectTimeoutMs)->await();
 
@@ -978,7 +1008,7 @@ final class NatsConnection
             );
         }
 
-        $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce))->await();
+        $this->transport->write($this->codec->encodeConnect($this->options, $this->serverInfo->nonce, $urlCredentials))->await();
         $this->transport->write($this->codec->encodePing())->await();
 
         $this->awaitInitialPong();

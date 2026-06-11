@@ -1000,6 +1000,31 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies credentials embedded in the server URL are applied to CONNECT and stripped from the dial (#37).
+     */
+    public function testConnectExtractsUrlCredentials(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(servers: ['nats://alice:s3cret@127.0.0.1:4222']),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // The userinfo is stripped from the dialed DSN...
+        self::assertSame('tcp://127.0.0.1:4222|5000', $transport->connectCalls[0]);
+        // ...and applied to the CONNECT payload.
+        $connect = $transport->writes[0];
+        self::assertStringStartsWith('CONNECT ', $connect);
+        self::assertStringContainsString('"user":"alice"', $connect);
+        self::assertStringContainsString('"pass":"s3cret"', $connect);
+    }
+
+    /**
      * Verifies request uses configured inbox prefix for subscription and publish reply subject.
      */
     public function testRequestUsesConfiguredInboxPrefix(): void

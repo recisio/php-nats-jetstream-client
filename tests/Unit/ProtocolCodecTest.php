@@ -105,6 +105,33 @@ final class ProtocolCodecTest extends TestCase
     }
 
     /**
+     * Verifies URL-embedded user/password credentials are used and override the static options (#37).
+     */
+    public function testEncodeConnectUsesUrlUserPassword(): void
+    {
+        $codec = new ProtocolCodec();
+        $options = new NatsOptions(username: 'static-user', password: 'static-pass');
+
+        $result = $codec->encodeConnect($options, null, ['user' => 'url-user', 'pass' => 'url-pass']);
+
+        self::assertStringContainsString('"user":"url-user"', $result);
+        self::assertStringContainsString('"pass":"url-pass"', $result);
+        self::assertStringNotContainsString('static-user', $result);
+    }
+
+    /**
+     * Verifies a URL-embedded token is used as auth_token (#37).
+     */
+    public function testEncodeConnectUsesUrlToken(): void
+    {
+        $codec = new ProtocolCodec();
+
+        $result = $codec->encodeConnect(new NatsOptions(), null, ['token' => 'url-token']);
+
+        self::assertStringContainsString('"auth_token":"url-token"', $result);
+    }
+
+    /**
      * Verifies a jwtProvider is resolved per-encode and overrides the static JWT (#24).
      */
     public function testEncodeConnectUsesJwtProviderPerConnect(): void

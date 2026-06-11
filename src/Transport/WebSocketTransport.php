@@ -278,6 +278,11 @@ final class WebSocketTransport implements TlsAwareTransportInterface
      */
     private function buildTlsContext(string $host): ClientTlsContext
     {
+        // Honor a caller-supplied TLS context verbatim (in-memory PEM, ALPN, custom verification).
+        if ($this->options->tlsContext !== null) {
+            return $this->options->tlsContext;
+        }
+
         $peerName = $this->options->tlsPeerName;
         if ($peerName === null || $peerName === '') {
             $peerName = $host;

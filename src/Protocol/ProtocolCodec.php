@@ -23,8 +23,12 @@ final class ProtocolCodec
 
     /**
      * Builds the CONNECT frame payload for the initial client handshake.
+     *
+     * @param array{user?:string,pass?:string,token?:string} $urlCredentials Credentials parsed from the
+     *        server URL's userinfo (#37). They take precedence over the static {@see NatsOptions} user/
+     *        pass/token, but dynamic providers still win for token/jwt.
      */
-    public function encodeConnect(NatsOptions $options, ?string $serverNonce = null): string
+    public function encodeConnect(NatsOptions $options, ?string $serverNonce = null, array $urlCredentials = []): string
     {
         $payload = [
             'lang' => 'php',
@@ -38,21 +42,25 @@ final class ProtocolCodec
             'name' => $options->name,
         ];
 
-        // Resolve dynamic credential providers (re-invoked on every (re)connect) ahead of the static
-        // fallbacks, so rotated/short-lived tokens and JWTs are picked up automatically on reconnect.
-        $token = $options->tokenProvider !== null ? ($options->tokenProvider)() : $options->token;
+        // Credential precedence: a dynamic provider (re-invoked each (re)connect) wins, then a
+        // credential parsed from the server URL (#37), then the static option.
+        $token = $options->tokenProvider !== null
+            ? ($options->tokenProvider)()
+            : ($urlCredentials['token'] ?? $options->token);
         $jwt = $options->jwtProvider !== null ? ($options->jwtProvider)() : $options->jwt;
+        $user = $urlCredentials['user'] ?? $options->username;
+        $pass = $urlCredentials['pass'] ?? $options->password;
 
         if ($token !== null) {
             $payload['auth_token'] = $token;
         }
 
-        if ($options->username !== null) {
-            $payload['user'] = $options->username;
+        if ($user !== null) {
+            $payload['user'] = $user;
         }
 
-        if ($options->password !== null) {
-            $payload['pass'] = $options->password;
+        if ($pass !== null) {
+            $payload['pass'] = $pass;
         }
 
         if ($jwt !== null) {

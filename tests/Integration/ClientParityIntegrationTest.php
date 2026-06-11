@@ -6,6 +6,8 @@ namespace IDCT\NATS\Tests\Integration;
 
 use Amp\CancelledException;
 use Amp\DeferredCancellation;
+use Amp\Socket\Certificate;
+use Amp\Socket\ClientTlsContext;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\Enum\ConnectionEvent;
 use IDCT\NATS\Connection\NatsOptions;
@@ -317,6 +319,89 @@ final class ClientParityIntegrationTest extends TestCase
 
         $js->deleteConsumer($stream, $consumer)->await();
         $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #37 — credentials embedded in the server URL authenticate (user:pass against the userpass server).
+     */
+    public function testUrlEmbeddedUserPasswordAuthenticates(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $host = parse_url($this->integrationUserPassServerUrl(), PHP_URL_HOST) . ':' . parse_url($this->integrationUserPassServerUrl(), PHP_URL_PORT);
+        $url = sprintf('nats://%s:%s@%s', $this->integrationUsername(), $this->integrationPassword(), $host);
+
+        $client = new NatsClient(new NatsOptions(servers: [$url]));
+        $client->connect()->await();
+
+        // A round trip proves the URL-derived credentials authenticated the connection.
+        $subject = 'it.urlcred.' . bin2hex(random_bytes(4));
+        $received = null;
+        $client->subscribe($subject, static function (NatsMessage $m) use (&$received): void {
+            $received = $m->payload;
+        })->await();
+        $client->flush()->await();
+        $client->publish($subject, 'ok')->await();
+
+        $cancellation = new TimeoutCancellation(3.0);
+        try {
+            while ($received === null) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        self::assertSame('ok', $received);
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #37 — a token embedded in the server URL authenticates (token@host against the token server).
+     */
+    public function testUrlEmbeddedTokenAuthenticates(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $host = parse_url($this->integrationTokenServerUrl(), PHP_URL_HOST) . ':' . parse_url($this->integrationTokenServerUrl(), PHP_URL_PORT);
+        $url = sprintf('nats://%s@%s', $this->integrationToken(), $host);
+
+        $client = new NatsClient(new NatsOptions(servers: [$url]));
+        $client->connect()->await();
+
+        self::assertNotNull($client->serverInfo());
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #45 — an injected ClientTlsContext is used verbatim for the handshake.
+     */
+    public function testInjectedTlsContextConnects(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $caFile = $this->integrationTlsCaFile();
+        $certFile = $this->integrationTlsCertFile();
+        $keyFile = $this->integrationTlsKeyFile();
+        if ($caFile === null || $certFile === null || $keyFile === null) {
+            $this->markTestSkipped('TLS fixtures required for the injected-TLS-context test.');
+        }
+
+        $tls = (new ClientTlsContext('127.0.0.1'))
+            ->withCaFile($caFile)
+            ->withCertificate(new Certificate($certFile, $keyFile));
+        if (getenv('NATS_TLS_SKIP_VERIFY') === '1') {
+            $tls = $tls->withoutPeerVerification();
+        }
+
+        $client = new NatsClient(new NatsOptions(
+            servers: [$this->integrationTlsServerUrl()],
+            tlsHandshakeFirst: true,
+            tlsContext: $tls,
+        ));
+
+        $client->connect()->await();
+        self::assertNotNull($client->serverInfo());
         $client->disconnect()->await();
     }
 
