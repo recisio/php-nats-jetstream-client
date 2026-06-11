@@ -38,8 +38,13 @@ final class ProtocolCodec
             'name' => $options->name,
         ];
 
-        if ($options->token !== null) {
-            $payload['auth_token'] = $options->token;
+        // Resolve dynamic credential providers (re-invoked on every (re)connect) ahead of the static
+        // fallbacks, so rotated/short-lived tokens and JWTs are picked up automatically on reconnect.
+        $token = $options->tokenProvider !== null ? ($options->tokenProvider)() : $options->token;
+        $jwt = $options->jwtProvider !== null ? ($options->jwtProvider)() : $options->jwt;
+
+        if ($token !== null) {
+            $payload['auth_token'] = $token;
         }
 
         if ($options->username !== null) {
@@ -50,8 +55,8 @@ final class ProtocolCodec
             $payload['pass'] = $options->password;
         }
 
-        if ($options->jwt !== null) {
-            $payload['jwt'] = $options->jwt;
+        if ($jwt !== null) {
+            $payload['jwt'] = $jwt;
 
             if ($options->nonceSigner === null) {
                 throw new ProtocolException('JWT authentication requires a nonce signer');

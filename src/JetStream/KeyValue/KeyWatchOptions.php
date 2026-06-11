@@ -1,0 +1,66 @@
+<?php
+
+declare(strict_types=1);
+
+namespace IDCT\NATS\JetStream\KeyValue;
+
+/**
+ * Options for {@see KeyValueBucket::watch()}, mirroring the nats.go / nats.java KV watch option matrix.
+ *
+ * Delivery-policy precedence (highest first): {@see $resumeFromRevision}, {@see $includeHistory},
+ * {@see $updatesOnly}. With none set, the watcher replays the current value of every matching key
+ * (last-per-subject) and then streams live updates — the reference-client default.
+ */
+final class KeyWatchOptions
+{
+    /**
+     * @param bool          $includeHistory    Deliver the full history of each key (deliver_policy=all),
+     *                                          not just the latest value.
+     * @param bool          $updatesOnly       Deliver only updates that occur after the watch starts
+     *                                          (deliver_policy=new); no initial values are replayed.
+     * @param bool          $ignoreDeletes     Suppress delete/purge tombstones from the handler.
+     * @param bool          $metaOnly          Deliver headers only (no value bytes); the entry value is
+     *                                          empty. Useful for cheaply enumerating keys/revisions.
+     * @param int|null      $resumeFromRevision Start delivery at this stream sequence
+     *                                          (deliver_policy=by_start_sequence), e.g. to resume a watch.
+     * @param (\Closure():void)|null $onCaughtUp Invoked once when the initial replay has caught up to the
+     *                                          current end of the stream (a delivered message reports
+     *                                          num_pending = 0). Mirrors the reference "end of initial
+     *                                          data" signal.
+     */
+    public function __construct(
+        public readonly bool $includeHistory = false,
+        public readonly bool $updatesOnly = false,
+        public readonly bool $ignoreDeletes = false,
+        public readonly bool $metaOnly = false,
+        public readonly ?int $resumeFromRevision = null,
+        public readonly ?\Closure $onCaughtUp = null,
+    ) {}
+
+    /**
+     * Resolves the consumer config fragment (deliver policy + headers-only) implied by these options.
+     *
+     * @return array<string,mixed>
+     */
+    public function toConsumerConfig(): array
+    {
+        $config = ['ack_policy' => 'none'];
+
+        if ($this->resumeFromRevision !== null) {
+            $config['deliver_policy'] = 'by_start_sequence';
+            $config['opt_start_seq'] = $this->resumeFromRevision;
+        } elseif ($this->includeHistory) {
+            $config['deliver_policy'] = 'all';
+        } elseif ($this->updatesOnly) {
+            $config['deliver_policy'] = 'new';
+        } else {
+            $config['deliver_policy'] = 'last_per_subject';
+        }
+
+        if ($this->metaOnly) {
+            $config['headers_only'] = true;
+        }
+
+        return $config;
+    }
+}

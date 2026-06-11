@@ -17,6 +17,7 @@ use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
 use IDCT\NATS\JetStream\Models\AccountInfo;
 use IDCT\NATS\JetStream\Models\ConsumerInfo;
+use IDCT\NATS\JetStream\Models\JsMessageMetadata;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
@@ -41,8 +42,16 @@ final class JetStreamContext
      * Creates a JetStream API context bound to a NATS client.
       *
       * @param NatsClient $client Connected NATS client used to issue JetStream API request/reply calls.
+      * @param int $publishRetryAttempts Max publish attempts when the JetStream API momentarily has no
+      *                                  responder (503). 1 disables retry. Only 503s are retried — a real
+      *                                  publish error (precondition mismatch, bad subject) is not.
+      * @param int $publishRetryWaitMs Delay between publish retry attempts, in milliseconds.
      */
-    public function __construct(private readonly NatsClient $client) {}
+    public function __construct(
+        private readonly NatsClient $client,
+        private readonly int $publishRetryAttempts = 3,
+        private readonly int $publishRetryWaitMs = 250,
+    ) {}
 
     /**
      * Returns a fluent pull-consumer iterator builder.
@@ -314,6 +323,30 @@ final class JetStreamContext
                 payload: $payload,
                 rawHeaders: $rawHeaders,
             );
+        });
+    }
+
+    /**
+     * Deletes a single message from a stream by sequence number ($JS.API.STREAM.MSG.DELETE). By default
+     * this is a fast delete (the message is removed but its bytes are not overwritten — `no_erase`).
+     * Pass `$secureErase = true` for a secure delete that overwrites the message data with random bytes
+     * before removal (slower; mirrors nats.go `SecureDeleteMsg` / nats.java `deleteMessage(seq, true)`).
+     *
+     * @return Future<bool> True when the server confirms the deletion.
+     */
+    public function deleteMessage(string $stream, int $seq, bool $secureErase = false): Future
+    {
+        return async(function () use ($stream, $seq, $secureErase): bool {
+            $body = ['seq' => $seq];
+            if (!$secureErase) {
+                // Fast delete: keep the stored bytes in place, just unlink the sequence. A secure
+                // erase omits this flag so the server overwrites the data before removing it.
+                $body['no_erase'] = true;
+            }
+
+            $response = $this->requestJson(JetStreamApi::STREAM_MSG_DELETE_PREFIX . $stream, $body);
+
+            return (bool) ($response['success'] ?? false);
         });
     }
 
@@ -913,9 +946,19 @@ final class JetStreamContext
      * The TTL accepts an integer number of seconds, a Go duration string, or "never". `$msgId` works on
      * NATS 2.2+; `$ttl` requires NATS 2.11+ (the `allow_msg_ttl` stream create call fails on older servers).
      *
+     * Optimistic-concurrency preconditions can be attached so the append only succeeds when the stream
+     * is in the expected state (the server rejects a mismatch with a `JetStreamException`):
+     * `$expectedStream` (Nats-Expected-Stream), `$expectedLastSequence` (Nats-Expected-Last-Sequence),
+     * `$expectedLastSubjectSequence` (Nats-Expected-Last-Subject-Sequence — `0` asserts "no prior
+     * message on this subject"), and `$expectedLastMsgId` (Nats-Expected-Last-Msg-Id).
+     *
      * @param array<string,string> $headers Additional message headers.
      * @param string|null          $msgId   Optional de-duplication id (`Nats-Msg-Id`).
      * @param int|string|null      $ttl     Optional per-message TTL (`Nats-TTL`).
+     * @param string|null          $expectedStream              Optional expected target stream name.
+     * @param int|null             $expectedLastSequence        Optional expected stream last sequence.
+     * @param int|null             $expectedLastSubjectSequence Optional expected per-subject last sequence (0 = none).
+     * @param string|null          $expectedLastMsgId           Optional expected last `Nats-Msg-Id`.
      * @return Future<PubAck>
      */
     public function publish(
@@ -924,8 +967,12 @@ final class JetStreamContext
         array $headers = [],
         ?string $msgId = null,
         int|string|null $ttl = null,
+        ?string $expectedStream = null,
+        ?int $expectedLastSequence = null,
+        ?int $expectedLastSubjectSequence = null,
+        ?string $expectedLastMsgId = null,
     ): Future {
-        return async(function () use ($subject, $payload, $headers, $msgId, $ttl): PubAck {
+        return async(function () use ($subject, $payload, $headers, $msgId, $ttl, $expectedStream, $expectedLastSequence, $expectedLastSubjectSequence, $expectedLastMsgId): PubAck {
             if ($msgId !== null) {
                 if ($msgId === '') {
                     throw new JetStreamException('Nats-Msg-Id must not be empty');
@@ -938,10 +985,54 @@ final class JetStreamContext
                 $headers['Nats-TTL'] = MessageTtl::format($ttl);
             }
 
-            $message = $this->jsRequest($subject, $payload, $headers === [] ? null : $headers);
+            if ($expectedStream !== null && $expectedStream !== '') {
+                $headers['Nats-Expected-Stream'] = $expectedStream;
+            }
+
+            // Sequence preconditions may legitimately be 0 ("expect no prior message"), so compare to
+            // null rather than truthiness.
+            if ($expectedLastSequence !== null) {
+                $headers['Nats-Expected-Last-Sequence'] = (string) $expectedLastSequence;
+            }
+
+            if ($expectedLastSubjectSequence !== null) {
+                $headers['Nats-Expected-Last-Subject-Sequence'] = (string) $expectedLastSubjectSequence;
+            }
+
+            if ($expectedLastMsgId !== null && $expectedLastMsgId !== '') {
+                $headers['Nats-Expected-Last-Msg-Id'] = $expectedLastMsgId;
+            }
+
+            $message = $this->publishWithRetry($subject, $payload, $headers === [] ? null : $headers);
 
             return $this->parsePublishAck($message);
         });
+    }
+
+    /**
+     * Issues a JetStream publish request, retrying when the JetStream API momentarily has no responder
+     * (a 503 — e.g. a brief leadership change or the API not yet wired up after reconnect). Mirrors
+     * nats.go `RetryAttempts`/`RetryWait` and nats.java's publish retry (#29).
+     *
+     * @param array<string,string>|null $headers
+     */
+    private function publishWithRetry(string $subject, string $payload, ?array $headers): NatsMessage
+    {
+        $attempts = max(1, $this->publishRetryAttempts);
+
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                return $this->jsRequest($subject, $payload, $headers);
+            } catch (JetStreamException $e) {
+                // Only transient "no responder" failures are retried; a real publish error (bad
+                // subject, precondition mismatch, ...) is surfaced immediately.
+                if ($e->getCode() !== 503 || $attempt >= $attempts) {
+                    throw $e;
+                }
+
+                delay(max(0, $this->publishRetryWaitMs) / 1000);
+            }
+        }
     }
 
     /**
@@ -1223,6 +1314,31 @@ final class JetStreamContext
     public function ack(NatsMessage $message): Future
     {
         return $this->publishAckToken($message, '+ACK');
+    }
+
+    /**
+     * Acknowledges a message and waits for the server to confirm the ACK was received (double-ack),
+     * for exactly-once-style processing. Unlike {@see ack()} (fire-and-forget), this sends `+ACK` as a
+     * request and blocks until the server's empty confirmation arrives or the timeout elapses.
+     * Mirrors nats.go `Msg.DoubleAck()` / nats.java `Message.ackSync()` (#18).
+     *
+     * @param int|null $timeoutMs Confirmation timeout (null = the client's default request timeout).
+     * @return Future<void>
+     *
+     * @throws JetStreamException When the message carries no reply subject.
+     * @throws \IDCT\NATS\Exception\TimeoutException When no confirmation arrives in time.
+     */
+    public function ackSync(NatsMessage $message, ?int $timeoutMs = null): Future
+    {
+        return async(function () use ($message, $timeoutMs): void {
+            if ($message->replyTo === null || $message->replyTo === '') {
+                throw new JetStreamException('JetStream ACK requires a reply subject on the delivered message');
+            }
+
+            // A request (not a bare publish) so the server round-trips an empty confirmation that the
+            // ACK was durably recorded.
+            $this->client->request($message->replyTo, '+ACK', $timeoutMs)->await();
+        });
     }
 
     /**
@@ -1576,6 +1692,26 @@ final class JetStreamContext
     public function streamSequenceOf(NatsMessage $message): ?int
     {
         return $this->extractStreamSequence($message);
+    }
+
+    /**
+     * Returns the full JetStream delivery metadata for a consumed message — stream/consumer sequences,
+     * redelivery count (`num_delivered`), pending backlog (`num_pending`), server timestamp, and the
+     * JetStream domain — parsed from its `$JS.ACK` reply subject. Mirrors nats.go `Msg.Metadata()` /
+     * nats.java `Message.metaData()` (#30).
+     *
+     * @throws JetStreamException When the message was not delivered by a JetStream consumer.
+     */
+    public function messageMetadata(NatsMessage $message): JsMessageMetadata
+    {
+        $metadata = JsMessageMetadata::fromMessage($message);
+        if ($metadata === null) {
+            throw new JetStreamException(
+                'Message is not a JetStream delivery (no parseable $JS.ACK reply subject)',
+            );
+        }
+
+        return $metadata;
     }
 
     /**

@@ -6,6 +6,7 @@ namespace IDCT\NATS\Tests\Unit;
 
 use Amp\CancelledException;
 use Amp\DeferredCancellation;
+use IDCT\NATS\Connection\Enum\ConnectionEvent;
 use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Connection\NatsConnection;
@@ -271,6 +272,217 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies a delivered message can reply to its own reply subject via respond() (#17).
+     */
+    public function testDeliveredMessageCanRespondToReplySubject(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.echo 1 _INBOX.reply 4\r\nping\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $connection->subscribe('svc.echo', static function (NatsMessage $message): void {
+            self::assertTrue($message->isReplyable());
+            $message->respond('pong')->await();
+        })->await();
+
+        $connection->processIncoming()->await();
+
+        $replies = array_values(array_filter(
+            $transport->writes,
+            static fn(string $w): bool => str_starts_with($w, 'PUB _INBOX.reply '),
+        ));
+        self::assertCount(1, $replies);
+        self::assertSame("PUB _INBOX.reply 4\r\npong\r\n", $replies[0]);
+    }
+
+    /**
+     * Verifies respond() with headers emits an HPUB to the reply subject (#17).
+     */
+    public function testDeliveredMessageCanRespondWithHeaders(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG svc.echo 1 _INBOX.reply 4\r\nping\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $connection->subscribe('svc.echo', static function (NatsMessage $message): void {
+            $message->respondWithHeaders('pong', ['X-Trace' => 'abc'])->await();
+        })->await();
+
+        $connection->processIncoming()->await();
+
+        $replies = array_values(array_filter(
+            $transport->writes,
+            static fn(string $w): bool => str_starts_with($w, 'HPUB _INBOX.reply '),
+        ));
+        self::assertCount(1, $replies);
+        self::assertStringContainsString('X-Trace:abc', $replies[0]);
+    }
+
+    /**
+     * Verifies respond() throws when the message carries no reply subject (#17).
+     */
+    public function testRespondThrowsWithoutReplySubject(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG updates 1 5\r\nhello\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $caught = null;
+        $connection->subscribe('updates', static function (NatsMessage $message) use (&$caught): void {
+            self::assertFalse($message->isReplyable());
+            try {
+                $message->respond('nope')->await();
+            } catch (\LogicException $e) {
+                $caught = $e;
+            }
+        })->await();
+
+        $connection->processIncoming()->await();
+
+        self::assertInstanceOf(\LogicException::class, $caught);
+        self::assertStringContainsString('no reply subject', $caught->getMessage());
+    }
+
+    /**
+     * Verifies a message constructed outside the delivery path cannot respond (#17).
+     */
+    public function testRespondThrowsWhenNotBoundToConnection(): void
+    {
+        $message = new NatsMessage('svc.echo', 1, '_INBOX.reply', 'ping');
+
+        self::assertFalse($message->isReplyable());
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('not bound to a live connection');
+        $message->respond('pong')->await();
+    }
+
+    /**
+     * Verifies the connection listener receives Connected then Closed across the lifecycle (#22).
+     */
+    public function testConnectionListenerReceivesConnectedAndClosed(): void
+    {
+        $events = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(connectionListener: static function (ConnectionEvent $e, ?\Throwable $err) use (&$events): void {
+                $events[] = $e;
+            }),
+            $transport,
+        );
+
+        $connection->connect()->await();
+        $connection->disconnect()->await();
+
+        self::assertSame([ConnectionEvent::Connected, ConnectionEvent::Closed], $events);
+    }
+
+    /**
+     * Verifies an async INFO update emits LameDuck and DiscoveredServers events (#22).
+     */
+    public function testConnectionListenerReceivesLameDuckAndDiscoveredServers(): void
+    {
+        $events = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","max_payload":1048576,"headers":true,"ldm":true,"connect_urls":["10.0.0.2:4222"]}' . "\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(connectionListener: static function (ConnectionEvent $e) use (&$events): void {
+                $events[] = $e;
+            }),
+            $transport,
+        );
+
+        $connection->connect()->await();
+        $connection->processIncoming()->await();
+
+        self::assertSame([
+            ConnectionEvent::Connected,
+            ConnectionEvent::LameDuck,
+            ConnectionEvent::DiscoveredServers,
+        ], $events);
+    }
+
+    /**
+     * Verifies the error listener is notified of slow-consumer drops (#23).
+     */
+    public function testErrorListenerReceivesSlowConsumerDrop(): void
+    {
+        $errors = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG updates 1 1\r\nA\r\nMSG updates 1 1\r\nB\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                maxPendingMessagesPerSubscription: 1,
+                slowConsumerPolicy: SlowConsumerPolicy::DropOldest,
+                errorListener: static function (\Throwable $err) use (&$errors): void {
+                    $errors[] = $err->getMessage();
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+        $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
+
+        $connection->processIncoming()->await();
+
+        self::assertCount(1, $errors);
+        self::assertStringContainsString('Slow consumer', $errors[0]);
+    }
+
+    /**
+     * Verifies the error listener is notified of recoverable server -ERR frames (#23).
+     */
+    public function testErrorListenerReceivesRecoverableServerError(): void
+    {
+        $errors = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "-ERR 'Permissions Violation for Subscription to foo'\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(errorListener: static function (\Throwable $err) use (&$errors): void {
+                $errors[] = $err->getMessage();
+            }),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        $connection->processIncoming()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertCount(1, $errors);
+        self::assertStringContainsString('recoverable error frame', $errors[0]);
+    }
+
+    /**
      * Verifies HMSG frames preserve raw headers and payload separation.
      */
     public function testProcessIncomingDispatchesHmsgWithRawHeaders(): void
@@ -471,6 +683,68 @@ final class NatsConnectionTest extends TestCase
         } finally {
             self::assertSame("UNSUB 1\r\n", $transport->writes[4]);
         }
+    }
+
+    /**
+     * Verifies request-many collects multiple replies and stops at maxResponses (#21).
+     */
+    public function testRequestManyCollectsUpToMaxResponses(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG _INBOX.any 1 1\r\nA\r\nMSG _INBOX.any 1 1\r\nB\r\nMSG _INBOX.any 1 1\r\nC\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $replies = $connection->requestMany('svc.scan', 'q', null, 3, 1000)->await();
+
+        $payloads = array_map(static fn(NatsMessage $m): string => $m->payload, $replies);
+        self::assertSame(['A', 'B', 'C'], $payloads);
+        self::assertStringStartsWith('PUB svc.scan _INBOX.', $transport->writes[3]);
+        self::assertSame("UNSUB 1\r\n", $transport->writes[4]);
+    }
+
+    /**
+     * Verifies request-many stops once the per-message stall interval elapses (#21).
+     */
+    public function testRequestManyStopsOnStallInterval(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG _INBOX.any 1 1\r\nA\r\nMSG _INBOX.any 1 1\r\nB\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        // No maxResponses: collection ends because no further reply arrives within the 20ms stall.
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 5000, 20)->await();
+
+        self::assertCount(2, $replies);
+    }
+
+    /**
+     * Verifies request-many returns an empty set on a no-responders sentinel (#21).
+     */
+    public function testRequestManyReturnsEmptyOnNoResponders(): void
+    {
+        $status = "NATS/1.0 503\r\n\r\n";
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            'HMSG _INBOX.any 1 ' . strlen($status) . ' ' . strlen($status) . "\r\n" . $status . "\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 1000)->await();
+
+        self::assertSame([], $replies);
     }
 
     /**

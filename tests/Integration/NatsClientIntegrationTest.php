@@ -104,6 +104,8 @@ final class NatsClientIntegrationTest extends TestCase
                 $server->publish($message->replyTo, 'world')->await();
             }
         })->await();
+        // Ensure the SUB is registered server-side before the requester publishes (avoid a 503 race).
+        $server->flush()->await();
 
         // Pump the server continuously while the requester waits; a single read is not enough
         // because one socket read does not necessarily contain a whole frame. The read is
@@ -201,6 +203,8 @@ final class NatsClientIntegrationTest extends TestCase
                 $server->publish($message->replyTo, 'ok')->await();
             }
         })->await();
+        // Ensure the SUB is registered server-side before the requester publishes (avoid a 503 race).
+        $server->flush()->await();
 
         $serverPumpCancel = new DeferredCancellation();
         $serverPump = async(static function () use ($server, $serverPumpCancel): void {
@@ -1568,6 +1572,10 @@ final class NatsClientIntegrationTest extends TestCase
             $received++;
             // Intentionally no reply to trigger requester timeout path.
         })->await();
+        // Ensure the SUB is registered server-side before the requester publishes, otherwise the
+        // no-responders sentinel races the subscription and the request fails with 503 instead of
+        // timing out.
+        $server->flush()->await();
 
         $serverPumpCancellation = new DeferredCancellation();
         $serverPump = async(static function () use ($server, $serverPumpCancellation): void {
@@ -1722,6 +1730,11 @@ final class NatsClientIntegrationTest extends TestCase
         $server->subscribe($subject, static function (NatsMessage $message): void {
             // Intentionally do not reply; requester should be cancelled first.
         })->await();
+
+        // Ensure the SUB is registered server-side before the requester publishes, otherwise the
+        // server's no-responders sentinel races the subscription and the request fails with a 503
+        // instead of being cancelled.
+        $server->flush()->await();
 
         $serverPumpCancellation = new DeferredCancellation();
         $serverPump = async(static function () use ($server, $serverPumpCancellation): void {

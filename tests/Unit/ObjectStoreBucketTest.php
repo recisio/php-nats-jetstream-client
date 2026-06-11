@@ -539,6 +539,70 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
+     * Verifies updateMeta() renames an object without re-upload: preserves the NUID, writes the new
+     * meta, and tombstones the old name without purging chunks (#28).
+     */
+    public function testUpdateMetaRenamesPreservingNuid(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // info('logo.txt') Direct Get (sid 1) -> existing object on nuid n1.
+            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old'), 'metadata' => ['team' => 'design']], 1),
+            // info('brand.txt') clash check Direct Get (sid 2) -> 404 (target free).
+            $this->directStatusReply(2, 404, 'Message Not Found'),
+            // publishMeta('brand.txt') ack (sid 3).
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(8)), $this->pubAck(8)),
+            // publishMeta('logo.txt' tombstone) ack (sid 4).
+            sprintf("MSG _INBOX.d 4 %d\r\n%s\r\n", strlen($this->pubAck(9)), $this->pubAck(9)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->objectStore('assets')->updateMeta('logo.txt', 'brand.txt')->await();
+
+        self::assertSame('brand.txt', $info->name);
+        self::assertSame('n1', $info->nuid);     // chunks preserved by NUID, not re-uploaded
+        self::assertSame(3, $info->size);
+
+        $writes = implode('||', $transport->writes);
+        // New meta written under the new name's encoded subject...
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('brand.txt') . ' ', $writes);
+        // ...and the old name tombstoned (deleted:true) without any STREAM.PURGE of chunks.
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('logo.txt') . ' ', $writes);
+        self::assertStringContainsString('"deleted":true', $writes);
+        self::assertStringNotContainsString('$JS.API.STREAM.PURGE', $writes);
+    }
+
+    /**
+     * Verifies updateMeta() replaces the metadata bag in place (no rename, no chunk churn) (#28).
+     */
+    public function testUpdateMetaReplacesMetadataInPlace(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->directMetaReply('logo.txt', ['nuid' => 'n1', 'size' => 3, 'chunks' => 1, 'digest' => $this->digestOf('old'), 'metadata' => ['team' => 'design']], 1),
+            sprintf("MSG _INBOX.c 2 %d\r\n%s\r\n", strlen($this->pubAck(8)), $this->pubAck(8)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->objectStore('assets')->updateMeta('logo.txt', null, ['team' => 'brand', 'owner' => 'x'])->await();
+
+        self::assertSame('logo.txt', $info->name);
+        self::assertSame(['team' => 'brand', 'owner' => 'x'], $info->metadata);
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('logo.txt') . ' ', $writes);
+        self::assertStringContainsString('"team":"brand"', $writes);
+        // No tombstone / no second name involved.
+        self::assertStringNotContainsString('"deleted":true', $writes);
+    }
+
+    /**
      * Verifies list enumerates meta subjects and reads the latest record per object.
      */
     public function testListEnumeratesMetaSubjects(): void

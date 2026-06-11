@@ -917,6 +917,180 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies publish emits optimistic-concurrency expectation headers (#16).
+     */
+    public function testPublishWithExpectationHeaders(): void
+    {
+        $ackPayload = '{"stream":"ORDERS","seq":43,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->publish(
+            'orders.created',
+            '{"id":1}',
+            expectedStream: 'ORDERS',
+            expectedLastSequence: 42,
+            expectedLastSubjectSequence: 0,
+            expectedLastMsgId: 'order-41',
+        )->await();
+
+        $hpub = $transport->writes[3];
+        self::assertStringStartsWith('HPUB orders.created _INBOX.', $hpub);
+        self::assertStringContainsString('Nats-Expected-Stream:ORDERS', $hpub);
+        self::assertStringContainsString('Nats-Expected-Last-Sequence:42', $hpub);
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:0', $hpub);
+        self::assertStringContainsString('Nats-Expected-Last-Msg-Id:order-41', $hpub);
+    }
+
+    /**
+     * Verifies a precondition mismatch (error ack) surfaces as a JetStreamException and is NOT retried (#16).
+     */
+    public function testPublishExpectationMismatchThrows(): void
+    {
+        $errorAck = '{"error":{"code":400,"err_code":10071,"description":"wrong last sequence: 5"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorAck), $errorAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('wrong last sequence');
+        $client->jetStream()->publish('orders.created', '{"id":1}', expectedLastSequence: 99)->await();
+    }
+
+    /**
+     * Verifies a publish that hits a transient no-responders (503) is retried and then succeeds (#29).
+     */
+    public function testPublishRetriesOnNoResponders(): void
+    {
+        $status = "NATS/1.0 503\r\n\r\n";
+        $ackPayload = '{"stream":"ORDERS","seq":50,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // First publish request -> 503 no-responders on inbox sid 1.
+            'HMSG _INBOX.a 1 ' . strlen($status) . ' ' . strlen($status) . "\r\n" . $status . "\r\n",
+            // Retry publish request -> success ack on inbox sid 2.
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
+        ]);
+
+        // Tight retry wait so the test is fast.
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+        $js = new JetStreamContext($client, publishRetryAttempts: 3, publishRetryWaitMs: 1);
+
+        $ack = $js->publish('orders.created', '{"id":1}')->await();
+
+        self::assertSame(50, $ack->seq);
+    }
+
+    /**
+     * Verifies ackSync sends +ACK as a request and resolves on the server confirmation (#18).
+     */
+    public function testAckSyncSendsAckAsRequestAndAwaitsConfirmation(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // Empty confirmation reply on the double-ack inbox (sid 1).
+            "MSG _INBOX.any 1 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $delivered = new NatsMessage('events.x', 9, '$JS.ACK.ORDERS.c1.1.5.5.0.0', 'body');
+        $client->jetStream()->ackSync($delivered, 100)->await();
+
+        // The +ACK travelled as a request: a SUB on a fresh inbox then a PUB carrying the reply inbox.
+        self::assertStringStartsWith('SUB _INBOX.', $transport->writes[2]);
+        self::assertStringStartsWith('PUB $JS.ACK.ORDERS.c1.1.5.5.0.0 _INBOX.', $transport->writes[3]);
+        self::assertStringEndsWith("\r\n+ACK\r\n", $transport->writes[3]);
+    }
+
+    /**
+     * Verifies deleteMessage issues a fast (no_erase) delete by default and a secure erase on request (#20).
+     */
+    public function testDeleteMessageFastAndSecure(): void
+    {
+        $ok = '{"success":true}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ok), $ok),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ok), $ok),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+        $js = $client->jetStream();
+
+        self::assertTrue($js->deleteMessage('ORDERS', 7)->await());
+        self::assertTrue($js->deleteMessage('ORDERS', 8, secureErase: true)->await());
+
+        self::assertStringContainsString('$JS.API.STREAM.MSG.DELETE.ORDERS', $transport->writes[3]);
+        self::assertStringContainsString('"no_erase":true', $transport->writes[3]);
+        self::assertStringContainsString('"seq":7', $transport->writes[3]);
+        // Secure erase omits no_erase so the server overwrites the data (second request's PUB).
+        self::assertStringNotContainsString('no_erase', $transport->writes[6]);
+        self::assertStringContainsString('"seq":8', $transport->writes[6]);
+    }
+
+    /**
+     * Verifies messageMetadata parses the full $JS.ACK tuple, incl. domain form (#30).
+     */
+    public function testMessageMetadataParsesAckTuple(): void
+    {
+        $client = new NatsClient(new NatsOptions());
+        $js = $client->jetStream();
+
+        // 9-token form: $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>
+        $short = new NatsMessage('events.x', 1, '$JS.ACK.ORDERS.worker.3.42.40.1700000000000000000.7', 'body');
+        $meta = $js->messageMetadata($short);
+        self::assertSame('ORDERS', $meta->stream);
+        self::assertSame('worker', $meta->consumer);
+        self::assertSame(3, $meta->numDelivered);
+        self::assertSame(42, $meta->streamSequence);
+        self::assertSame(40, $meta->consumerSequence);
+        self::assertSame(7, $meta->numPending);
+        self::assertNull($meta->domain);
+        self::assertSame(1700000000000000000, $meta->timestampNanos);
+
+        // Domain-qualified (11-token) form.
+        $domainMsg = new NatsMessage('events.x', 1, '$JS.ACK.hub.ACCT.ORDERS.worker.2.99.50.1700000000000000000.4', 'body');
+        $dmeta = $js->messageMetadata($domainMsg);
+        self::assertSame('hub', $dmeta->domain);
+        self::assertSame('ORDERS', $dmeta->stream);
+        self::assertSame(99, $dmeta->streamSequence);
+        self::assertSame(4, $dmeta->numPending);
+    }
+
+    /**
+     * Verifies messageMetadata rejects a non-JetStream message (#30).
+     */
+    public function testMessageMetadataThrowsForNonJetStreamMessage(): void
+    {
+        $client = new NatsClient(new NatsOptions());
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('not a JetStream delivery');
+        $client->jetStream()->messageMetadata(new NatsMessage('events.x', 1, '_INBOX.plain', 'body'));
+    }
+
+    /**
      * Verifies publish with an integer TTL emits Nats-TTL in seconds (issue #4).
      */
     public function testPublishWithTtlSeconds(): void

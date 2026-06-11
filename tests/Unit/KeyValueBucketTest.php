@@ -8,6 +8,7 @@ use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\KeyValue\KeyValueEntry;
+use IDCT\NATS\JetStream\KeyValue\KeyWatchOptions;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
 
@@ -129,6 +130,138 @@ final class KeyValueBucketTest extends TestCase
         self::assertStringStartsWith('PUB $JS.API.DIRECT.GET.KV_cfg _INBOX.', $transport->writes[6]);
         self::assertStringStartsWith('HPUB $KV.cfg.theme _INBOX.', $transport->writes[9]);
         self::assertStringContainsString('KV-Operation:DEL', $transport->writes[9]);
+    }
+
+    /**
+     * Verifies createKey() succeeds on an absent key, asserting expected-last-subject-sequence 0 (#19).
+     */
+    public function testCreateKeySucceedsWhenAbsent(): void
+    {
+        $putAck = '{"stream":"KV_cfg","seq":1,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($putAck), $putAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ack = $client->jetStream()->keyValue('cfg')->createKey('theme', 'blue')->await();
+
+        self::assertSame(1, $ack->seq);
+        self::assertStringStartsWith('HPUB $KV.cfg.theme _INBOX.', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:0', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies createKey() throws when the key already has a live value (#19).
+     */
+    public function testCreateKeyThrowsWhenKeyExists(): void
+    {
+        // First attempt (expected seq 0) is rejected with a wrong-last-sequence error ack...
+        $errAck = '{"error":{"code":400,"err_code":10071,"description":"wrong last sequence: 4"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errAck), $errAck),
+            // ...then get() (Direct Get) shows a live value, so the key really exists.
+            $this->kvDirectReply('$KV.cfg.theme', 'green', 4, 2),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Key already exists');
+        $client->jetStream()->keyValue('cfg')->createKey('theme', 'blue')->await();
+    }
+
+    /**
+     * Verifies keys() returns the live key names (deleted keys excluded) (#25).
+     */
+    public function testKeysReturnsLiveKeyNames(): void
+    {
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":4,"subjects":{"$KV.cfg.username":2,"$KV.cfg.email":2}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"subjects":{}}}';
+        $usernameHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.username\r\nNats-Sequence: 3\r\nKV-Operation: DEL\r\n\r\n";
+        $emailHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.email\r\nNats-Sequence: 4\r\n\r\n";
+        $emailBody = 'b@example.com';
+        $uh = strlen($usernameHdrs);
+        $eh = strlen($emailHdrs);
+        $et = $eh + strlen($emailBody);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),
+            sprintf("HMSG _INBOX.b 3 %d %d\r\n%s\r\n", $uh, $uh, $usernameHdrs),            // username -> DEL (excluded)
+            sprintf("HMSG _INBOX.c 4 %d %d\r\n%s%s\r\n", $eh, $et, $emailHdrs, $emailBody), // email -> live
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $keys = $client->jetStream()->keyValue('cfg')->keys()->await();
+
+        self::assertSame(['email'], $keys);
+    }
+
+    /**
+     * Verifies watch() options drive deliver policy + headers-only on the consumer config (#26).
+     */
+    public function testWatchOptionsConfigureConsumer(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->watch(
+            static function (KeyValueEntry $entry): void {},
+            '>',
+            new KeyWatchOptions(includeHistory: true, metaOnly: true, ignoreDeletes: true),
+        )->await();
+
+        $createRequest = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"all"', $createRequest);
+        self::assertStringContainsString('"headers_only":true', $createRequest);
+    }
+
+    /**
+     * Verifies a resume-from-revision watch uses by_start_sequence with the given start (#26).
+     */
+    public function testWatchResumeFromRevisionUsesStartSequence(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->watch(
+            static function (KeyValueEntry $entry): void {},
+            '>',
+            new KeyWatchOptions(resumeFromRevision: 42),
+        )->await();
+
+        $createRequest = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"by_start_sequence"', $createRequest);
+        self::assertStringContainsString('"opt_start_seq":42', $createRequest);
     }
 
     /**

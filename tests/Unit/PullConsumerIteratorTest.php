@@ -122,6 +122,69 @@ final class PullConsumerIteratorTest extends TestCase
         self::assertSame(['order-1'], $processed);
     }
 
+    /**
+     * Verifies stop() ends the consume loop promptly, abandoning the rest of the in-flight batch (#32).
+     */
+    public function testStopAbandonsRestOfBatch(): void
+    {
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            // One fetch (sid 1) delivers a full batch of 3.
+            $this->jsMsg('_INBOX.JS.FETCH.any', 'm1', '$JS.ACK.S.C.1.1.1.123.0')
+                . $this->jsMsg('_INBOX.JS.FETCH.any', 'm2', '$JS.ACK.S.C.1.2.2.123.0')
+                . $this->jsMsg('_INBOX.JS.FETCH.any', 'm3', '$JS.ACK.S.C.1.3.3.123.0'),
+            // Safety terminator if a (buggy) second pull were issued.
+            sprintf("HMSG _INBOX.JS.FETCH.any 2 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setBatching(3)->setExpiresMs(200);
+        $processed = [];
+        $total = $iter->handle(function (NatsMessage $msg) use (&$processed, $iter): void {
+            $processed[] = $msg->payload;
+            $iter->stop();
+        })->await();
+
+        self::assertSame(1, $total);
+        self::assertSame(['m1'], $processed);
+    }
+
+    /**
+     * Verifies drain() finishes the in-flight batch but issues no further pull (#32).
+     */
+    public function testDrainFinishesBatchThenStops(): void
+    {
+        $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";
+        $hdrLen = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            ...$this->infoAndPong(),
+            $this->jsMsg('_INBOX.JS.FETCH.any', 'm1', '$JS.ACK.S.C.1.1.1.123.0')
+                . $this->jsMsg('_INBOX.JS.FETCH.any', 'm2', '$JS.ACK.S.C.1.2.2.123.0')
+                . $this->jsMsg('_INBOX.JS.FETCH.any', 'm3', '$JS.ACK.S.C.1.3.3.123.0'),
+            sprintf("HMSG _INBOX.JS.FETCH.any 2 %d %d\r\n%s\r\n", $hdrLen, $hdrLen, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $iter = $client->jetStream()->pullConsumer('S', 'C')->setBatching(3)->setExpiresMs(200);
+        $processed = [];
+        $total = $iter->handle(function (NatsMessage $msg) use (&$processed, $iter): void {
+            $processed[] = $msg->payload;
+            $iter->drain();
+        })->await();
+
+        // The whole in-flight batch finished (drain is graceful), but no second pull was issued.
+        self::assertSame(3, $total);
+        self::assertSame(['m1', 'm2', 'm3'], $processed);
+    }
+
     public function testHandleStopsOnNoMessages(): void
     {
         $statusHeaders = "NATS/1.0 404 No Messages\r\nStatus: 404\r\n\r\n";

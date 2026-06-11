@@ -276,18 +276,26 @@ final class KeyValueBucket
      * @param callable(KeyValueEntry):void $handler
      * @return Future<int>
      */
-    public function watch(callable $handler, string $pattern = '>'): Future
+    public function watch(callable $handler, string $pattern = '>', ?KeyWatchOptions $options = null): Future
     {
-        return async(function () use ($handler, $pattern): int {
+        return async(function () use ($handler, $pattern, $options): int {
             $filter = $this->subjectPrefix() . $pattern;
+
+            // Default (no options) preserves the original live-updates-only behavior (deliver_policy=new,
+            // ack-free). Options select history/last-per-subject replay, meta-only, resume-from-revision,
+            // delete suppression, and an end-of-initial-data signal.
+            $consumerOptions = $options?->toConsumerConfig()
+                ?? ['deliver_policy' => 'new', 'ack_policy' => 'none'];
+            $ignoreDeletes = $options !== null && $options->ignoreDeletes;
+            $onCaughtUp = $options?->onCaughtUp;
+            $caughtUpFired = false;
 
             // Deliver via a JetStream push consumer (not a plain core subscription) so each update
             // carries its stream sequence — i.e. the KV revision — which a watcher needs to feed back
-            // into update()/CAS. deliver_policy=new keeps the live-updates-only semantics; the read
-            // is ack-free.
+            // into update()/CAS.
             return $this->jetStream->subscribeEphemeralPushConsumer(
                 $this->streamName(),
-                function (NatsMessage $message) use ($handler): void {
+                function (NatsMessage $message) use ($handler, $ignoreDeletes, $onCaughtUp, &$caughtUpFired): void {
                     $key = $this->keyFromSubject($message->subject);
                     if ($key === null) {
                         return;
@@ -295,20 +303,89 @@ final class KeyValueBucket
 
                     $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
                     $operation = $this->operationFromHeaders($headers);
-                    $revision = $this->jetStream->streamSequenceOf($message);
+                    $isDelete = $operation === 'DEL' || $operation === 'PURGE';
 
-                    $handler(new KeyValueEntry(
-                        bucket: $this->bucket,
-                        key: $key,
-                        value: $operation === 'DEL' || $operation === 'PURGE' ? null : $message->payload,
-                        operation: $operation,
-                        revision: $revision,
-                    ));
+                    if (!($ignoreDeletes && $isDelete)) {
+                        $handler(new KeyValueEntry(
+                            bucket: $this->bucket,
+                            key: $key,
+                            value: $isDelete ? null : $message->payload,
+                            operation: $operation,
+                            revision: $this->jetStream->streamSequenceOf($message),
+                        ));
+                    }
+
+                    // End-of-initial-data signal: fire once when the replay has caught up to the
+                    // current end of the stream (this delivery reports no further pending messages).
+                    if ($onCaughtUp !== null && !$caughtUpFired) {
+                        $pending = $this->jetStream->messageMetadata($message)->numPending;
+                        if ($pending === 0) {
+                            $caughtUpFired = true;
+                            $onCaughtUp();
+                        }
+                    }
                 },
                 filterSubject: $filter,
-                consumerOptions: ['deliver_policy' => 'new', 'ack_policy' => 'none'],
+                consumerOptions: $consumerOptions,
             )->await();
         });
+    }
+
+    /**
+     * Creates a key only when it does not already exist (exclusive create), mirroring nats.go /
+     * nats.java `KeyValue.Create`. A key counts as absent when it was never written or its latest
+     * record is a delete/purge tombstone; otherwise a {@see JetStreamException} ("key exists") is
+     * thrown. Named `createKey` to avoid colliding with the bucket-level {@see create()}.
+     *
+     * @param int|string|null $ttl Optional per-key TTL (`Nats-TTL`; requires `allow_msg_ttl`).
+     * @return Future<PubAck>
+     */
+    public function createKey(string $key, string $value, int|string|null $ttl = null): Future
+    {
+        return async(function () use ($key, $value, $ttl): PubAck {
+            $this->assertValidKey($key);
+
+            // First attempt: exclusive create — succeeds only when the subject has no prior message.
+            try {
+                return $this->putExpectingSubjectSeq($key, $value, 0, $ttl)->await();
+            } catch (JetStreamException $e) {
+                if (!$this->isWrongLastSequenceError($e)) {
+                    throw $e;
+                }
+            }
+
+            // The subject already has history. That is allowed only if the latest record is a
+            // delete/purge tombstone: recreate the key against that tombstone's revision.
+            $entry = $this->get($key)->await();
+            if ($entry !== null && $entry->operation !== 'DEL' && $entry->operation !== 'PURGE') {
+                throw new JetStreamException('Key already exists: ' . $key, 10071);
+            }
+
+            $revision = $entry !== null ? ($entry->revision ?? 0) : 0;
+
+            return $this->putExpectingSubjectSeq($key, $value, $revision, $ttl)->await();
+        });
+    }
+
+    /**
+     * Returns the names of all keys currently present in the bucket (deleted/purged keys excluded),
+     * mirroring nats.go / nats.java `KeyValue.Keys()`. Use {@see getAll()} when the values are needed.
+     *
+     * @return Future<list<string>>
+     */
+    public function keys(): Future
+    {
+        return async(fn(): array => array_keys($this->getAll()->await()));
+    }
+
+    /**
+     * Alias of {@see keys()} (nats.java naming).
+     *
+     * @return Future<list<string>>
+     */
+    public function listKeys(): Future
+    {
+        return $this->keys();
     }
 
     /**
@@ -504,6 +581,32 @@ final class KeyValueBucket
         }
 
         return substr($subject, strlen($prefix));
+    }
+
+    /**
+     * Publishes a value asserting the subject's expected last sequence (optimistic concurrency), with
+     * an optional per-key TTL. Used by {@see createKey()} (expected seq 0 / tombstone revision).
+     *
+     * @param int|string|null $ttl
+     * @return Future<PubAck>
+     */
+    private function putExpectingSubjectSeq(string $key, string $value, int $expectedSeq, int|string|null $ttl): Future
+    {
+        $headers = ['Nats-Expected-Last-Subject-Sequence' => (string) $expectedSeq];
+        if ($ttl !== null) {
+            $headers['Nats-TTL'] = MessageTtl::format($ttl);
+        }
+
+        return $this->publishWithHeadersAck($this->subjectForKey($key), $value, $headers);
+    }
+
+    /**
+     * Whether a JetStream error is the server's "wrong last sequence" rejection (err_code 10071),
+     * which an exclusive create uses to detect that the key already has a record.
+     */
+    private function isWrongLastSequenceError(JetStreamException $e): bool
+    {
+        return $e->getCode() === 10071 || stripos($e->getMessage(), 'wrong last sequence') !== false;
     }
 
     /**
