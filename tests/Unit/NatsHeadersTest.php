@@ -115,4 +115,124 @@ final class NatsHeadersTest extends TestCase
 
         self::assertSame(['X-Test' => 'spaced'], NatsHeaders::fromWireBlock($raw));
     }
+
+    /**
+     * Covers line 37: toWireBlock throws when a header value contains a CR character.
+     */
+    public function testToWireBlockRejectsHeaderValueWithCarriageReturn(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Header values must not contain CR or LF characters');
+        NatsHeaders::toWireBlock(['X-Bad' => "value\rwith-cr"]);
+    }
+
+    /**
+     * Covers line 37: toWireBlock throws when a header value contains a LF character.
+     */
+    public function testToWireBlockRejectsHeaderValueWithLineFeed(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Header values must not contain CR or LF characters');
+        NatsHeaders::toWireBlock(['X-Bad' => "value\nwith-lf"]);
+    }
+
+    /**
+     * Covers line 37: toWireBlock throws for multi-value list where one element contains CR/LF.
+     */
+    public function testToWireBlockRejectsMultiValueListWithCrLfInElement(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Header values must not contain CR or LF characters');
+        NatsHeaders::toWireBlock(['Link' => ['good', "bad\r\ninjection"]]);
+    }
+
+    /**
+     * Covers line 63: fromWireBlockMulti returns empty array for null input.
+     */
+    public function testFromWireBlockMultiReturnsEmptyForNull(): void
+    {
+        self::assertSame([], NatsHeaders::fromWireBlockMulti(null));
+    }
+
+    /**
+     * Covers line 63: fromWireBlockMulti returns empty array for empty string input.
+     */
+    public function testFromWireBlockMultiReturnsEmptyForEmptyString(): void
+    {
+        self::assertSame([], NatsHeaders::fromWireBlockMulti(''));
+    }
+
+    /**
+     * Covers line 88: fromWireBlockMulti skips lines without a colon separator.
+     */
+    public function testFromWireBlockMultiSkipsLinesWithoutColon(): void
+    {
+        $raw = "NATS/1.0\r\n"
+            . "NoColonHere\r\n"
+            . "Valid:good\r\n"
+            . "\r\n";
+
+        $result = NatsHeaders::fromWireBlockMulti($raw);
+        self::assertArrayNotHasKey('NoColonHere', $result);
+        self::assertSame(['good'], $result['Valid'] ?? null);
+    }
+
+    /**
+     * Covers line 93: fromWireBlockMulti skips lines whose name is empty after trimming.
+     */
+    public function testFromWireBlockMultiSkipsLinesWithEmptyName(): void
+    {
+        $raw = "NATS/1.0\r\n"
+            . ":orphan-value\r\n"
+            . "Valid:present\r\n"
+            . "\r\n";
+
+        $result = NatsHeaders::fromWireBlockMulti($raw);
+        self::assertArrayNotHasKey('', $result);
+        self::assertSame(['present'], $result['Valid'] ?? null);
+    }
+
+    /**
+     * Verifies fromWireBlockMulti accumulates multiple values for the same header name (multimap
+     * behaviour) — complements testFromWireBlockMultiPreservesAllValues with a raw wire block
+     * that already has repeated header lines.
+     */
+    public function testFromWireBlockMultiAccumulatesRepeatedHeaderLines(): void
+    {
+        $raw = "NATS/1.0\r\n"
+            . "Link:first\r\n"
+            . "Link:second\r\n"
+            . "Link:third\r\n"
+            . "\r\n";
+
+        $result = NatsHeaders::fromWireBlockMulti($raw);
+        self::assertSame(['first', 'second', 'third'], $result['Link'] ?? null);
+    }
+
+    /**
+     * Verifies fromWireBlockMulti stops consuming headers when it hits an empty line (end of block).
+     */
+    public function testFromWireBlockMultiStopsAtEmptyLine(): void
+    {
+        $raw = "NATS/1.0\r\n"
+            . "Before:yes\r\n"
+            . "\r\n"
+            . "After:no\r\n";
+
+        $result = NatsHeaders::fromWireBlockMulti($raw);
+        self::assertSame(['yes'], $result['Before'] ?? null);
+        self::assertArrayNotHasKey('After', $result);
+    }
+
+    /**
+     * Verifies fromWireBlockMulti parses a status-only line (no description) correctly.
+     */
+    public function testFromWireBlockMultiParsesStatusLineWithoutDescription(): void
+    {
+        $raw = "NATS/1.0 404\r\n\r\n";
+
+        $result = NatsHeaders::fromWireBlockMulti($raw);
+        self::assertSame(['404'], $result['Status'] ?? null);
+        self::assertArrayNotHasKey('Description', $result);
+    }
 }

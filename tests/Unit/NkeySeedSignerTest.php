@@ -124,4 +124,174 @@ final class NkeySeedSignerTest extends TestCase
 
         return $crc;
     }
+
+    /**
+     * A base32 string that decodes to only 3 bytes (passes base32Decode but fails the
+     * >= 4 bytes check inside decode(), triggering "Invalid NKey encoding" at line 120).
+     */
+    public function testTooShortBase32EncodingThrowsInvalidNKeyEncoding(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid NKey encoding');
+
+        // 'AAAAA' base32-decodes to 3 zero-bytes (trailing zero bit is valid),
+        // which is fewer than the 4 bytes decode() requires before CRC stripping.
+        new NkeySeedSigner('AAAAA');
+    }
+
+    /**
+     * A single base32 character 'B' has 5 bits remaining after decoding no full bytes,
+     * and those trailing bits are non-zero (B = 1), triggering "Invalid trailing bits" at line 185.
+     */
+    public function testNonZeroTrailingBitsThrowsInvalidTrailingBits(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid trailing bits in NKey encoding');
+
+        new NkeySeedSigner('B');
+    }
+
+    /**
+     * A seed string containing '1' (not in the base32 alphabet A-Z2-7) triggers
+     * "Invalid base32 character in NKey encoding" at line 172.
+     */
+    public function testInvalidBase32CharacterThrowsException(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid base32 character in NKey encoding');
+
+        // '1' is not a valid base32 character (alphabet is A-Z + 2-7).
+        new NkeySeedSigner('SUAACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCA1BAEQ');
+    }
+
+    /**
+     * A correctly CRC-checked seed whose base32-decoded payload is only 3 bytes
+     * (< 34) passes the inner decode() check but fails the decodeSeed() length guard,
+     * triggering "Invalid NKey seed encoding" at line 79.
+     */
+    public function testSeedTooShortForDecodeSeedThrowsInvalidNKeySeedEncoding(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid NKey seed encoding');
+
+        // KNKUCMNO base32-decodes to 5 bytes; after CRC stripping the payload is
+        // 3 bytes, well below the 34-byte minimum decodeSeed() requires.
+        new NkeySeedSigner('KNKUCMNO');
+    }
+
+    /**
+     * A 36-byte seed whose first byte has b1 = 0 (not PREFIX_SEED = 144) triggers
+     * "Invalid NKey seed prefix" at line 86.
+     */
+    public function testWrongSeedPrefixB1ThrowsInvalidNKeySeedPrefix(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid NKey seed prefix');
+
+        // AAAACAIB... has b1 = 0 instead of the required PREFIX_SEED (144).
+        new NkeySeedSigner('AAAACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAN7AI');
+    }
+
+    /**
+     * A seed with the correct b1 = PREFIX_SEED (144) but an invalid public prefix
+     * byte (b2 = 255, which is not any of the recognised prefix values) triggers
+     * "Invalid NKey seed prefix" at line 86 via isValidPublicPrefix().
+     */
+    public function testInvalidPublicPrefixInSeedThrowsInvalidNKeySeedPrefix(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid NKey seed prefix');
+
+        // S74ACAIB... has b1 = 144 (correct) but b2 = 255 (no valid NKey type).
+        new NkeySeedSigner('S74ACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAPLMA');
+    }
+
+    /**
+     * A seed with correct prefixes but a 33-byte inner seed (instead of 32) triggers
+     * "Invalid NKey seed length" at line 91.
+     */
+    public function testSeedInnerPayloadWrongLengthThrowsInvalidNKeySeedLength(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        $this->expectException(NatsException::class);
+        $this->expectExceptionMessage('Invalid NKey seed length');
+
+        // SUAACAIB...AIBQXVQ has valid prefixes (b1=144, b2=160 USER) but
+        // the inner seed payload is 33 bytes, not the required 32.
+        new NkeySeedSigner('SUAACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBQXVQ');
+    }
+
+    /**
+     * Verify that a synthetically constructed user seed (all-0x01 entropy bytes)
+     * is accepted and produces a deterministic public key.
+     * This exercises the happy path with a seed different from SAMPLE_SEED,
+     * incidentally covering base32Encode's trailing-bits branch (line 155) for
+     * the 33-byte public-key payload (33 bytes = 264 bits, 264 % 5 = 4 leftover bits).
+     */
+    public function testSyntheticUserSeedIsAccepted(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        // SUAACAIB... is a valid user seed with 32 bytes of 0x01 as the raw entropy.
+        $signer = new NkeySeedSigner('SUAACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAN7EY');
+        $publicKey = $signer->publicKey();
+
+        // Must start with 'U' (user prefix character in NKey encoding).
+        self::assertStringStartsWith('U', $publicKey);
+
+        // Must be non-empty and match the base32 alphabet only.
+        self::assertMatchesRegularExpression('/^[A-Z2-7]+$/', $publicKey);
+
+        // sign() must succeed and return a base64url string.
+        $signature = $signer->sign('test-nonce');
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_-]+$/', $signature);
+    }
+
+    /**
+     * Verify that a synthetically constructed account seed is accepted and produces
+     * a public key starting with 'A' (PREFIX_ACCOUNT = 0 in NKey encoding).
+     */
+    public function testSyntheticAccountSeedIsAccepted(): void
+    {
+        if (!function_exists('sodium_crypto_sign_seed_keypair')) {
+            self::markTestSkipped('sodium extension is required for NkeySeedSigner tests.');
+        }
+
+        // SAAACAIB... is a valid account seed with 32 bytes of 0x01 as raw entropy.
+        $signer = new NkeySeedSigner('SAAACAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAKM5I');
+        $publicKey = $signer->publicKey();
+
+        // Must start with 'A' (account prefix character).
+        self::assertStringStartsWith('A', $publicKey);
+        self::assertMatchesRegularExpression('/^[A-Z2-7]+$/', $publicKey);
+    }
 }
