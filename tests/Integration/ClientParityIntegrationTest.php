@@ -321,6 +321,68 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #33 + #41 — KV getRevision reads a historical revision and history() returns all revisions.
+     */
+    public function testKeyValueGetRevisionAndHistory(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'hi' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $kv = $client->jetStream()->keyValue($bucket);
+        $kv->create(['history' => 10])->await();
+
+        $r1 = $kv->put('color', 'red')->await();
+        $kv->put('color', 'green')->await();
+        $kv->put('color', 'blue')->await();
+
+        // getRevision reads the value stored at the first revision.
+        $old = $kv->getRevision('color', $r1->seq)->await();
+        self::assertNotNull($old);
+        self::assertSame('red', $old->value);
+
+        // history returns every revision, oldest first.
+        $history = $kv->history('color')->await();
+        self::assertSame(['red', 'green', 'blue'], array_map(static fn($e): ?string => $e->value, $history));
+
+        $kv->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #34 — compare-and-delete: a stale expected revision is rejected, the current one succeeds.
+     */
+    public function testKeyValueCompareAndDelete(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'cd' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $kv = $client->jetStream()->keyValue($bucket);
+        $kv->create(['history' => 10])->await();
+
+        $kv->put('lock', 'v1')->await();
+        $current = $kv->put('lock', 'v2')->await();
+
+        // A stale revision is rejected.
+        $threw = false;
+        try {
+            $kv->delete('lock', null, $current->seq - 1)->await();
+        } catch (JetStreamException) {
+            $threw = true;
+        }
+        self::assertTrue($threw, 'compare-and-delete must reject a stale revision');
+        self::assertNotNull($kv->get('lock')->await()?->value);
+
+        // The current revision succeeds: the key now reads back as a tombstone (DEL, null value).
+        $kv->delete('lock', null, $current->seq)->await();
+        self::assertSame('DEL', $kv->get('lock')->await()->operation);
+
+        $kv->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #19 — KV createKey is exclusive: first create wins, a second throws.
      */
     public function testKeyValueCreateKeyIsExclusive(): void
