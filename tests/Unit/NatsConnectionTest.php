@@ -3338,4 +3338,953 @@ final class NatsConnectionTest extends TestCase
         self::assertSame(ConnectionState::Open, $connection->state());
         self::assertSame(0, $transport->upgradeTlsCalls);
     }
+
+    // ─── New coverage additions ──────────────────────────────────────────
+
+    /**
+     * Line 209: rtt() throws when connection is not open.
+     */
+    public function testRttThrowsWhenConnectionNotOpen(): void
+    {
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Connection is not open');
+        $connection->rtt()->await();
+    }
+
+    /**
+     * Line 325: drain() swallows a fatal frame error mid-flush and still closes.
+     */
+    public function testDrainSwallowsFatalFrameErrorMidFlush(): void
+    {
+        // The drain flush read returns a fatal -ERR that would normally throw; drain() must swallow it
+        // and still close cleanly.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "-ERR 'Maximum Connections Exceeded'\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 200),
+            $transport,
+        );
+        $connection->connect()->await();
+        $connection->subscribe('events', function (): void {})->await();
+
+        // drain() should not throw even though a fatal frame arrives mid-flush.
+        $connection->drain()->await();
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+    }
+
+    /**
+     * Lines 413, 415: publishWithHeaders() buffers frame when reconnecting and records outbound stats.
+     */
+    public function testPublishWithHeadersBuffersDuringReconnectAndRecordsOutbound(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+        $release = new DeferredFuture();
+
+        $transport = new class ($info, $release) implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            private int $connects = 0;
+            /** @var list<list<string>> */
+            private array $reads;
+
+            /** @param DeferredFuture<void> $release */
+            public function __construct(string $info, private DeferredFuture $release)
+            {
+                $this->reads = [
+                    [$info, "PONG\r\n", '__EOF__'],
+                    [$info, "PONG\r\n"],
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function (): void {
+                    if ($this->connects === 1) {
+                        $this->release->getFuture()->await();
+                    }
+                    $this->connects++;
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+                    $next = array_shift($this->reads[$conn]) ?? '';
+                    if ($next === '__EOF__') {
+                        throw new TransportClosedException('eof');
+                    }
+                    return $next;
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static fn(): null => null);
+            }
+        };
+
+        $connection = new NatsConnection(new NatsOptions(reconnectDelayMs: 1, reconnectJitterMs: 0), $transport);
+        $connection->connect()->await();
+
+        // Drive the read loop in the background: hits EOF, starts reconnect, blocks in connect().
+        $pump = async(static fn(): int => $connection->processIncoming()->await());
+        delay(0.05);
+
+        self::assertSame(ConnectionState::Connecting, $connection->state());
+
+        // publishWithHeaders during reconnect: must buffer (not throw) and record outbound stats.
+        $connection->publishWithHeaders('a.b', 'data', ['X-H' => 'v'])->await();
+
+        $statsBeforeRelease = $connection->statistics();
+        self::assertSame(1, $statsBeforeRelease->outMsgs);
+
+        $release->complete();
+        $pump->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        // The buffered HPUB was flushed on reconnect.
+        self::assertStringContainsString('HPUB a.b ', implode('', $transport->writes));
+    }
+
+    /**
+     * Line 440: bufferFrame() returns false when the buffer would overflow.
+     */
+    public function testPublishBufferOverflowThrowsDuringReconnect(): void
+    {
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+        $release = new DeferredFuture();
+
+        $transport = new class ($info, $release) implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            private int $connects = 0;
+            /** @var list<list<string>> */
+            private array $reads;
+
+            /** @param DeferredFuture<void> $release */
+            public function __construct(string $info, private DeferredFuture $release)
+            {
+                $this->reads = [
+                    [$info, "PONG\r\n", '__EOF__'],
+                    [$info, "PONG\r\n"],
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function (): void {
+                    if ($this->connects === 1) {
+                        $this->release->getFuture()->await();
+                    }
+                    $this->connects++;
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+                    $next = array_shift($this->reads[$conn]) ?? '';
+                    if ($next === '__EOF__') {
+                        throw new TransportClosedException('eof');
+                    }
+                    return $next;
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static fn(): null => null);
+            }
+        };
+
+        // reconnectBufferSize is tiny (1 byte) so any real publish frame overflows.
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectDelayMs: 1, reconnectJitterMs: 0, reconnectBufferSize: 1),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        $pump = async(static fn(): int => $connection->processIncoming()->await());
+        delay(0.05);
+
+        self::assertSame(ConnectionState::Connecting, $connection->state());
+
+        // The buffer is only 1 byte; a publish frame won't fit → bufferFrame() returns false → throw.
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Connection is not open');
+
+        try {
+            $connection->publish('a.b', 'payload')->await();
+        } finally {
+            $release->complete();
+            $pump->await();
+        }
+    }
+
+    /**
+     * Line 467: subscribe() throws when connection is not open.
+     */
+    public function testSubscribeThrowsWhenConnectionNotOpen(): void
+    {
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Connection is not open');
+        $connection->subscribe('events', static function (NatsMessage $message): void {})->await();
+    }
+
+    /**
+     * Lines 514, 516: drainSubscription() on a closed connection drops local state and returns cleanly.
+     */
+    public function testDrainSubscriptionOnClosedConnectionDropsStateAndReturns(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        // Force state to Closed (as if disconnect() was called).
+        $connection->disconnect()->await();
+        self::assertSame(ConnectionState::Closed, $connection->state());
+
+        // drainSubscription() with a non-existent sid on a closed connection must not throw.
+        $connection->drainSubscription(999)->await();
+        // No assertion beyond "did not throw".
+    }
+
+    /**
+     * Line 520: drainSubscription() returns early when the SID is not registered.
+     */
+    public function testDrainSubscriptionOnUnknownSidReturnsEarly(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        // SID 999 was never subscribed; drainSubscription() should return without sending UNSUB/PING.
+        $writesBefore = count($transport->writes);
+        $connection->drainSubscription(999)->await();
+
+        // No extra wire commands were emitted.
+        self::assertSame($writesBefore, count($transport->writes));
+    }
+
+    /**
+     * Line 527: drainSubscription() swallows a flush failure and still drops the subscription.
+     */
+    public function testDrainSubscriptionSwallowsFlushFailureAndDropsSub(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // No PONG response for flush → flush times out, but drainSubscription() must still succeed.
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        $sid = $connection->subscribe('events', static function (NatsMessage $message): void {})->await();
+
+        // drainSubscription() sends UNSUB then flush(); flush times out (no PONG in queue) → swallowed.
+        $connection->drainSubscription($sid)->await();
+
+        // Subscription state must be gone after the (failed) flush.
+        $meta = (new \ReflectionProperty(NatsConnection::class, 'subscriptionMeta'))->getValue($connection);
+        self::assertArrayNotHasKey($sid, $meta);
+    }
+
+    /**
+     * Line 549: flush() throws when connection is not open.
+     */
+    public function testFlushThrowsWhenConnectionNotOpen(): void
+    {
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Connection is not open');
+        $connection->flush()->await();
+    }
+
+    /**
+     * Lines 566-567: flush() throws TimeoutException when server PONG never arrives.
+     */
+    public function testFlushTimesOutWhenNoPongArrives(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // No PONG for the flush PING → TimeoutException.
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        $this->expectException(TimeoutException::class);
+        $this->expectExceptionMessage('Flush timed out');
+        $connection->flush()->await();
+    }
+
+    /**
+     * Line 700: requestInternal() throws when connection is not open (via request()).
+     */
+    public function testRequestThrowsWhenConnectionNotOpen(): void
+    {
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Connection is not open');
+        $connection->request('svc.echo', 'hello', 100)->await();
+    }
+
+    /**
+     * Line 807: requestMany() throws when maxResponses < 1.
+     */
+    public function testRequestManyThrowsWhenMaxResponsesLessThanOne(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('maxResponses must be at least 1');
+        $connection->requestMany('svc.scan', 'q', null, 0)->await();
+    }
+
+    /**
+     * Line 810: requestMany() throws when stallMs <= 0.
+     */
+    public function testRequestManyThrowsWhenStallMsNotPositive(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('stallMs must be greater than zero');
+        $connection->requestMany('svc.scan', 'q', null, null, null, 0)->await();
+    }
+
+    /**
+     * Lines 833-834: requestManyInternal() throws ConnectionException when connection is not open.
+     */
+    public function testRequestManyThrowsWhenConnectionNotOpen(): void
+    {
+        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Connection is not open');
+        $connection->requestMany('svc.scan', 'q')->await();
+    }
+
+    /**
+     * Line 838: requestManyInternal() throws TimeoutException when totalTimeoutMs <= 0.
+     * This is reached only via a requestTimeoutMs of 0, but NatsOptions disallows that,
+     * so we pass totalTimeoutMs explicitly.
+     */
+    public function testRequestManyThrowsWhenTotalTimeoutIsZero(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $this->expectException(TimeoutException::class);
+        $this->expectExceptionMessage('Request timeout must be greater than zero');
+        // Pass totalTimeoutMs=0 which directly hits line 838.
+        $connection->requestMany('svc.scan', 'q', null, null, 0)->await();
+    }
+
+    /**
+     * Line 864: requestManyInternal() uses HPUB when headers are supplied.
+     */
+    public function testRequestManyWithHeadersUsesHpub(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG _INBOX.any 1 2\r\nok\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $replies = $connection->requestMany('svc.scan', 'q', ['X-H' => '1'], 1, 1000)->await();
+
+        self::assertCount(1, $replies);
+        // The publish frame must be HPUB (not PUB) because headers were supplied.
+        self::assertStringContainsString('HPUB svc.scan _INBOX.', implode('', $transport->writes));
+    }
+
+    /**
+     * Line 973: rtt() when connection is not open (also covers the not-open check in rtt itself via line 209,
+     * and line 973 is requestInternal's ConnectionException which is actually triggered from request when not open).
+     * Lines 1050: connectOnce() seeds knownConnectUrls from the initial INFO connect_urls.
+     */
+    public function testConnectSeedsKnownConnectUrlsFromInitialInfo(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"connect_urls":["10.0.0.2:4222","10.0.0.3:4222"]}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, reconnectEnabled: false), $transport);
+        $connection->connect()->await();
+
+        // discoveredServers() should be pre-seeded from the initial INFO connect_urls.
+        self::assertSame(['10.0.0.2:4222', '10.0.0.3:4222'], $connection->discoveredServers());
+    }
+
+    /**
+     * Lines 1083-1085: serverPool() deduplicates and normalizes bare host:port discovered URLs.
+     * Also indirectly verifies the discovered server is dialable after seeding.
+     */
+    public function testServerPoolNormalizesAndDeduplicatesDiscoveredUrls(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true,"connect_urls":["10.0.0.2:4222","10.0.0.2:4222","nats://10.0.0.3:4222"]}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, reconnectEnabled: false, servers: ['nats://10.0.0.1:4222']),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        $pool = (new \ReflectionMethod($connection, 'serverPool'))->invoke($connection);
+
+        // Configured server + 2 unique discovered peers (bare host normalized to nats://, schema-prefixed left as-is).
+        self::assertContains('nats://10.0.0.1:4222', $pool);
+        self::assertContains('nats://10.0.0.2:4222', $pool);
+        self::assertContains('nats://10.0.0.3:4222', $pool);
+        // Duplicate 10.0.0.2:4222 must be collapsed to one entry.
+        self::assertSame(1, count(array_filter($pool, static fn(string $u): bool => $u === 'nats://10.0.0.2:4222')));
+    }
+
+    /**
+     * Line 1147: retryInitialConnect() delays between attempts.
+     * Lines 1156-1158, 1160-1161: retryInitialConnect() fails fast on AuthenticationException.
+     */
+    public function testRetryInitialConnectFailsFastOnAuthError(): void
+    {
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "-ERR Authorization Violation\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: false,
+                retryOnFailedInitialConnect: true,
+                maxReconnectAttempts: 5,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+            ),
+            $transport,
+        );
+
+        try {
+            $connection->connect()->await();
+            self::fail('Expected AuthenticationException');
+        } catch (\IDCT\NATS\Exception\AuthenticationException $e) {
+            self::assertStringContainsString('authentication', strtolower($e->getMessage()));
+        }
+
+        // Auth error: must not exhaust all 5 retry attempts.
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        // Only one successful connect attempt was made (the retry loop started but the auth error aborted it).
+        self::assertSame(1, count($transport->connectCalls));
+    }
+
+    /**
+     * Line 1166: retryInitialConnect() returns false after exhausting all attempts.
+     */
+    public function testRetryInitialConnectReturnsFalseWhenExhausted(): void
+    {
+        // All connect attempts fail → retryInitialConnect() returns false → connect() closes and throws.
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [],
+            connectFailures: 10, // more than maxReconnectAttempts
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: false,
+                retryOnFailedInitialConnect: true,
+                maxReconnectAttempts: 2,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+            ),
+            $transport,
+        );
+
+        $this->expectException(ConnectionException::class);
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+    }
+
+    /**
+     * Lines 1204-1208: performRecovery() fails fast on AuthenticationException during reconnect.
+     */
+    public function testReconnectFailsFastOnAuthDuringReconnect(): void
+    {
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__THROW__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "-ERR Authorization Violation\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $events = [];
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: true,
+                maxReconnectAttempts: 5,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                pingIntervalSeconds: 0,
+                connectionListener: static function (ConnectionEvent $e, ?\Throwable $err) use (&$events): void {
+                    $events[] = $e;
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        try {
+            $connection->processIncoming()->await();
+        } catch (\Throwable) {
+            // recoverConnection() rethrows the AuthenticationException.
+        }
+
+        // Auth errors stop the reconnect loop and close the connection.
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        self::assertContains(ConnectionEvent::Closed, $events);
+        // Only 2 connect calls: initial + one failed reconnect attempt.
+        self::assertSame(2, count($transport->connectCalls));
+    }
+
+    /**
+     * Lines 1274-1275: drainImmediateServerFrames() returns on CancelledException (poll timeout).
+     * Line 1285: drainImmediateServerFrames() skips +OK frames.
+     * This is exercised indirectly during resubscribeAll() on reconnect.
+     */
+    public function testDrainImmediateServerFramesHandlesOkAndTimeout(): void
+    {
+        // After reconnect, server sends +OK response to the replayed SUB (then times out on next poll).
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__THROW__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    "+OK\r\n",
+                    // Queue exhausted → subsequent poll reads return '' (treated as CancelledException poll timeout).
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $options = new NatsOptions(reconnectEnabled: true, maxReconnectAttempts: 3, reconnectDelayMs: 1, reconnectJitterMs: 0, pingIntervalSeconds: 0);
+        $connection = new NatsConnection($options, $transport);
+        $connection->connect()->await();
+
+        $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
+
+        // processIncoming() triggers reconnect; resubscribeAll() calls drainImmediateServerFrames()
+        // which reads +OK (skips it) and then times out on the next poll (CancelledException) and returns.
+        self::assertSame(0, $connection->processIncoming()->await());
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertCount(2, $transport->connectCalls);
+    }
+
+    /**
+     * Line 1382: awaitServerInfo() throws when an -ERR arrives instead of INFO.
+     */
+    public function testConnectFailsWhenErrArrivesInsteadOfInfo(): void
+    {
+        // Transport sends -ERR as the very first frame (no INFO at all).
+        $transport = new FakeTransport([
+            "-ERR 'Maximum Connections Exceeded'\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false, pingIntervalSeconds: 0), $transport);
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Server error during connect');
+        $connection->connect()->await();
+    }
+
+    /**
+     * Line 1415: readHandshakeChunk() returns null when remaining deadline is <= 0.
+     */
+    public function testConnectHandlesExpiredDeadlineDuringHandshakeRead(): void
+    {
+        // The transport returns '' on each read (empty, non-blocking), so the handshake poll loop
+        // exhausts its budget and eventually times out with "Expected PONG after CONNECT".
+        // This exercises readHandshakeChunk() returning null when remainingMs <= 0.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            // All reads return '' (never delivers PONG), exhausting the budget.
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false, connectTimeoutMs: 10, pingIntervalSeconds: 0),
+            $transport,
+        );
+
+        $this->expectException(ConnectionException::class);
+        $this->expectExceptionMessage('Expected PONG after CONNECT');
+        $connection->connect()->await();
+    }
+
+    /**
+     * Line 1609: isRecoverableServerError() returns true for "invalid subject".
+     */
+    public function testProcessIncomingTreatsInvalidSubjectErrAsRecoverable(): void
+    {
+        $errors = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "-ERR 'Invalid Subject'\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                pingIntervalSeconds: 0,
+                errorListener: static function (\Throwable $err) use (&$errors): void {
+                    $errors[] = $err->getMessage();
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // "Invalid Subject" must be treated as recoverable: connection stays open, error listener notified.
+        $connection->processIncoming()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertCount(1, $errors);
+        self::assertStringContainsString('invalid subject', strtolower($errors[0]));
+    }
+
+    /**
+     * Lines 1706-1707: consumeHeartbeatResponse() catches recoverConnection() exception and marks closed.
+     */
+    public function testConsumeHeartbeatResponseMarksClosedWhenRecoveryFails(): void
+    {
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__EOF__',
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(
+            new NatsOptions(reconnectEnabled: false, pingIntervalSeconds: 0),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // consumeHeartbeatResponse() reads EOF → calls recoverConnection() → reconnect disabled → throws.
+        // The catch block on line 1706 must absorb the exception and mark state as Closed.
+        (new \ReflectionMethod($connection, 'consumeHeartbeatResponse'))->invoke($connection);
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+    }
+
+    /**
+     * Line 1765: emitEvent() swallows exceptions thrown by the connection listener.
+     */
+    public function testConnectionListenerExceptionIsSwallowed(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                pingIntervalSeconds: 0,
+                connectionListener: static function (ConnectionEvent $e, ?\Throwable $err): void {
+                    throw new \RuntimeException('listener exploded');
+                },
+            ),
+            $transport,
+        );
+
+        // connect() calls emitEvent(Connected); the throwing listener must be swallowed.
+        $connection->connect()->await();
+        // disconnect() calls emitEvent(Closed); same expectation.
+        $connection->disconnect()->await();
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+    }
+
+    /**
+     * Line 1787: emitError() swallows exceptions thrown by the error listener.
+     */
+    public function testErrorListenerExceptionIsSwallowed(): void
+    {
+        $errors = [];
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "-ERR 'Permissions Violation for Subscription to foo'\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                pingIntervalSeconds: 0,
+                errorListener: static function (\Throwable $err) use (&$errors): void {
+                    $errors[] = $err->getMessage();
+                    throw new \RuntimeException('error listener exploded');
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // A recoverable -ERR triggers emitError(); the throwing error listener must be swallowed.
+        $connection->processIncoming()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertCount(1, $errors); // listener was called exactly once
+    }
+
+    /**
+     * Line 1800: handleServerInfoUpdate() returns early when serverInfo is null.
+     * This is a defensive guard; we verify it does not throw by calling it directly via reflection.
+     */
+    public function testHandleServerInfoUpdateNoopsWhenServerInfoIsNull(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        // Null out serverInfo to hit the early-return guard.
+        (new \ReflectionProperty(NatsConnection::class, 'serverInfo'))->setValue($connection, null);
+
+        // Must not throw.
+        (new \ReflectionMethod($connection, 'handleServerInfoUpdate'))->invoke($connection);
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
+    /**
+     * Lines 1818-1820: handleServerInfoUpdate() emits LameDuck, attempts failover, and emits error when
+     * failover fails (reconnect enabled but no spare server).
+     */
+    public function testLameDuckWithFailoverEmitsErrorWhenRecoveryFails(): void
+    {
+        $events = [];
+        $errors = [];
+        // Single server + lame-duck INFO: pool has only one server so failover threshold (> 1) is not met.
+        // Result: LameDuck is emitted but recoverConnection() is NOT called (not enough pool members).
+        // To force the recoverConnection() code path we need pool > 1, which means we need a discovered
+        // peer. We seed one via a prior async INFO so the pool grows to 2 before the lame-duck arrives.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // First async INFO: discover a peer (pool grows to 2).
+            'INFO {"server_id":"S1","version":"2.12.0","max_payload":1048576,"connect_urls":["10.0.0.2:4222"]}' . "\r\n",
+            // Second async INFO: lame-duck with reconnect enabled + pool of 2 → recoverConnection() fires.
+            // With no second server actually available, recovery will fail → emitError() is called.
+            'INFO {"server_id":"S1","version":"2.12.0","max_payload":1048576,"ldm":true,"connect_urls":["10.0.0.2:4222"]}' . "\r\n",
+        ]);
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: true,
+                maxReconnectAttempts: 1,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                pingIntervalSeconds: 0,
+                connectionListener: static function (ConnectionEvent $e, ?\Throwable $err) use (&$events): void {
+                    $events[] = $e;
+                },
+                errorListener: static function (\Throwable $err) use (&$errors): void {
+                    $errors[] = $err->getMessage();
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // Read the discovery INFO (pool grows to 2).
+        $connection->processIncoming()->await();
+        // Read the lame-duck INFO (triggers failover attempt → fails → emitError).
+        $connection->processIncoming()->await();
+
+        self::assertContains(ConnectionEvent::LameDuck, $events);
+        // Recovery failed (no real second server), so emitError() was invoked.
+        self::assertNotEmpty($errors);
+    }
+
+    /**
+     * Lines 1895, 1897: drainPendingForSid() unsets pendingMessages when subscription is gone.
+     */
+    public function testDrainPendingForSidRemovesPendingWhenSubscriptionIsGone(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $sid = $connection->subscribe('events', static function (NatsMessage $message): void {})->await();
+
+        // Inject a pending queue for the sid but remove the subscription handler to simulate
+        // an unsubscribe that left a residual pending entry.
+        $pendingProp = new \ReflectionProperty(NatsConnection::class, 'pendingMessages');
+        $subsProp = new \ReflectionProperty(NatsConnection::class, 'subscriptions');
+
+        // Verify pending queue exists.
+        $pending = $pendingProp->getValue($connection);
+        self::assertArrayHasKey($sid, $pending);
+
+        // Remove the subscription handler (but keep the pending queue).
+        $subs = $subsProp->getValue($connection);
+        unset($subs[$sid]);
+        $subsProp->setValue($connection, $subs);
+
+        // Call drainPendingForSid() which should detect the missing handler and unset the pending queue.
+        (new \ReflectionMethod($connection, 'drainPendingForSid'))->invoke($connection, $sid);
+
+        $pendingAfter = $pendingProp->getValue($connection);
+        self::assertArrayNotHasKey($sid, $pendingAfter);
+    }
+
+    /**
+     * Lines 891-892: requestManyInternal() rethrows CancelledException from external cancellation token.
+     */
+    public function testRequestManyRethrowsExternalCancellation(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $deferredCancellation = new DeferredCancellation();
+        $deferredCancellation->cancel();
+
+        $this->expectException(CancelledException::class);
+        $connection->requestMany('svc.scan', 'q', null, null, 5000, null, $deferredCancellation->getCancellation())->await();
+    }
+
+    /**
+     * Statistics accessors: outMsgs/outBytes are incremented on publish.
+     * (Covers the statistics() snapshot path, complementing the existing test.)
+     */
+    public function testStatisticsTracksOutboundCountsForHeaderPublish(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+
+        $connection->publishWithHeaders('events', 'hello', ['X-T' => '1'])->await();
+
+        $stats = $connection->statistics();
+        self::assertSame(1, $stats->outMsgs);
+        self::assertSame(5, $stats->outBytes); // strlen('hello')
+    }
 }

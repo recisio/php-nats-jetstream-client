@@ -2902,4 +2902,738 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(0, substr_count($written, '$JS.API.CONSUMER.DELETE.EVENTS'));
         self::assertSame(1, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
     }
+
+    // ─── New coverage additions ─────────────────────────────────────────
+
+    /**
+     * Verifies createOrUpdateStream re-throws a JetStreamException whose message is NOT "already in use"
+     * (line 254 — the guard only swallows the "already in use" variant).
+     */
+    public function testCreateOrUpdateStreamRethrowsNonAlreadyInUseError(): void
+    {
+        $createErr = '{"error":{"code":503,"description":"JetStream not enabled"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createErr), $createErr),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('JetStream not enabled');
+
+        $client->jetStream()->createOrUpdateStream('ORDERS', ['orders.*'])->await();
+    }
+
+    /**
+     * Verifies streamNames() handles a missing / null 'streams' key in the API response by
+     * returning an empty list (line 281 — the ternary else branch).
+     */
+    public function testStreamNamesWithNullStreamsKeyReturnsEmpty(): void
+    {
+        // The server returns a valid-but-empty response (no 'streams' key at all).
+        $reply = '{"total":0,"offset":0}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $names = $client->jetStream()->streamNames()->await();
+
+        self::assertSame([], $names);
+    }
+
+    /**
+     * Verifies directGet (via directGetLastMessageForSubject) throws when the reply carries no
+     * Nats-Stream or Nats-Sequence header — the "unrecognized response" guard (line 576).
+     */
+    public function testDirectGetThrowsForUnrecognizedResponse(): void
+    {
+        // A response with Nats-* headers missing (no status, no Nats-Stream, no Nats-Sequence).
+        $hdrs = "NATS/1.0\r\nX-Unrelated: yes\r\n\r\n";
+        $body = 'some payload';
+        $h = strlen($hdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.a 1 %d %d\r\n%s%s\r\n", $h, $h + strlen($body), $hdrs, $body),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('JetStream direct get returned an unrecognized response');
+
+        $client->jetStream()->directGetLastMessageForSubject('ORDERS', 'orders.1')->await();
+    }
+
+    /**
+     * Verifies directGetLastForSubjects() returns an empty list immediately when the subjects
+     * array is empty (line 603 — early return).
+     */
+    public function testDirectGetLastForSubjectsWithEmptySubjectsReturnsEmpty(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', [])->await();
+
+        self::assertSame([], $messages);
+    }
+
+    /**
+     * Verifies directGetLastForSubjects() rejects a subject containing '*' (lines 611-614).
+     */
+    public function testDirectGetLastForSubjectsRejectsWildcardSubjectWithStar(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('directGetLastForSubjects expects exact subjects');
+
+        $client->jetStream()->directGetLastForSubjects('ORDERS', ['orders.*'])->await();
+    }
+
+    /**
+     * Verifies directGetLastForSubjects() rejects a subject containing '>' (lines 611-614).
+     */
+    public function testDirectGetLastForSubjectsRejectsWildcardSubjectWithGreaterThan(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('directGetLastForSubjects expects exact subjects');
+
+        $client->jetStream()->directGetLastForSubjects('ORDERS', ['orders.>'])->await();
+    }
+
+    /**
+     * Verifies directGetBatch() rejects a non-positive expiresMs (line 641).
+     */
+    public function testDirectGetBatchRejectsZeroExpiresMs(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Direct Get batch expiresMs must be greater than zero');
+
+        $client->jetStream()->directGetBatch('ORDERS', ['batch' => 1], 0)->await();
+    }
+
+    /**
+     * Verifies addOrUpdateConsumer delegates to createConsumer (line 773) and produces the same
+     * wire payload.
+     */
+    public function testAddOrUpdateConsumerDelegatesToCreateConsumer(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"PROC","config":{"durable_name":"PROC"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->addOrUpdateConsumer('ORDERS', 'PROC', 'orders.*')->await();
+
+        self::assertSame('PROC', $info->name);
+        self::assertStringContainsString('$JS.API.CONSUMER.CREATE.ORDERS.PROC', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies consumerNames() handles a missing / null 'consumers' key in the API response by
+     * returning an empty list (line 793 — the ternary else branch).
+     */
+    public function testConsumerNamesWithMissingConsumersKeyReturnsEmpty(): void
+    {
+        $reply = '{"total":0,"offset":0}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $names = $client->jetStream()->consumerNames('ORDERS')->await();
+
+        self::assertSame([], $names);
+    }
+
+    /**
+     * Verifies subscribeEphemeralPushConsumer silently absorbs a flow-control status 100 frame
+     * and does not forward it to the user handler (line 942 — early return for control message).
+     */
+    public function testSubscribeEphemeralPushConsumerIgnoresControlMessages(): void
+    {
+        $createPayload = '{"stream_name":"ORDERS","name":"E1","config":{"deliver_subject":"deliver.eph"}}';
+        $fcHeaders = NatsHeaders::toWireBlock(['Status' => '100', 'Description' => 'FlowControl Request']);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+            sprintf(
+                "HMSG deliver.eph 2 fc.reply %d %d\r\n%s\r\n",
+                strlen($fcHeaders),
+                strlen($fcHeaders),
+                $fcHeaders,
+            ),
+            "MSG deliver.eph 2 5\r\nhello\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeEphemeralPushConsumer(
+            'ORDERS',
+            static function (NatsMessage $message) use (&$received): void {
+                $received[] = $message->payload;
+            },
+            'deliver.eph',
+        )->await();
+
+        $client->processIncoming()->await(); // flow control — must NOT appear in $received
+        $client->processIncoming()->await(); // real message
+
+        self::assertSame(['hello'], $received);
+        // The FC reply was published.
+        self::assertStringContainsString("PUB fc.reply 0\r\n\r\n", implode('', $transport->writes));
+    }
+
+    /**
+     * Verifies subscribeOrderedConsumer silently absorbs a flow-control / heartbeat status 100
+     * and does not forward it to the user handler (line 983 — early return for control message).
+     */
+    public function testSubscribeOrderedConsumerIgnoresControlMessages(): void
+    {
+        $createPayload = json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => 'ORD_HB',
+            'config' => ['ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+        $hbHeaders = NatsHeaders::toWireBlock(['Status' => '100', 'Description' => 'Idle Heartbeat']);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+            sprintf(
+                "HMSG _INBOX.JS.ORD.x 2 %d %d\r\n%s\r\n",
+                strlen($hbHeaders),
+                strlen($hbHeaders),
+                $hbHeaders,
+            ),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer(
+            'EVENTS',
+            static function (NatsMessage $message) use (&$received): void {
+                $received[] = $message->payload;
+            },
+        )->await();
+
+        $client->processIncoming()->await();
+
+        self::assertSame([], $received);
+    }
+
+    /**
+     * Verifies subscribeOrderedConsumer delivers a message that has no $JS.ACK reply subject
+     * (no ordering metadata) best-effort to the user handler (lines 991-993 — null seq path).
+     */
+    public function testSubscribeOrderedConsumerDeliversMessageWithoutAckMetadata(): void
+    {
+        $createPayload = json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => 'ORD_NO_ACK',
+            'config' => ['ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // Ephemeral push consumer create response.
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+            // A delivery with no $JS.ACK reply subject — no ordering metadata.
+            "MSG _INBOX.JS.ORD.x 2 5\r\nhello\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer(
+            'EVENTS',
+            static function (NatsMessage $message) use (&$received): void {
+                $received[] = $message->payload;
+            },
+        )->await();
+
+        $client->processIncoming()->await();
+
+        // Best-effort delivery: the message is forwarded despite having no ordering information.
+        self::assertSame(['hello'], $received);
+    }
+
+    /**
+     * Verifies subscribeOrderedConsumer best-effort delivers when deleteConsumer throws a
+     * JetStreamException during gap recovery (line 1009 — the inner catch block).
+     */
+    public function testSubscribeOrderedConsumerToleratesDeleteConsumerFailure(): void
+    {
+        $createReply = static fn(string $name): string => json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => $name,
+            'config' => ['deliver_subject' => '_INBOX.JS.ORD.test', 'ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+
+        // deleteConsumer returns an error payload, triggering JetStreamException inside the try block.
+        $deleteError = '{"error":{"code":404,"description":"consumer not found"}}';
+        $recreateReply = $createReply('ORD2');
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // Initial create (sid 1).
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply('ORD1')), $createReply('ORD1')),
+            // In-order message (consumer seq 1 / stream seq 1).
+            "MSG _INBOX.JS.ORD.test 2 \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
+            // Out-of-order message (consumer seq jumps to 3, triggers recreation).
+            "MSG _INBOX.JS.ORD.test 2 \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
+            // deleteConsumer returns an error — JetStreamException caught at line 1009.
+            sprintf("MSG _INBOX.b 3 %d\r\n%s\r\n", strlen($deleteError), $deleteError),
+            // createEphemeralPushConsumer still proceeds and succeeds (sid 4).
+            sprintf("MSG _INBOX.c 4 %d\r\n%s\r\n", strlen($recreateReply), $recreateReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        })->await();
+
+        for ($i = 0; $i < 6; $i++) {
+            $client->processIncoming()->await();
+        }
+
+        // msg1 is delivered; bad3 (out-of-order) is discarded; delete failure is absorbed.
+        self::assertSame(['msg1'], $received);
+    }
+
+    /**
+     * Verifies unpinConsumer rejects an empty priority group name (line 1098).
+     */
+    public function testUnpinConsumerRejectsEmptyGroup(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Priority group must not be empty');
+
+        $client->jetStream()->unpinConsumer('ORDERS', 'PROC', '')->await();
+    }
+
+    /**
+     * Verifies publish() with an expectation header immediately re-throws a precondition-mismatch
+     * JetStreamException without retrying (line 1242 — non-503 code triggers immediate throw).
+     *
+     * This variant uses expectedLastSubjectSequence to produce the header path, so the publish
+     * goes via requestWithHeaders (HPUB), not plain PUB.
+     */
+    public function testPublishWithLastSubjectSequenceHeaderMismatchThrowsImmediately(): void
+    {
+        $errorAck = '{"error":{"code":400,"err_code":10071,"description":"wrong last sequence"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorAck), $errorAck),
+        ]);
+
+        // Use retryAttempts=3 so that a retry would produce a second request (proving we don't retry).
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+        $js = new JetStreamContext($client, publishRetryAttempts: 3, publishRetryWaitMs: 1);
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('wrong last sequence');
+
+        $js->publish('orders.created', 'body', expectedLastSubjectSequence: 0)->await();
+
+        // If the exception propagates there was only one request (no retry).
+        self::assertCount(4, $transport->writes); // CONNECT + PING + SUB + HPUB
+    }
+
+    /**
+     * Verifies counterValue() re-throws a non-404 JetStreamException from the Direct Get
+     * (line 1373 — the throw-if-not-404 branch).
+     */
+    public function testCounterValueRethrowsNon404Exception(): void
+    {
+        // A 403 status from directGet maps to a JetStreamException with code 403.
+        $hdrs = "NATS/1.0 403 Forbidden\r\nDescription: access denied\r\n\r\n";
+        $h = strlen($hdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("HMSG _INBOX.a 1 %d %d\r\n%s\r\n", $h, $h, $hdrs),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionCode(403);
+
+        $client->jetStream()->counterValue('COUNTERS', 'counters.visits')->await();
+    }
+
+    /**
+     * Verifies parseCounterValue() wraps a JsonException in a JetStreamException
+     * (lines 1390-1391 — malformed counter payload).
+     */
+    public function testIncrementCounterWithMalformedResponsePayload(): void
+    {
+        // The server returns a non-JSON body for the counter response.
+        $badPayload = 'NOT_JSON{{{';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($badPayload), $badPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Malformed counter response');
+
+        $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
+    }
+
+    /**
+     * Verifies parseCounterValue() maps an embedded API error to a JetStreamException
+     * (lines 1397-1400 — error key present in counter response).
+     */
+    public function testIncrementCounterWithApiErrorInResponse(): void
+    {
+        $errorPayload = '{"error":{"code":400,"description":"counter not enabled on stream"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('counter not enabled on stream');
+
+        $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
+    }
+
+    /**
+     * Verifies parseCounterValue() returns a string for an integer val field
+     * (line 1405 — is_int($val) branch, returns string cast).
+     */
+    public function testIncrementCounterWithIntegerValField(): void
+    {
+        // The server may return an unquoted integer for the val field on some code paths.
+        $payload = '{"stream":"COUNTERS","seq":3,"val":7}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $value = $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
+
+        self::assertSame('7', $value);
+    }
+
+    /**
+     * Verifies parseCounterValue() throws when neither int nor string val is present
+     * (line 1412 — missing val field).
+     */
+    public function testIncrementCounterWithMissingValFieldThrows(): void
+    {
+        $payload = '{"stream":"COUNTERS","seq":4}'; // no "val" key
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Counter response did not include a value');
+
+        $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
+    }
+
+    /**
+     * Verifies fetchBatch() throws a 408 JetStreamException when no messages arrive and no
+     * terminal status is received (line 1514 — pure timeout path, empty messages, no status).
+     */
+    public function testFetchBatchThrowsTimeoutWhenNoMessagesAndNoTerminalStatus(): void
+    {
+        $transport = new FakeTransport(
+            readQueue: [
+                'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                "PONG\r\n",
+            ],
+            blockWhenEmpty: true,
+        );
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('No messages received within timeout');
+        $this->expectExceptionCode(408);
+
+        // expiresMs=1 causes the TimeoutCancellation to fire almost immediately with no messages.
+        $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 1)->await();
+    }
+
+    /**
+     * Verifies ackSync() throws JetStreamException when replyTo is an empty string (line 1547).
+     */
+    public function testAckSyncThrowsForEmptyReplySubject(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('JetStream ACK requires a reply subject on the delivered message');
+
+        $message = new NatsMessage('events.x', 1, '', 'body');
+        $client->jetStream()->ackSync($message)->await();
+    }
+
+    /**
+     * Verifies applyFilterSubjects() (via createConsumer) throws when filter_subjects is not an
+     * array (line 1722 — the non-array branch of the array_key_exists guard).
+     */
+    public function testCreateConsumerRejectsNonArrayFilterSubjects(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('filter_subjects must be a non-empty array of subjects');
+
+        try {
+            // Passing a string instead of an array for filter_subjects.
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['filter_subjects' => 'orders.>'])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies applyFilterSubjects() (via createConsumer) throws when filter_subjects is an empty
+     * array (line 1722 — the $subjects === [] branch).
+     */
+    public function testCreateConsumerRejectsEmptyArrayFilterSubjects(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('filter_subjects must be a non-empty array of subjects');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['filter_subjects' => []])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies buildPullRequest() (via fetchBatch) throws when the pull group name is invalid
+     * (line 1774 — group validation failure).
+     */
+    public function testFetchBatchRejectsInvalidPullGroupName(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Pull group must be 1..16 characters of [A-Za-z0-9-_/=]');
+
+        try {
+            // A group name with spaces is invalid.
+            $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 2500, ['group' => 'invalid group!'])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies assertValidPriorityConfig() (via createConsumer) throws when priority_groups is
+     * an empty array (line 1814).
+     */
+    public function testCreateConsumerRejectsEmptyPriorityGroups(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('priority_groups must be a non-empty array of group names');
+
+        try {
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['priority_groups' => []])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies assertValidPriorityConfig() (via createConsumer) throws when a priority group name
+     * contains invalid characters (line 1819).
+     */
+    public function testCreateConsumerRejectsInvalidPriorityGroupName(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('priority_groups names must be 1..16 characters of [A-Za-z0-9-_/=]');
+
+        try {
+            // A group name with spaces is invalid.
+            $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['priority_groups' => ['invalid name!']])->await();
+        } finally {
+            self::assertCount(2, $transport->writes);
+        }
+    }
+
+    /**
+     * Verifies extractConsumerSequence() returns null when replyTo is null (line 1976).
+     */
+    public function testExtractConsumerSequenceReturnsNullForNullReplyTo(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
+
+        $message = new NatsMessage('events.x', 1, null, 'body');
+
+        self::assertNull($method->invoke($js, $message));
+    }
+
+    /**
+     * Verifies extractConsumerSequence() returns null when the reply subject does not start with
+     * '$JS.ACK' (line 1981 — non-ACK prefix).
+     */
+    public function testExtractConsumerSequenceReturnsNullForNonAckPrefix(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
+
+        $wrongPrefix = new NatsMessage('events.x', 1, '$JS.FC.ORDERS.token', 'body');
+
+        self::assertNull($method->invoke($js, $wrongPrefix));
+    }
+
+    /**
+     * Verifies extractConsumerSequence() returns null for an ACK subject with an unexpected
+     * number of tokens (line 1989 — default => null in the match).
+     */
+    public function testExtractConsumerSequenceReturnsNullForInvalidTokenCount(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
+
+        // 5-token ACK subject — not 9, 11, or 12.
+        $shortReply = new NatsMessage('events.x', 1, '$JS.ACK.ORDERS.CONS.1', 'body');
+
+        self::assertNull($method->invoke($js, $shortReply));
+    }
+
+    /**
+     * Verifies extractConsumerSequence() returns null when the consumer-sequence token is not a
+     * valid integer (line 1993 — $consumerSeqIndex !== null but filter_var fails).
+     */
+    public function testExtractConsumerSequenceReturnsNullForNonIntValue(): void
+    {
+        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $js = $client->jetStream();
+
+        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
+
+        // 9-token form; consumer-seq index is 6; token at index 6 is "NaN".
+        $nonInt = new NatsMessage('events.x', 1, '$JS.ACK.ORDERS.CONS.1.42.NaN.123.0', 'body');
+
+        self::assertNull($method->invoke($js, $nonInt));
+    }
 }

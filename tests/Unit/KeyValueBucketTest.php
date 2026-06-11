@@ -1051,4 +1051,611 @@ final class KeyValueBucketTest extends TestCase
 
         $client->jetStream()->keyValue('cfg')->delete('theme')->await();
     }
+
+    // ─── kvSourceConfig: array source with 'bucket' key (lines 95-97, 100) ──
+
+    /**
+     * Verifies that create() with a mirror given as an array with a 'bucket' key
+     * translates it to 'name' => 'KV_<bucket>' and strips the 'bucket' key (#62).
+     */
+    public function testCreateWithMirrorArrayBucketKeyTranslatesName(): void
+    {
+        $reply = '{"config":{"name":"KV_dst"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // 'mirror' is an array with 'bucket' key — kvSourceConfig should replace
+        // 'bucket' with 'name' = 'KV_src' and retain extra fields.
+        $client->jetStream()->keyValue('dst')->create([
+            'mirror' => ['bucket' => 'src', 'start_seq' => 5],
+        ])->await();
+
+        $create = $transport->writes[3];
+        self::assertStringContainsString('"mirror":{"start_seq":5,"name":"KV_src"}', $create);
+        // 'bucket' key must be absent from the translated config.
+        self::assertStringNotContainsString('"bucket"', $create);
+        // A mirrored bucket has no subjects of its own.
+        self::assertStringContainsString('"subjects":[]', $create);
+    }
+
+    /**
+     * Verifies that create() with sources given as arrays with a 'bucket' key
+     * translates each entry to 'name' => 'KV_<bucket>' (#62).
+     */
+    public function testCreateWithSourcesArrayBucketKeyTranslatesNames(): void
+    {
+        $reply = '{"config":{"name":"KV_agg"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('agg')->create([
+            'sources' => [
+                ['bucket' => 'alpha', 'start_seq' => 1],
+                ['bucket' => 'beta'],
+            ],
+        ])->await();
+
+        $create = $transport->writes[3];
+        self::assertStringContainsString('"name":"KV_alpha"', $create);
+        self::assertStringContainsString('"name":"KV_beta"', $create);
+        self::assertStringNotContainsString('"bucket"', $create);
+    }
+
+    // ─── purge() with TTL + expectedRevision (lines 193, 196) ───────────────
+
+    /**
+     * Verifies purge() with both a tombstone TTL and an expected revision emits both headers.
+     */
+    public function testPurgeWithTombstoneTtlAndExpectedRevision(): void
+    {
+        $purgeAck = '{"stream":"KV_cfg","seq":7,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($purgeAck), $purgeAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ack = $client->jetStream()->keyValue('cfg')->purge('theme', tombstoneTtl: 300, expectedRevision: 6)->await();
+
+        self::assertSame(7, $ack->seq);
+        self::assertStringContainsString('KV-Operation:PURGE', $transport->writes[3]);
+        self::assertStringContainsString('Nats-TTL:300s', $transport->writes[3]);
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:6', $transport->writes[3]);
+    }
+
+    // ─── getRevision() guards (lines 259, 264-266, 269) ─────────────────────
+
+    /**
+     * Verifies getRevision() throws when revision is zero or negative (line 259).
+     */
+    public function testGetRevisionThrowsOnNonPositiveRevision(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Revision must be greater than zero');
+        $client->jetStream()->keyValue('cfg')->getRevision('theme', 0)->await();
+    }
+
+    /**
+     * Verifies getRevision() returns null when the server replies with a 404 (lines 264-266).
+     */
+    public function testGetRevisionReturnsNullOnNotFound(): void
+    {
+        // STREAM.MSG.GET returns a JSON 404 error reply when the sequence does not exist.
+        $errorReply = '{"error":{"code":404,"description":"Message Not Found"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorReply), $errorReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->getRevision('theme', 99)->await();
+
+        self::assertNull($entry);
+    }
+
+    /**
+     * Verifies getRevision() re-throws non-404 errors from the server (line 269).
+     */
+    public function testGetRevisionPropagatesNon404Error(): void
+    {
+        $errorReply = '{"error":{"code":500,"description":"internal server error"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorReply), $errorReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('internal server error');
+        $client->jetStream()->keyValue('cfg')->getRevision('theme', 5)->await();
+    }
+
+    // ─── getViaStreamMessage() branches (lines 323-325, 328, 334, 340, 346-348) ──
+
+    /**
+     * Verifies the STREAM.MSG.GET fallback returns null when the API returns a 404 error (lines 323-325).
+     */
+    public function testGetFallbackReturnsNullOnStreamMessage404(): void
+    {
+        $errorReply = '{"error":{"code":404,"description":"Message Not Found"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->kvDirectStatus(1, 503, 'No Responders'),                                     // Direct Get -> 503 fallback trigger
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($errorReply), $errorReply),           // STREAM.MSG.GET -> 404
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->get('theme')->await();
+
+        self::assertNull($entry);
+    }
+
+    /**
+     * Verifies the STREAM.MSG.GET fallback propagates a non-404 API error (line 328).
+     */
+    public function testGetFallbackPropagatesNon404StreamMessageError(): void
+    {
+        $errorReply = '{"error":{"code":503,"description":"service unavailable"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->kvDirectStatus(1, 503, 'No Responders'),
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($errorReply), $errorReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('service unavailable');
+        $client->jetStream()->keyValue('cfg')->get('theme')->await();
+    }
+
+    /**
+     * Verifies the STREAM.MSG.GET fallback returns null when the reply has no 'message' field (line 334).
+     */
+    public function testGetFallbackReturnsNullWhenMessageFieldMissing(): void
+    {
+        $emptyReply = '{}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->kvDirectStatus(1, 503, 'No Responders'),
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($emptyReply), $emptyReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->get('theme')->await();
+
+        self::assertNull($entry);
+    }
+
+    /**
+     * Verifies the STREAM.MSG.GET fallback decodes base64-encoded headers from the 'hdrs' field (lines 346-348).
+     */
+    public function testGetFallbackDecodesEncodedHeaders(): void
+    {
+        // Build a wire-format header block, then base64-encode it as the server would send in 'hdrs'.
+        $rawHeaders = "NATS/1.0\r\nKV-Operation: DEL\r\n\r\n";
+        $encodedHeaders = base64_encode($rawHeaders);
+        $encodedData = base64_encode('');
+        $envelope = sprintf(
+            '{"message":{"subject":"$KV.cfg.theme","seq":11,"data":"%s","hdrs":"%s"}}',
+            $encodedData,
+            $encodedHeaders,
+        );
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            $this->kvDirectStatus(1, 503, 'No Responders'),
+            sprintf("MSG _INBOX.y 2 %d\r\n%s\r\n", strlen($envelope), $envelope),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $entry = $client->jetStream()->keyValue('cfg')->get('theme')->await();
+
+        self::assertNotNull($entry);
+        // A DEL header in the fallback path must be resolved to operation DEL with null value.
+        self::assertSame('DEL', $entry->operation);
+        self::assertNull($entry->value);
+        self::assertSame(11, $entry->revision);
+    }
+
+    // ─── watch() callback: non-KV subject (line 386) ────────────────────────
+
+    /**
+     * Verifies that watch() silently skips messages whose subject does not belong to the KV bucket
+     * prefix, i.e. keyFromSubject() returns null for them (line 386).
+     */
+    public function testWatchIgnoresMessagesOnNonKvSubject(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            // A message on a completely different subject — keyFromSubject() will return null.
+            "MSG some.other.subject 2 \$JS.ACK.KV_cfg.KVWATCH.1.1.1.0.0 4\r\ndata\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $called = false;
+        $client->jetStream()->keyValue('cfg')->watch(static function (KeyValueEntry $entry) use (&$called): void {
+            $called = true;
+        })->await();
+
+        $client->processIncoming()->await();
+
+        // The handler must NOT have been invoked because the subject doesn't match the bucket prefix.
+        self::assertFalse($called);
+    }
+
+    // ─── createKey() non-wrong-seq error re-throw (line 438) ─────────────────
+
+    /**
+     * Verifies createKey() re-throws errors that are not "wrong last sequence" (line 438).
+     */
+    public function testCreateKeyRethrowsNonWrongLastSequenceError(): void
+    {
+        // Server returns a generic publish error (not the wrong-last-sequence code 10071).
+        $errAck = '{"error":{"code":500,"err_code":10000,"description":"internal error"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errAck), $errAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('internal error');
+        $client->jetStream()->keyValue('cfg')->createKey('theme', 'blue')->await();
+    }
+
+    /**
+     * Verifies createKey() succeeds when the key was previously deleted (tombstone entry)
+     * by publishing against the tombstone's revision; tests lines 449 (null-entry revision=0)
+     * when get() returns null after a wrong-last-sequence error.
+     */
+    public function testCreateKeySucceedsAfterKeyDeletedEntryIsNull(): void
+    {
+        // First attempt (expected seq 0) → wrong-last-sequence.
+        $errAck = '{"error":{"code":400,"err_code":10071,"description":"wrong last sequence: 3"}}';
+        // get() via Direct Get returns 404 (key fully gone / race condition).
+        // Then the second put (seq 0 from null entry) succeeds.
+        $putAck = '{"stream":"KV_cfg","seq":4,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errAck), $errAck),   // first put -> wrong-last-seq
+            $this->kvDirectStatus(2, 404, 'Message Not Found'),                   // get() -> null
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($putAck), $putAck),   // second put -> success
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ack = $client->jetStream()->keyValue('cfg')->createKey('theme', 'blue')->await();
+
+        self::assertSame(4, $ack->seq);
+        // The second put must use expected-seq 0 (entry was null -> revision=0).
+        $writes = implode('||', $transport->writes);
+        // There should be two HPUB writes for 'theme' with expected seq 0.
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:0', $writes);
+    }
+
+    /**
+     * Verifies createKey() succeeds after a tombstone (DEL) entry by publishing against
+     * the tombstone revision (lines 449, 451).
+     */
+    public function testCreateKeySucceedsAfterTombstoneRevision(): void
+    {
+        // First attempt (expected seq 0) → wrong-last-sequence.
+        $errAck = '{"error":{"code":400,"err_code":10071,"description":"wrong last sequence: 5"}}';
+        // get() returns a DEL tombstone at revision 5.
+        $putAck2 = '{"stream":"KV_cfg","seq":6,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errAck), $errAck),          // first put -> wrong-last-seq
+            $this->kvDirectReply('$KV.cfg.theme', '', 5, 2, 'DEL'),                      // get() -> DEL tombstone at seq 5
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($putAck2), $putAck2),         // second put -> success
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ack = $client->jetStream()->keyValue('cfg')->createKey('theme', 'newval')->await();
+
+        self::assertSame(6, $ack->seq);
+        // The second put must use expected-seq 5 (the tombstone's revision).
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:5', $transport->writes[9]);
+    }
+
+    // ─── mapKvOptions: description and max_bytes (lines 795-796) ─────────────
+
+    /**
+     * Verifies create() passes through 'description' and 'max_bytes' KV options to the stream config.
+     */
+    public function testCreateWithDescriptionAndMaxBytesOptions(): void
+    {
+        $createPayload = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->create([
+            'description' => 'My KV bucket',
+            'max_bytes' => 10485760,
+        ])->await();
+
+        $written = $transport->writes[3];
+        self::assertStringContainsString('"description":"My KV bucket"', $written);
+        self::assertStringContainsString('"max_bytes":10485760', $written);
+    }
+
+    // ─── assertValidKey: empty key and '>' wildcard (lines 795-796 in task = 809+815 in source) ─
+
+    /**
+     * Verifies assertValidKey() throws on an empty key (line 809/810 in source, listed as 795 target).
+     */
+    public function testPutRejectsEmptyKey(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Invalid KV key');
+        $client->jetStream()->keyValue('cfg')->put('', 'value')->await();
+    }
+
+    /**
+     * Verifies assertValidKey() throws on a key containing '>' (line 809/810 in source, listed as 795 target).
+     */
+    public function testPutRejectsKeyWithGreaterThan(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('Invalid KV key');
+        $client->jetStream()->keyValue('cfg')->put('foo>bar', 'value')->await();
+    }
+
+    // ─── getAll(): empty subjects short-circuit (line 548) ───────────────────
+
+    /**
+     * Verifies getAll() returns an empty array immediately when STREAM.INFO reports no subjects (line 548).
+     */
+    public function testGetAllReturnsEmptyWhenNoSubjects(): void
+    {
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":0,"bytes":0,"subjects":{}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"messages":0,"bytes":0,"subjects":{}}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $all = $client->jetStream()->keyValue('cfg')->getAll()->await();
+
+        self::assertSame([], $all);
+    }
+
+    /**
+     * Verifies getAll() propagates non-404 errors from Direct Get (line 571).
+     */
+    public function testGetAllPropagatesNon404DirectGetError(): void
+    {
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":1,"bytes":32,"subjects":{"$KV.cfg.theme":1}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"messages":1,"bytes":32,"subjects":{}}}';
+        // Direct Get returns a non-404 status code.
+        $errHdrs = "NATS/1.0 500 Internal Error\r\nStatus: 500\r\n\r\n";
+        $eh = strlen($errHdrs);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),
+            sprintf("HMSG _INBOX.b 3 %d %d\r\n%s\r\n", $eh, $eh, $errHdrs),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $this->expectException(JetStreamException::class);
+        $client->jetStream()->keyValue('cfg')->getAll()->await();
+    }
+
+    // ─── putExpectingSubjectSeq() with TTL (line 740) ────────────────────────
+
+    /**
+     * Verifies createKey() with a TTL passes Nats-TTL alongside the expected-sequence header (line 740).
+     */
+    public function testCreateKeyWithTtlPassesTtlHeader(): void
+    {
+        $putAck = '{"stream":"KV_cfg","seq":1,"duplicate":false}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($putAck), $putAck),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $ack = $client->jetStream()->keyValue('cfg')->createKey('session', 'tok', ttl: 3600)->await();
+
+        self::assertSame(1, $ack->seq);
+        // Both the CAS header and the TTL must appear in the published message.
+        self::assertStringContainsString('Nats-Expected-Last-Subject-Sequence:0', $transport->writes[3]);
+        self::assertStringContainsString('Nats-TTL:3600s', $transport->writes[3]);
+    }
+
+    // ─── getAll(): subjects with non-KV prefix are skipped (line 558) ───────
+
+    /**
+     * Verifies getAll() skips subjects from STREAM.INFO that do not match the bucket's KV prefix,
+     * i.e. keyFromSubject() returns null and the continue branch (line 558) is taken.
+     */
+    public function testGetAllSkipsSubjectsWithNonKvPrefix(): void
+    {
+        // Include a subject that does NOT start with '$KV.cfg.' so keyFromSubject returns null.
+        $streamInfoPage1 = '{"config":{"name":"KV_cfg","subjects":["$KV.cfg.>"]},"state":{"messages":1,"bytes":16,"subjects":{"other.subject.key":1,"$KV.cfg.theme":1}}}';
+        $streamInfoPage2 = '{"config":{"name":"KV_cfg"},"state":{"messages":1,"bytes":16,"subjects":{}}}';
+        $themeHdrs = "NATS/1.0\r\nNats-Stream: KV_cfg\r\nNats-Subject: \$KV.cfg.theme\r\nNats-Sequence: 3\r\n\r\n";
+        $themeBody = 'dark';
+        $th = strlen($themeHdrs);
+        $tt = $th + strlen($themeBody);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamInfoPage1), $streamInfoPage1),
+            sprintf("MSG _INBOX.p 2 %d\r\n%s\r\n", strlen($streamInfoPage2), $streamInfoPage2),
+            // Only theme gets a Direct Get request (the non-KV subject is skipped).
+            sprintf("HMSG _INBOX.b 3 %d %d\r\n%s%s\r\n", $th, $tt, $themeHdrs, $themeBody),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $all = $client->jetStream()->keyValue('cfg')->getAll()->await();
+
+        // Only 'theme' should appear; the non-KV subject is silently skipped.
+        self::assertSame(['theme' => 'dark'], $all);
+    }
+
+    // ─── watch() updatesOnly deliver policy (line 558) ───────────────────────
+
+    /**
+     * Verifies watch() with updatesOnly option uses deliver_policy=new (line 558 KeyWatchOptions).
+     */
+    public function testWatchUpdatesOnlyUsesNewDeliverPolicy(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('cfg')->watch(
+            static function (KeyValueEntry $entry): void {},
+            '>',
+            new KeyWatchOptions(updatesOnly: true),
+        )->await();
+
+        $createRequest = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"new"', $createRequest);
+    }
+
+    // ─── watch() default (no options) uses last_per_subject (not new) ────────
+
+    /**
+     * Verifies watch() with no options (null) uses deliver_policy=new (the pre-options default).
+     * With KeyWatchOptions() (default instance) it uses last_per_subject.
+     */
+    public function testWatchWithDefaultOptionsUsesLastPerSubject(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        // Passing a default KeyWatchOptions() (no fields set) triggers deliver_policy=last_per_subject.
+        $client->jetStream()->keyValue('cfg')->watch(
+            static function (KeyValueEntry $entry): void {},
+            '>',
+            new KeyWatchOptions(),
+        )->await();
+
+        $createRequest = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"last_per_subject"', $createRequest);
+    }
 }

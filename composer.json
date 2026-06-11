@@ -45,7 +45,7 @@
     "coverage:clover:all": "XDEBUG_MODE=coverage RUN_INTEGRATION=1 vendor/bin/phpunit --coverage-clover coverage.xml --colors=never",
     "coverage:html": "XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-html coverage-report --coverage-text --only-summary-for-coverage-text --colors=never",
     "coverage:check": "bash scripts/check-coverage.sh 90",
-    "coverage:check:clover": "bash scripts/check-clover-coverage.sh 90 coverage.xml",
+    "coverage:check:clover": "bash scripts/check-clover-coverage.sh 95 coverage.xml",
     "stan": "phpstan analyse",
     "fix": "php-cs-fixer fix"
   },
