@@ -383,6 +383,78 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #35 — streamNames() and consumerNames() list names without the full info payload.
+     */
+    public function testStreamAndConsumerNames(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.names';
+        $consumer = 'C_' . strtoupper(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subject])->await();
+        $js->createConsumer($stream, $consumer, $subject)->await();
+
+        self::assertContains($stream, $js->streamNames()->await());
+        self::assertContains($stream, $js->streamNames($subject)->await());
+        self::assertSame([$consumer], $js->consumerNames($stream)->await());
+
+        $js->deleteConsumer($stream, $consumer)->await();
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #36 — getLastMessageForSubject returns the most recent message for a subject (leader path).
+     */
+    public function testGetLastMessageForSubjectLive(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $base = 'it.' . strtolower($stream);
+        $client = $this->client();
+        $js = $client->jetStream();
+        $js->createStream($stream, [$base . '.>'])->await();
+
+        $js->publish($base . '.a', 'first-a')->await();
+        $js->publish($base . '.b', 'only-b')->await();
+        $js->publish($base . '.a', 'second-a')->await();
+
+        $lastA = $js->getLastMessageForSubject($stream, $base . '.a')->await();
+        self::assertSame('second-a', $lastA->payload);
+        self::assertSame($base . '.a', $lastA->subject);
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * #44 — createOrUpdateStream upserts: creates first, then updates the existing stream's subjects.
+     */
+    public function testCreateOrUpdateStreamUpserts(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $base = 'it.' . strtolower($stream);
+        $client = $this->client();
+        $js = $client->jetStream();
+
+        $created = $js->createOrUpdateStream($stream, [$base . '.one'])->await();
+        self::assertSame([$base . '.one'], $created->subjects);
+
+        // Second call on the existing stream updates its subject set (no "already in use" error).
+        $updated = $js->createOrUpdateStream($stream, [$base . '.one', $base . '.two'])->await();
+        self::assertSame([$base . '.one', $base . '.two'], $updated->subjects);
+
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #19 — KV createKey is exclusive: first create wins, a second throws.
      */
     public function testKeyValueCreateKeyIsExclusive(): void

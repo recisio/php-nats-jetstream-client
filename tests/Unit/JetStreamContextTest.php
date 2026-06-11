@@ -52,6 +52,110 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies streamNames() returns names from STREAM.NAMES (#35).
+     */
+    public function testStreamNames(): void
+    {
+        $reply = '{"streams":["ORDERS","EVENTS"],"total":2,"offset":0,"limit":256}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $names = $client->jetStream()->streamNames()->await();
+
+        self::assertSame(['ORDERS', 'EVENTS'], $names);
+        self::assertStringContainsString('$JS.API.STREAM.NAMES', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies consumerNames() returns names from CONSUMER.NAMES (#35).
+     */
+    public function testConsumerNames(): void
+    {
+        $reply = '{"consumers":["worker-1","worker-2"],"total":2}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $names = $client->jetStream()->consumerNames('ORDERS')->await();
+
+        self::assertSame(['worker-1', 'worker-2'], $names);
+        self::assertStringContainsString('$JS.API.CONSUMER.NAMES.ORDERS', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies getLastMessageForSubject() uses last_by_subj and parses the stored message (#36).
+     */
+    public function testGetLastMessageForSubject(): void
+    {
+        $reply = '{"message":{"subject":"orders.new","seq":7,"data":"' . base64_encode('hello') . '"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $message = $client->jetStream()->getLastMessageForSubject('ORDERS', 'orders.new')->await();
+
+        self::assertSame('orders.new', $message->subject);
+        self::assertSame('hello', $message->payload);
+        self::assertStringContainsString('$JS.API.STREAM.MSG.GET.ORDERS', $transport->writes[3]);
+        self::assertStringContainsString('"last_by_subj":"orders.new"', $transport->writes[3]);
+    }
+
+    /**
+     * Verifies getLastMessageForSubject() rejects wildcard subjects (#36).
+     */
+    public function testGetLastMessageForSubjectRejectsWildcard(): void
+    {
+        $client = new NatsClient(new NatsOptions());
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('non-wildcard');
+        $client->jetStream()->getLastMessageForSubject('ORDERS', 'orders.*')->await();
+    }
+
+    /**
+     * Verifies createOrUpdateStream() falls back to UPDATE when the stream already exists (#44).
+     */
+    public function testCreateOrUpdateStreamFallsBackToUpdate(): void
+    {
+        $createErr = '{"error":{"code":400,"err_code":10058,"description":"stream name already in use"}}';
+        $updateOk = '{"config":{"name":"ORDERS","subjects":["orders.*","orders.archive"]}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createErr), $createErr),   // CREATE -> already in use
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($updateOk), $updateOk),     // UPDATE -> ok
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $info = $client->jetStream()->createOrUpdateStream('ORDERS', ['orders.*', 'orders.archive'])->await();
+
+        self::assertSame('ORDERS', $info->name);
+        self::assertStringContainsString('$JS.API.STREAM.CREATE.ORDERS', $transport->writes[3]);
+        self::assertStringContainsString('$JS.API.STREAM.UPDATE.ORDERS', $transport->writes[6]);
+    }
+
+    /**
      * Verifies create/get/delete stream operations map expected payload fields.
      */
     public function testStreamCrud(): void

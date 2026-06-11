@@ -179,6 +179,63 @@ final class JetStreamContext
     }
 
     /**
+     * Creates a stream, falling back to an update when it already exists — an idempotent upsert.
+     * Mirrors nats.go / nats.java `CreateOrUpdateStream` (#44).
+     *
+     * @param list<string> $subjects
+     * @param array<string,mixed> $options Additional stream config fields.
+     * @return Future<StreamInfo>
+     */
+    public function createOrUpdateStream(string $name, array $subjects, array $options = []): Future
+    {
+        return async(function () use ($name, $subjects, $options): StreamInfo {
+            try {
+                return $this->createStream($name, $subjects, $options)->await();
+            } catch (JetStreamException $e) {
+                // "stream name already in use" (err_code 10058): the stream exists, so update it instead.
+                if (stripos($e->getMessage(), 'already in use') === false) {
+                    throw $e;
+                }
+
+                return $this->updateStream($name, array_merge($options, ['subjects' => $subjects]))->await();
+            }
+        });
+    }
+
+    /**
+     * Returns the names of all streams (optionally filtered to those carrying a subject), without the
+     * full StreamInfo payload. Mirrors nats.go / nats.java `StreamNames` (#35).
+     *
+     * @param string|null $subjectFilter Optional subject the stream must carry.
+     * @return Future<list<string>>
+     */
+    public function streamNames(?string $subjectFilter = null): Future
+    {
+        return async(function () use ($subjectFilter): array {
+            $names = [];
+            $offset = 0;
+            $body = $subjectFilter !== null && $subjectFilter !== '' ? ['subject' => $subjectFilter] : [];
+
+            do {
+                $response = $this->requestJson(JetStreamApi::STREAM_NAMES, ['offset' => $offset] + $body);
+                /** @var list<string> $page */
+                $page = is_array($response['streams'] ?? null)
+                    ? array_values(array_filter($response['streams'], 'is_string'))
+                    : [];
+
+                foreach ($page as $name) {
+                    $names[] = $name;
+                }
+
+                $offset += count($page);
+                $total = is_int($response['total'] ?? null) ? $response['total'] : count($names);
+            } while ($page !== [] && count($names) < $total);
+
+            return $names;
+        });
+    }
+
+    /**
      * Retrieves stream metadata by name.
      *
      * @return Future<StreamInfo>
@@ -293,37 +350,72 @@ final class JetStreamContext
                 ['seq' => $seq],
             );
 
-            /** @var array<string,mixed> $msg */
-            $msg = is_array($response['message'] ?? null) ? $response['message'] : [];
-
-            // Use a strict false check rather than `?: ''` so a legitimate falsy body such as "0"
-            // is preserved instead of being replaced with an empty string.
-            $payload = '';
-            if (isset($msg['data']) && is_string($msg['data'])) {
-                $decoded = base64_decode($msg['data'], true);
-                if ($decoded !== false) {
-                    $payload = $decoded;
-                }
-            }
-
-            // Stored messages may carry a header block (base64 'hdrs'); preserve it on the message.
-            $rawHeaders = null;
-            $encodedHeaders = (isset($msg['hdrs']) && is_string($msg['hdrs'])) ? $msg['hdrs'] : '';
-            if ($encodedHeaders !== '') {
-                $decodedHeaders = base64_decode($encodedHeaders, true);
-                if ($decodedHeaders !== false) {
-                    $rawHeaders = $decodedHeaders;
-                }
-            }
-
-            return new NatsMessage(
-                subject: (string) ($msg['subject'] ?? ''),
-                sid: 0,
-                replyTo: null,
-                payload: $payload,
-                rawHeaders: $rawHeaders,
-            );
+            return $this->streamMessageFromResponse($response);
         });
+    }
+
+    /**
+     * Fetches the LAST message stored on a subject via the leader STREAM.MSG.GET API (`last_by_subj`).
+     * Unlike {@see directGetLastMessageForSubject()} (Direct Get, requires `allow_direct`), this works
+     * on any stream and is served by the leader. Mirrors nats.go / nats.java `GetLastMsgForSubject`
+     * (#36). A wildcard subject is rejected; a missing subject surfaces as a 404 JetStreamException.
+     *
+     * @return Future<NatsMessage>
+     */
+    public function getLastMessageForSubject(string $stream, string $subject): Future
+    {
+        return async(function () use ($stream, $subject): NatsMessage {
+            if ($subject === '' || str_contains($subject, '*') || str_contains($subject, '>')) {
+                throw new JetStreamException('getLastMessageForSubject requires a concrete (non-wildcard) subject');
+            }
+
+            $response = $this->requestJson(
+                JetStreamApi::STREAM_MSG_GET_PREFIX . $stream,
+                ['last_by_subj' => $subject],
+            );
+
+            return $this->streamMessageFromResponse($response);
+        });
+    }
+
+    /**
+     * Builds a {@see NatsMessage} from a STREAM.MSG.GET response, decoding the base64 body and any
+     * stored header block.
+     *
+     * @param array<string,mixed> $response
+     */
+    private function streamMessageFromResponse(array $response): NatsMessage
+    {
+        /** @var array<string,mixed> $msg */
+        $msg = is_array($response['message'] ?? null) ? $response['message'] : [];
+
+        // Use a strict false check rather than `?: ''` so a legitimate falsy body such as "0"
+        // is preserved instead of being replaced with an empty string.
+        $payload = '';
+        if (isset($msg['data']) && is_string($msg['data'])) {
+            $decoded = base64_decode($msg['data'], true);
+            if ($decoded !== false) {
+                $payload = $decoded;
+            }
+        }
+
+        // Stored messages may carry a header block (base64 'hdrs'); preserve it on the message.
+        $rawHeaders = null;
+        $encodedHeaders = (isset($msg['hdrs']) && is_string($msg['hdrs'])) ? $msg['hdrs'] : '';
+        if ($encodedHeaders !== '') {
+            $decodedHeaders = base64_decode($encodedHeaders, true);
+            if ($decodedHeaders !== false) {
+                $rawHeaders = $decodedHeaders;
+            }
+        }
+
+        return new NatsMessage(
+            subject: (string) ($msg['subject'] ?? ''),
+            sid: 0,
+            replyTo: null,
+            payload: $payload,
+            rawHeaders: $rawHeaders,
+        );
     }
 
     /**
@@ -589,6 +681,50 @@ final class JetStreamContext
             );
 
             return ConsumerInfo::fromArray($response);
+        });
+    }
+
+    /**
+     * Creates or updates a durable consumer (idempotent upsert). The JetStream CONSUMER.CREATE API is
+     * itself create-or-update on modern servers, so this is equivalent to {@see createConsumer()} but
+     * named to document the upsert intent. Mirrors nats.go / nats.java `CreateOrUpdateConsumer` (#44).
+     *
+     * @param array<string,mixed> $options Additional consumer config fields.
+     * @return Future<ConsumerInfo>
+     */
+    public function addOrUpdateConsumer(string $stream, string $consumer, ?string $filterSubject = null, array $options = []): Future
+    {
+        return $this->createConsumer($stream, $consumer, $filterSubject, $options);
+    }
+
+    /**
+     * Returns the names of all consumers on a stream, without the full ConsumerInfo payload.
+     * Mirrors nats.go / nats.java `ConsumerNames` (#35).
+     *
+     * @return Future<list<string>>
+     */
+    public function consumerNames(string $stream): Future
+    {
+        return async(function () use ($stream): array {
+            $names = [];
+            $offset = 0;
+
+            do {
+                $response = $this->requestJson(JetStreamApi::CONSUMER_NAMES_PREFIX . $stream, ['offset' => $offset]);
+                /** @var list<string> $page */
+                $page = is_array($response['consumers'] ?? null)
+                    ? array_values(array_filter($response['consumers'], 'is_string'))
+                    : [];
+
+                foreach ($page as $name) {
+                    $names[] = $name;
+                }
+
+                $offset += count($page);
+                $total = is_int($response['total'] ?? null) ? $response['total'] : count($names);
+            } while ($page !== [] && count($names) < $total);
+
+            return $names;
         });
     }
 
