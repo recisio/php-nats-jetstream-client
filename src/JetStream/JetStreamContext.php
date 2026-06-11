@@ -13,6 +13,8 @@ use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\Exception\NatsException;
+use IDCT\NATS\JetStream\Configuration\ConsumerConfiguration;
+use IDCT\NATS\JetStream\Configuration\StreamConfiguration;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
 use IDCT\NATS\JetStream\Models\AccountInfo;
@@ -156,6 +158,21 @@ final class JetStreamContext
             ]);
 
             $response = $this->requestJson(JetStreamApi::STREAM_CREATE_PREFIX . $name, $payload);
+
+            return StreamInfo::fromArray($response);
+        });
+    }
+
+    /**
+     * Creates a stream from a typed {@see StreamConfiguration} builder (#53), the discoverable
+     * alternative to the array-based {@see createStream()}.
+     *
+     * @return Future<StreamInfo>
+     */
+    public function addStream(StreamConfiguration $config): Future
+    {
+        return async(function () use ($config): StreamInfo {
+            $response = $this->requestJson(JetStreamApi::STREAM_CREATE_PREFIX . $config->name(), $config->toArray());
 
             return StreamInfo::fromArray($response);
         });
@@ -679,6 +696,25 @@ final class JetStreamContext
                 JetStreamApi::CONSUMER_CREATE_PREFIX . $stream . '.' . $consumer,
                 ['stream_name' => $stream, 'config' => $config],
             );
+
+            return ConsumerInfo::fromArray($response);
+        });
+    }
+
+    /**
+     * Creates a consumer from a typed {@see ConsumerConfiguration} builder (#54), the discoverable
+     * alternative to the array-based {@see createConsumer()}. A durable name on the config makes the
+     * consumer durable; omit it for an ephemeral consumer.
+     *
+     * @return Future<ConsumerInfo>
+     */
+    public function addConsumer(string $stream, ConsumerConfiguration $config): Future
+    {
+        return async(function () use ($stream, $config): ConsumerInfo {
+            $name = $config->getName();
+            $subject = JetStreamApi::CONSUMER_CREATE_PREFIX . $stream . ($name !== null ? '.' . $name : '');
+
+            $response = $this->requestJson($subject, ['stream_name' => $stream, 'config' => $config->toArray()]);
 
             return ConsumerInfo::fromArray($response);
         });

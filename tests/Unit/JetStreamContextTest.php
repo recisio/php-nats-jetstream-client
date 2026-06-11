@@ -52,6 +52,78 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies addStream() builds the CREATE payload from a typed StreamConfiguration (#53).
+     */
+    public function testAddStreamFromBuilder(): void
+    {
+        $reply = '{"config":{"name":"ORDERS","subjects":["orders.*"]}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $config = \IDCT\NATS\JetStream\Configuration\StreamConfiguration::create('ORDERS')
+            ->subjects('orders.*', 'orders.archive')
+            ->retention(\IDCT\NATS\JetStream\Enum\RetentionPolicy::WorkQueue)
+            ->storage(\IDCT\NATS\JetStream\Enum\StorageBackend::Memory)
+            ->maxBytes(4096)
+            ->maxAge(60)
+            ->replicas(3);
+
+        $info = $client->jetStream()->addStream($config)->await();
+
+        self::assertSame('ORDERS', $info->name);
+        $create = $transport->writes[3];
+        self::assertStringContainsString('$JS.API.STREAM.CREATE.ORDERS', $create);
+        self::assertStringContainsString('"subjects":["orders.*","orders.archive"]', $create);
+        self::assertStringContainsString('"retention":"workqueue"', $create);
+        self::assertStringContainsString('"storage":"memory"', $create);
+        self::assertStringContainsString('"max_bytes":4096', $create);
+        self::assertStringContainsString('"max_age":60000000000', $create);
+        self::assertStringContainsString('"num_replicas":3', $create);
+    }
+
+    /**
+     * Verifies addConsumer() builds the CREATE payload from a typed ConsumerConfiguration (#54).
+     */
+    public function testAddConsumerFromBuilder(): void
+    {
+        $reply = '{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $config = \IDCT\NATS\JetStream\Configuration\ConsumerConfiguration::create()
+            ->durable('worker')
+            ->ackPolicy(\IDCT\NATS\JetStream\Enum\AckPolicy::Explicit)
+            ->maxDeliver(5)
+            ->ackWait(1000)
+            ->backoff([1000, 2000]);
+
+        $info = $client->jetStream()->addConsumer('ORDERS', $config)->await();
+
+        self::assertSame('worker', $info->name);
+        $create = $transport->writes[3];
+        self::assertStringContainsString('$JS.API.CONSUMER.CREATE.ORDERS.worker', $create);
+        self::assertStringContainsString('"durable_name":"worker"', $create);
+        self::assertStringContainsString('"ack_policy":"explicit"', $create);
+        self::assertStringContainsString('"max_deliver":5', $create);
+        self::assertStringContainsString('"ack_wait":1000000000', $create);
+        self::assertStringContainsString('"backoff":[1000000000,2000000000]', $create);
+    }
+
+    /**
      * Verifies streamNames() returns names from STREAM.NAMES (#35).
      */
     public function testStreamNames(): void

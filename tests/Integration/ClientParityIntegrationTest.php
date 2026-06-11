@@ -535,6 +535,49 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #53 + #54 — typed StreamConfiguration / ConsumerConfiguration builders create matching assets.
+     */
+    public function testTypedStreamAndConsumerBuilders(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.builder';
+        $consumer = 'C_' . strtoupper(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $js = $client->jetStream();
+
+        $created = $js->addStream(
+            \IDCT\NATS\JetStream\Configuration\StreamConfiguration::create($stream)
+                ->subjects($subject)
+                ->retention(\IDCT\NATS\JetStream\Enum\RetentionPolicy::WorkQueue)
+                ->maxBytes(1_000_000),
+        )->await();
+        self::assertSame($stream, $created->name);
+        self::assertSame('workqueue', $created->raw['config']['retention'] ?? null);
+        self::assertSame(1_000_000, (int) ($created->raw['config']['max_bytes'] ?? 0));
+
+        $consumerInfo = $js->addConsumer(
+            $stream,
+            \IDCT\NATS\JetStream\Configuration\ConsumerConfiguration::create()
+                ->durable($consumer)
+                ->filterSubject($subject)
+                ->ackPolicy(\IDCT\NATS\JetStream\Enum\AckPolicy::Explicit)
+                ->maxDeliver(3)
+                ->ackWait(2000),
+        )->await();
+        self::assertSame($consumer, $consumerInfo->name);
+
+        $fetched = $js->getConsumer($stream, $consumer)->await();
+        self::assertSame('explicit', $fetched->raw['config']['ack_policy'] ?? null);
+        self::assertSame(3, (int) ($fetched->raw['config']['max_deliver'] ?? 0));
+
+        $js->deleteConsumer($stream, $consumer)->await();
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #35 — streamNames() and consumerNames() list names without the full info payload.
      */
     public function testStreamAndConsumerNames(): void
