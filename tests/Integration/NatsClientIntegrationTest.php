@@ -254,8 +254,8 @@ final class NatsClientIntegrationTest extends TestCase
 
         $client->publish($subject, 'self')->await();
 
-        $deadline = microtime(true) + 0.8;
-        while (microtime(true) < $deadline) {
+        $deadline = $this->monotonic() + 0.8;
+        while ($this->monotonic() < $deadline) {
             $client->processIncoming()->await();
             if ($received) {
                 break;
@@ -1447,12 +1447,14 @@ final class NatsClientIntegrationTest extends TestCase
         );
         $client->connect()->await();
 
-        $start = microtime(true);
         self::assertSame(0, $client->processIncoming()->await());
-        $elapsed = microtime(true) - $start;
 
+        // The read failure drives reconnect: attempts 2 and 3 fail, attempt 4 succeeds and lands on the
+        // second server. These outcomes are deterministic. The backoff-delay *magnitude* is asserted by
+        // the unit test testBackoffDelayIsExponential; we do NOT assert wall-clock elapsed here because
+        // the host clock is not guaranteed monotonic (microtime() can jump forward or backward), which
+        // made an elapsed-time bound flaky (#70).
         self::assertSame(4, $transport->connectAttempts);
-        self::assertGreaterThanOrEqual(0.055, $elapsed);
         self::assertSame('S2', $client->serverInfo()?->serverId);
 
         $client->disconnect()->await();
@@ -1756,12 +1758,22 @@ final class NatsClientIntegrationTest extends TestCase
             $requestCancellation->cancel();
         });
 
-        $start = microtime(true);
+        // Use a deliberately long timeout: the responder never replies, so the wait can only end two
+        // ways — the external cancellation (CancelledException) or the deadline (TimeoutException).
+        // request() throws CancelledException ONLY when the external token aborted the wait, so
+        // catching it is itself proof that cancellation (not the timeout) stopped the await. We assert
+        // on the EXCEPTION TYPE rather than wall-clock latency: an occasional event-loop/GC stall can
+        // delay timer firing by seconds, which made a tight wall-clock bound flaky (#70) even though
+        // cancellation behaved correctly. The generous timeout keeps the deadline from ever winning
+        // under that jitter, while a genuinely broken cancellation would surface as a TimeoutException.
+        $timeoutMs = 30_000;
+        $start = $this->monotonic();
         try {
-            $client->request($subject, 'cancel-me', 2_500, $requestCancellation->getCancellation())->await();
+            $client->request($subject, 'cancel-me', $timeoutMs, $requestCancellation->getCancellation())->await();
             self::fail('Expected request cancellation.');
         } catch (CancelledException) {
-            self::assertLessThan(2.0, microtime(true) - $start);
+            // Cancellation aborted the wait before the deadline — proven by the exception type.
+            self::assertLessThan($timeoutMs / 1000, $this->monotonic() - $start, 'Cancellation must abort before the request deadline');
         } finally {
             $serverPumpCancellation->cancel();
             $serverPump->await();

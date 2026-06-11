@@ -483,6 +483,18 @@ final class ClientParityIntegrationTest extends TestCase
     {
         $this->requireIntegrationEnabled();
 
+        // Capture reconnect activity so fast-fail can be asserted on BEHAVIOR rather than wall-clock
+        // latency (a wall-clock bound flakes under an occasional event-loop stall — see #70).
+        $logger = new class extends \Psr\Log\AbstractLogger {
+            /** @var list<string> */
+            public array $messages = [];
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                $this->messages[] = (string) $message;
+            }
+        };
+
         // Reconnect ENABLED with several attempts; an auth failure must still return promptly.
         $client = new NatsClient(new NatsOptions(
             servers: [$this->integrationTokenServerUrl()],
@@ -490,20 +502,24 @@ final class ClientParityIntegrationTest extends TestCase
             maxReconnectAttempts: 5,
             reconnectDelayMs: 200,
             token: 'definitely-the-wrong-token',
+            logger: $logger,
         ));
 
-        $start = microtime(true);
         $threw = false;
         try {
             $client->connect()->await();
         } catch (\IDCT\NATS\Exception\AuthenticationException) {
             $threw = true;
         }
-        $elapsed = microtime(true) - $start;
 
         self::assertTrue($threw, 'A bad token must raise AuthenticationException');
-        // Fast-fail: well under the time 5 reconnect attempts (with 200ms+ backoff each) would take.
-        self::assertLessThan(2.0, $elapsed);
+        // Fast-fail proof (timing-independent): a bad credential is not retried through the reconnect
+        // loop, so no "reconnect attempt" was ever logged. Exhausting 5 attempts would log five.
+        $reconnectAttempts = array_filter(
+            $logger->messages,
+            static fn(string $m): bool => str_contains($m, 'reconnect attempt'),
+        );
+        self::assertCount(0, $reconnectAttempts, 'A bad credential must fail fast without reconnect attempts');
     }
 
     /**

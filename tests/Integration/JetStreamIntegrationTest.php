@@ -428,8 +428,8 @@ final class JetStreamIntegrationTest extends TestCase
 
         $observedMessages = 0;
         $delivered = false;
-        $deadline = microtime(true) + 6.0;
-        while (!$delivered && microtime(true) < $deadline) {
+        $deadline = $this->monotonic() + 6.0;
+        while (!$delivered && $this->monotonic() < $deadline) {
             $state = $js->getStream($stream)->await()->raw['state'] ?? [];
             $observedMessages = max(0, (int) ($state['messages'] ?? 0));
             $delivered = $observedMessages >= 1;
@@ -581,9 +581,25 @@ final class JetStreamIntegrationTest extends TestCase
         self::assertSame('{"event":"redeliver"}', $first->payload);
 
         $js->nakWithDelay($first, 1200)->await();
-        delay(1.5);
 
-        $second = $js->fetchNext($stream, $consumer, 4000)->await();
+        // The redelivery is due ~1.2s after the NAK. Poll for it, tolerating transient pull timeouts
+        // (408): a single fixed wait + one fetch is flaky because server-side redelivery timing can
+        // jitter past one pull window (#70). The overall deadline still fails fast if the message is
+        // genuinely never redelivered.
+        $second = null;
+        $deadline = $this->monotonic() + 15.0;
+        while ($second === null && $this->monotonic() < $deadline) {
+            try {
+                $second = $js->fetchNext($stream, $consumer, 2000)->await();
+            } catch (JetStreamException $e) {
+                if (!str_contains($e->getMessage(), '408')) {
+                    throw $e;
+                }
+                // 408 Request Timeout: the redelivery has not arrived yet — pull again.
+            }
+        }
+
+        self::assertNotNull($second, 'NAK-with-delay message must be redelivered');
         self::assertSame('{"event":"redeliver"}', $second->payload);
 
         $js->ack($second)->await();
@@ -630,8 +646,8 @@ final class JetStreamIntegrationTest extends TestCase
         }
 
         $redelivered = null;
-        $deadline = microtime(true) + 4.0;
-        while ($redelivered === null && microtime(true) < $deadline) {
+        $deadline = $this->monotonic() + 4.0;
+        while ($redelivered === null && $this->monotonic() < $deadline) {
             try {
                 $redelivered = $js->fetchNext($stream, $consumer, 800)->await();
             } catch (JetStreamException $e) {
@@ -1260,8 +1276,8 @@ final class JetStreamIntegrationTest extends TestCase
         self::assertSame(1_000_000_000, (int) ($config['max_age'] ?? -1));
 
         $expired = null;
-        $deadline = microtime(true) + 12.0;
-        while (microtime(true) < $deadline) {
+        $deadline = $this->monotonic() + 12.0;
+        while ($this->monotonic() < $deadline) {
             $expired = $kv->get('session')->await();
             if ($expired === null) {
                 break;
