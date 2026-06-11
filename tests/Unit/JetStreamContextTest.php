@@ -124,6 +124,44 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * Verifies keyValueBucketNames() lists KV_-prefixed streams with the prefix stripped (#60).
+     */
+    public function testKeyValueBucketNames(): void
+    {
+        $reply = '{"streams":["KV_cfg","OBJ_assets","ORDERS","KV_sessions"],"total":4}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        self::assertSame(['cfg', 'sessions'], $client->jetStream()->keyValueBucketNames()->await());
+    }
+
+    /**
+     * Verifies objectStoreBucketNames() lists OBJ_-prefixed streams with the prefix stripped (#60).
+     */
+    public function testObjectStoreBucketNames(): void
+    {
+        $reply = '{"streams":["KV_cfg","OBJ_assets","ORDERS","OBJ_media"],"total":4}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        self::assertSame(['assets', 'media'], $client->jetStream()->objectStoreBucketNames()->await());
+    }
+
+    /**
      * Verifies streamNames() returns names from STREAM.NAMES (#35).
      */
     public function testStreamNames(): void

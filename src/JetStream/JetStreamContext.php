@@ -94,6 +94,46 @@ final class JetStreamContext
     }
 
     /**
+     * Lists the names of all KeyValue buckets (the `KV_`-prefixed streams), with the prefix stripped.
+     * Mirrors nats.go / nats.java KV bucket discovery (#60).
+     *
+     * @return Future<list<string>>
+     */
+    public function keyValueBucketNames(): Future
+    {
+        return async(function (): array {
+            $names = [];
+            foreach ($this->streamNames()->await() as $stream) {
+                if (str_starts_with($stream, 'KV_')) {
+                    $names[] = substr($stream, 3);
+                }
+            }
+
+            return $names;
+        });
+    }
+
+    /**
+     * Lists the names of all Object Store buckets (the `OBJ_`-prefixed streams), with the prefix
+     * stripped. Mirrors nats.go / nats.java Object Store bucket discovery (#60).
+     *
+     * @return Future<list<string>>
+     */
+    public function objectStoreBucketNames(): Future
+    {
+        return async(function (): array {
+            $names = [];
+            foreach ($this->streamNames()->await() as $stream) {
+                if (str_starts_with($stream, 'OBJ_')) {
+                    $names[] = substr($stream, 4);
+                }
+            }
+
+            return $names;
+        });
+    }
+
+    /**
      * Returns a KeyValue bucket context.
      */
     public function keyValue(string $bucket): KeyValueBucket

@@ -507,6 +507,31 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #60 — KV and Object Store bucket discovery lists created buckets.
+     */
+    public function testBucketDiscovery(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $kvName = 'disc' . strtolower(bin2hex(random_bytes(2)));
+        $osName = 'disc' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $js = $client->jetStream();
+
+        $js->keyValue($kvName)->create()->await();
+        $js->objectStore($osName)->create()->await();
+
+        self::assertContains($kvName, $js->keyValueBucketNames()->await());
+        self::assertContains($osName, $js->objectStoreBucketNames()->await());
+        // KV discovery must not list the object-store bucket and vice versa.
+        self::assertNotContains($osName, $js->keyValueBucketNames()->await());
+
+        $js->keyValue($kvName)->deleteBucket()->await();
+        $js->objectStore($osName)->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #33 + #41 — KV getRevision reads a historical revision and history() returns all revisions.
      */
     public function testKeyValueGetRevisionAndHistory(): void
