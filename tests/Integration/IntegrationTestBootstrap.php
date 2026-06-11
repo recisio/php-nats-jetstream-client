@@ -41,6 +41,16 @@ trait IntegrationTestBootstrap
     }
 
     /**
+     * Monotonic clock in seconds, for timing/deadline measurement in tests. Uses hrtime() rather than
+     * microtime(): the host wall clock is not guaranteed monotonic (it can jump forward or backward,
+     * e.g. under WSL or VM clock sync), which makes wall-clock elapsed/deadline checks flaky (#70).
+     */
+    protected function monotonic(): float
+    {
+        return hrtime(true) / 1_000_000_000;
+    }
+
+    /**
      * Skips the current test unless integration tests are explicitly enabled.
      */
     protected function requireIntegrationEnabled(): void
