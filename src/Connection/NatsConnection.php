@@ -1525,9 +1525,9 @@ final class NatsConnection
         if ($queue->count() >= $limit) {
             if ($this->options->slowConsumerPolicy === SlowConsumerPolicy::DropOldest) {
                 $queue->dequeue();
-                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped oldest message'));
+                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped oldest message'), 'debug');
             } elseif ($this->options->slowConsumerPolicy === SlowConsumerPolicy::DropNewest) {
-                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped newest message'));
+                $this->emitError(new NatsException('Slow consumer on sid ' . $sid . ': dropped newest message'), 'debug');
 
                 return;
             } else {
@@ -1770,9 +1770,12 @@ final class NatsConnection
     /**
      * Invokes the configured asynchronous-error listener, swallowing any exception it raises.
      */
-    private function emitError(\Throwable $error): void
+    private function emitError(\Throwable $error, string $logLevel = 'error'): void
     {
-        $this->logger->error('NATS connection error: ' . $error->getMessage(), ['exception' => $error]);
+        // Routine, high-frequency conditions (slow-consumer drops) log at debug so they cannot flood
+        // error logs on a per-message hot path; genuine errors stay at error level. The error listener
+        // is always notified regardless of level (callers opted in and can throttle themselves).
+        $this->logger->log($logLevel, 'NATS connection error: ' . $error->getMessage(), ['exception' => $error]);
 
         $listener = $this->options->errorListener;
         if ($listener === null) {

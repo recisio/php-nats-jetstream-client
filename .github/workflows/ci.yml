@@ -56,7 +56,8 @@ jobs:
         # integration-only code (TLS upgrade, Object Store download, etc.) is counted.
         run: composer coverage:clover:all
       - name: Enforce Coverage Threshold
-        # Reuses the clover report above (no extra test run) and fails the build below 90%.
+        # Reuses the clover report above (no extra test run); threshold is defined in composer.json
+        # (coverage:check:clover) and currently fails the build below 89% (a ratchet on ~89.6%).
         run: composer coverage:check:clover
       - name: Stop NATS services
         if: always()

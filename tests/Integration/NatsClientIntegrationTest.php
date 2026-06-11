@@ -1860,15 +1860,17 @@ final class NatsClientIntegrationTest extends TestCase
         $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
         $client->connect()->await();
 
-        $subject = 'it.flush.' . bin2hex(random_bytes(4));
-        $client->subscribe($subject, static function (): void {})->await();
-        $client->publish($subject, 'x')->await();
+        try {
+            $subject = 'it.flush.' . bin2hex(random_bytes(4));
+            $client->subscribe($subject, static function (): void {})->await();
+            $client->publish($subject, 'x')->await();
 
-        // flush() drives its own read loop for the PONG; it must resolve without error.
-        $client->flush()->await();
-        self::assertSame(ConnectionState::Open, $client->state());
-
-        $client->disconnect()->await();
+            // flush() drives its own read loop for the PONG; it must resolve without error.
+            $client->flush()->await();
+            self::assertSame(ConnectionState::Open, $client->state());
+        } finally {
+            $client->disconnect()->await();
+        }
     }
 
     /**
@@ -1883,20 +1885,22 @@ final class NatsClientIntegrationTest extends TestCase
         $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
         $client->connect()->await();
 
-        $queue = $client->subscribeQueue($subject)->await();
-        $client->flush()->await(); // ensure the SUB is registered before publishing
+        try {
+            $queue = $client->subscribeQueue($subject)->await();
+            $client->flush()->await(); // ensure the SUB is registered before publishing
 
-        $client->publish($subject, 'q1')->await();
-        $client->publish($subject, 'q2')->await();
+            $client->publish($subject, 'q1')->await();
+            $client->publish($subject, 'q2')->await();
 
-        $queue->setTimeout(3.0); // next() self-pumps processIncoming within this window
-        $first = $queue->next();
-        $second = $queue->next();
+            $queue->setTimeout(3.0); // next() self-pumps processIncoming within this window
+            $first = $queue->next();
+            $second = $queue->next();
 
-        self::assertSame('q1', $first?->payload);
-        self::assertSame('q2', $second?->payload);
-
-        $client->disconnect()->await();
+            self::assertSame('q1', $first?->payload);
+            self::assertSame('q2', $second?->payload);
+        } finally {
+            $client->disconnect()->await();
+        }
     }
 
     /**
@@ -1907,6 +1911,9 @@ final class NatsClientIntegrationTest extends TestCase
     {
         $this->requireIntegrationEnabled();
 
+        // Reconnect stays at its default (enabled), matching a real publisher; asserting reconnects == 0
+        // ensures the connection genuinely survived via the heartbeat self-read rather than being
+        // silently torn down and reconnected (which would also leave state() == Open and hide the bug).
         $client = new NatsClient(new NatsOptions(
             servers: [$this->integrationServerUrl()],
             pingIntervalSeconds: 1,
@@ -1914,14 +1921,17 @@ final class NatsClientIntegrationTest extends TestCase
         ));
         $client->connect()->await();
 
-        // Stay completely idle for longer than maxPingsOut * pingInterval. If the heartbeat did not
-        // self-read PONGs, outstandingPings would exceed maxPingsOut and force a disconnect.
-        delay(3.5);
+        try {
+            // Stay completely idle for longer than maxPingsOut * pingInterval. If the heartbeat did not
+            // self-read PONGs, outstandingPings would exceed maxPingsOut and force a disconnect/reconnect.
+            delay(3.5);
 
-        self::assertSame(ConnectionState::Open, $client->state(), 'Idle connection must survive via heartbeat self-read');
-        $client->flush()->await(); // still usable
-
-        $client->disconnect()->await();
+            self::assertSame(ConnectionState::Open, $client->state(), 'Idle connection must survive via heartbeat self-read');
+            self::assertSame(0, $client->statistics()->reconnects, 'Heartbeat self-read must keep the connection alive without a reconnect');
+            $client->flush()->await(); // still usable
+        } finally {
+            $client->disconnect()->await();
+        }
     }
 
     /**
@@ -1939,43 +1949,45 @@ final class NatsClientIntegrationTest extends TestCase
         $server->connect()->await();
         $client->connect()->await();
 
-        // One responder receives but never replies (forces a timeout, not a 503 no-responders).
-        $server->subscribe($silent, static function (): void {})->await();
-        // A second responder echoes, to prove the connection is healthy after the timeout.
-        $server->subscribe($echo, static function (NatsMessage $message): void {
-            $message->respond('pong:' . $message->payload)->await();
-        })->await();
-        $server->flush()->await();
-
-        $pump = new DeferredCancellation();
-        $pumpFuture = async(static function () use ($server, $pump): void {
-            $cancellation = $pump->getCancellation();
-            try {
-                while (!$cancellation->isRequested()) {
-                    $server->processIncoming($cancellation)->await();
-                }
-            } catch (CancelledException) {
-            }
-        });
-
         try {
+            // One responder receives but never replies (forces a timeout, not a 503 no-responders).
+            $server->subscribe($silent, static function (): void {})->await();
+            // A second responder echoes, to prove the connection is healthy after the timeout.
+            $server->subscribe($echo, static function (NatsMessage $message): void {
+                $message->respond('pong:' . $message->payload)->await();
+            })->await();
+            $server->flush()->await();
+
+            $pump = new DeferredCancellation();
+            $pumpFuture = async(static function () use ($server, $pump): void {
+                $cancellation = $pump->getCancellation();
+                try {
+                    while (!$cancellation->isRequested()) {
+                        $server->processIncoming($cancellation)->await();
+                    }
+                } catch (CancelledException) {
+                }
+            });
+
             try {
-                $client->request($silent, 'hello', 300)->await();
-                self::fail('Expected request timeout exception.');
-            } catch (TimeoutException) {
-                // Expected — the read should have been cancelled, not orphaned.
+                try {
+                    $client->request($silent, 'hello', 300)->await();
+                    self::fail('Expected request timeout exception.');
+                } catch (TimeoutException) {
+                    // Expected — the read should have been cancelled, not orphaned.
+                }
+
+                // The connection must still be open and usable: the next request succeeds.
+                self::assertSame(ConnectionState::Open, $client->state());
+                $reply = $client->request($echo, 'after-timeout', 3000)->await();
+                self::assertSame('pong:after-timeout', $reply->payload);
+            } finally {
+                $pump->cancel();
+                $pumpFuture->await();
             }
-
-            // The connection must still be open and usable: the next request succeeds.
-            self::assertSame(ConnectionState::Open, $client->state());
-            $reply = $client->request($echo, 'after-timeout', 3000)->await();
-            self::assertSame('pong:after-timeout', $reply->payload);
         } finally {
-            $pump->cancel();
-            $pumpFuture->await();
+            $client->disconnect()->await();
+            $server->disconnect()->await();
         }
-
-        $client->disconnect()->await();
-        $server->disconnect()->await();
     }
 }
