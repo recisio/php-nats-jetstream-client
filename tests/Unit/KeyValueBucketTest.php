@@ -180,6 +180,58 @@ final class KeyValueBucketTest extends TestCase
     }
 
     /**
+     * Verifies create() with a mirror translates the bucket name to KV_ and emits no subjects (#62).
+     */
+    public function testCreateWithMirrorTranslatesBucketName(): void
+    {
+        $reply = '{"config":{"name":"KV_dst"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('dst')->create(['mirror' => 'src'])->await();
+
+        $create = $transport->writes[3];
+        self::assertStringContainsString('$JS.API.STREAM.CREATE.KV_dst', $create);
+        self::assertStringContainsString('"mirror":{"name":"KV_src"}', $create);
+        self::assertStringContainsString('"subjects":[]', $create);
+    }
+
+    /**
+     * Verifies create() with sources + extended config translates source names and passes config (#62).
+     */
+    public function testCreateWithSourcesAndExtendedConfig(): void
+    {
+        $reply = '{"config":{"name":"KV_agg"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->keyValue('agg')->create([
+            'sources' => ['b1', 'b2'],
+            'compression' => 's2',
+            'placement' => ['cluster' => 'c1'],
+        ])->await();
+
+        $create = $transport->writes[3];
+        self::assertStringContainsString('"sources":[{"name":"KV_b1"},{"name":"KV_b2"}]', $create);
+        self::assertStringContainsString('"compression":"s2"', $create);
+        self::assertStringContainsString('"placement":{"cluster":"c1"}', $create);
+    }
+
+    /**
      * Verifies getRevision returns the entry stored at a specific sequence (#33).
      */
     public function testGetRevisionReturnsEntryAtSequence(): void

@@ -561,6 +561,29 @@ final class ClientParityIntegrationTest extends TestCase
     }
 
     /**
+     * #62 — a KV mirror bucket is created with its mirror pointing at the source bucket's KV_ stream.
+     */
+    public function testKeyValueMirrorBucketConfig(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $primary = 'pri' . strtolower(bin2hex(random_bytes(2)));
+        $replica = 'rep' . strtolower(bin2hex(random_bytes(2)));
+        $client = $this->client();
+        $js = $client->jetStream();
+
+        $js->keyValue($primary)->create()->await();
+        $js->keyValue($replica)->create(['mirror' => $primary])->await();
+
+        $stream = $js->getStream('KV_' . $replica)->await();
+        self::assertSame('KV_' . $primary, $stream->raw['config']['mirror']['name'] ?? null);
+
+        $js->keyValue($replica)->deleteBucket()->await();
+        $js->keyValue($primary)->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * #34 — compare-and-delete: a stale expected revision is rejected, the current one succeeds.
      */
     public function testKeyValueCompareAndDelete(): void
