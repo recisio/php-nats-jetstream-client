@@ -8,8 +8,13 @@ namespace IDCT\NATS\JetStream\KeyValue;
  * Options for {@see KeyValueBucket::watch()}, mirroring the nats.go / nats.java KV watch option matrix.
  *
  * Delivery-policy precedence (highest first): {@see $resumeFromRevision}, {@see $includeHistory},
- * {@see $updatesOnly}. With none set, the watcher replays the current value of every matching key
- * (last-per-subject) and then streams live updates — the reference-client default.
+ * {@see $updatesOnly}. When an instance of this class is supplied with none of those flags set, the
+ * watcher replays the current value of every matching key (last-per-subject) and then streams live
+ * updates — the reference-client default.
+ *
+ * Note: this last-per-subject default applies only when an instance is passed. {@see KeyValueBucket::watch()}
+ * called with `$options = null` (the common form) is updates-only (deliver_policy=new) and replays nothing;
+ * pass `new KeyWatchOptions()` to get the snapshot-then-follow behavior.
  */
 final class KeyWatchOptions
 {

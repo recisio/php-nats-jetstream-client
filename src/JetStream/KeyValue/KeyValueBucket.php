@@ -360,6 +360,11 @@ final class KeyValueBucket
     /**
      * Watches keys using wildcard pattern and forwards entries to a callback.
      *
+     * With `$options = null` only updates published after the watch starts are delivered
+     * (deliver_policy=new); pass a {@see KeyWatchOptions} instance (even with no flags) to replay the
+     * current value of every matching key first (last_per_subject), or to select history / meta-only /
+     * resume-from-revision / ignore-deletes and an end-of-initial-data signal.
+     *
      * @param callable(KeyValueEntry):void $handler
      * @return Future<int>
      */

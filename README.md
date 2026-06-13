@@ -30,6 +30,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [TODO](#todo)
 - [Usage](#usage)
 - [Authentication Options](#authentication-options)
+- [WebSocket Transport](#websocket-transport)
 - [Connect and Publish/Subscribe](#connect-and-publishsubscribe)
 - [Request/Reply](#requestreply)
 - [Request Many (Scatter-Gather)](#request-many-scatter-gather)
@@ -174,7 +175,7 @@ You can also query the requirement programmatically: `IDCT\NATS\JetStream\Featur
 
 ### Authentication Options
 
-_Verified by: [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php), [NatsConnectionTest::testConnectIncludesJwtSignatureFromInfoNonce](tests/Unit/NatsConnectionTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testTokenAuthSuccessAndFailure`, `testUserPasswordAuthSuccessAndFailure`, `testJwtNonceAuthenticationFlow`, `testTlsHandshakeFirstConnection`); [features/auth/](features/auth/)._
+_Verified by: [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php), [NatsConnectionTest::testConnectIncludesJwtSignatureFromInfoNonce](tests/Unit/NatsConnectionTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testTokenAuthSuccessAndFailure`, `testUserPasswordAuthSuccessAndFailure`, `testJwtNonceAuthenticationFlow`, `testStandaloneNkeyAuthenticationFlow`, `testTlsHandshakeFirstConnection`); [features/auth/](features/auth/)._
 
 ```php
 <?php
@@ -207,6 +208,13 @@ $jwtClient = new NatsClient(new NatsOptions(
 	nonceSigner: $signer,
 ));
 
+// Standalone NKey (Ed25519 challenge signing, no JWT): set nkey + nonceSigner and omit jwt.
+$nkeyClient = new NatsClient(new NatsOptions(
+	servers: ['nats://127.0.0.1:4222'],
+	nkey: $signer->publicKey(),
+	nonceSigner: $signer,
+));
+
 // TLS with CA and client cert/key.
 $tlsClient = new NatsClient(new NatsOptions(
 	servers: ['tls://127.0.0.1:4222'],
@@ -220,6 +228,33 @@ $tlsClient = new NatsClient(new NatsOptions(
 `NkeySeedSigner` derives the public NKey from an encoded seed and emits the base64url Ed25519 nonce signature expected by NATS servers.
 
 `NkeySeedSigner` requires the PHP sodium extension because NATS NKey authentication uses Ed25519 challenge signing.
+
+### WebSocket Transport
+
+By default `NatsClient` uses the TCP transport (`AmpSocketTransport`). To connect over WebSocket — e.g. through a NATS gateway that only exposes `ws://` / `wss://` — construct a `WebSocketTransport` and inject it. The `ws://` / `wss://` endpoint goes in `servers`; `wss://` negotiates TLS during connect (using the same `tls*` options), and the optional `webSocketHeaders` / `webSocketCompression` options apply to the upgrade handshake.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Transport\WebSocketTransport;
+
+$options = new NatsOptions(
+    servers: ['ws://127.0.0.1:8080'],                    // or 'wss://...' for TLS
+    webSocketCompression: true,                          // negotiate permessage-deflate (requires ext-zlib)
+    webSocketHeaders: ['Authorization' => 'Bearer ...'], // extra headers on the upgrade request
+);
+
+$client = new NatsClient($options, new WebSocketTransport($options));
+$client->connect()->await();
+```
+
+`ws://` / `wss://` URLs are only handled by `WebSocketTransport`; passing such a URL to the default TCP transport will not work. `wss://` requires `ext-openssl`, and `webSocketCompression` requires `ext-zlib`.
+
+_Verified by: [WebSocketTransportTest](tests/Unit/WebSocketTransportTest.php), [WebSocketFrameCodecTest](tests/Unit/WebSocketFrameCodecTest.php); live: [ClientParityIntegrationTest](tests/Integration/ClientParityIntegrationTest.php) (`testWebSocketTransportCarriesPubSubAndJetStream`, `testWebSocketCompressionAndCustomHeaders`)._
 
 ### Connect and Publish/Subscribe
 
@@ -1805,7 +1840,7 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 - **Concurrency model.** Message delivery, request replies, and JetStream pull/push consumption are driven by reads. An application must run a `processIncoming()` loop (directly, or indirectly via helpers such as `request()`, `flush()`, `SubscriptionQueue::next()`, or the consumer iterators, which pump it for you) for callbacks to fire. An idle, publisher-only connection stays alive on its own because the heartbeat timer self-reads `PONG`s — see [Heartbeat and Request Timeouts](#heartbeat-and-request-timeouts).
 - **One connection per fiber/process boundary.** A `NatsConnection` serializes its writes and owns a single socket read; share a connection within a coroutine tree, not across independent concurrent readers.
 - **Interoperability.** KeyValue and Object Store buckets use the official NATS layouts (`KV_`/`OBJ_` streams, base64url object-name encoding, `SHA-256=`-prefixed base64url digests), so buckets written by this client are readable by the `nats` CLI and other official clients, and vice-versa.
-- **Observability.** Pass a PSR-3 `LoggerInterface` via `new NatsOptions(logger: $logger)` to capture lifecycle events (connect, disconnect, reconnect, close, server discovery, lame-duck), per-attempt reconnect/backoff, and async errors. It defaults to a `NullLogger`. _Verified by: [NatsConnectionTest::testLoggerCapturesLifecycleEvents](tests/Unit/NatsConnectionTest.php)._
+- **Observability.** Pass a PSR-3 `LoggerInterface` via `new NatsOptions(logger: $logger)` to capture lifecycle events (connect, disconnect, reconnect, close, server discovery, lame-duck), per-attempt reconnect/backoff, and async errors. It defaults to a `NullLogger`. For structured, programmatic hooks (metrics, alerting, circuit breakers) without parsing log strings, pass typed closures instead: `connectionListener: Closure(ConnectionEvent $event, ?Throwable $error): void` is invoked on every connection-lifecycle transition, and `errorListener: Closure(Throwable $error): void` on async errors. Exceptions thrown by a listener are swallowed so a faulty hook cannot disrupt the connection. _Verified by: [NatsConnectionTest::testLoggerCapturesLifecycleEvents](tests/Unit/NatsConnectionTest.php)._
 - **Server version requirements.** Newer features (per-message TTL, atomic batch publish, scheduled publish, priority groups, counters, batched Direct Get) require recent NATS servers — see [NATS Server Version Requirements](#nats-server-version-requirements).
 - **Not yet implemented.** A dedicated high-throughput fast-ingest batch publisher ([#12](https://github.com/ideaconnect/php-nats-jetstream-client/issues/12)) is tracked but blocked on an upstream reference; standard JetStream publish with in-flight pipelining is available today and is sufficient for most workloads.
 
