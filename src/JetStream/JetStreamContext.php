@@ -978,53 +978,72 @@ final class JetStreamContext
             $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
             $consumerName = $consumer->name;
 
-            return $this->client->subscribe($deliver, function (NatsMessage $message) use ($handler, &$expectedConsumerSeq, &$lastStreamSeq, $stream, $deliver, $filterSubject, &$consumerOptions, &$consumerName): void {
+            // Recreate the consumer starting just after the last in-order message and restart the
+            // consumer-sequence count. Shared by the missed-push path and the idle-heartbeat tail-gap
+            // path. The recreated consumer replays the missing range in order; if the restart point was
+            // pruned it resumes from the next available message — no out-of-order/duplicate delivery
+            // and no recreate storm. A failed recreate (stream pruned/deleted, leadership change,
+            // transient timeout) is CONTAINED here so it cannot throw out of the shared subscription
+            // dispatch loop and abort delivery for every other subscription on the connection.
+            $recreate = function () use (&$expectedConsumerSeq, &$lastStreamSeq, &$consumerName, &$consumerOptions, $stream, $deliver, $filterSubject): void {
+                $consumerOptions['deliver_policy'] = 'by_start_sequence';
+                $consumerOptions['opt_start_seq'] = $lastStreamSeq + 1;
+
+                try {
+                    try {
+                        $this->deleteConsumer($stream, $consumerName)->await();
+                    } catch (JetStreamException) {
+                        // Best-effort cleanup for ephemeral consumers that may already be gone.
+                    }
+
+                    $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
+                    $consumerName = $consumer->name;
+                    $expectedConsumerSeq = 1;
+                } catch (\Throwable) {
+                    // Containment: see the docblock above.
+                }
+            };
+
+            return $this->client->subscribe($deliver, function (NatsMessage $message) use ($handler, &$expectedConsumerSeq, &$lastStreamSeq, &$consumerName, $recreate): void {
                 if ($this->handlePushControlMessage($message)->await()) {
+                    // Tail-gap detection: an idle heartbeat reports the server's last delivered consumer
+                    // sequence. If it is ahead of what we have processed in order, deliveries at the tail
+                    // were missed and no further message will arrive to expose the gap on its own —
+                    // recreate proactively from the last in-order point (#86).
+                    $lastDelivered = $this->heartbeatLastConsumerSeq($message);
+                    if ($lastDelivered !== null && $lastDelivered > $expectedConsumerSeq - 1) {
+                        $recreate();
+                    }
+
                     return;
                 }
 
-                $consumerSeq = $this->extractConsumerSequence($message);
-                $streamSeq = $this->extractStreamSequence($message);
+                $metadata = JsMessageMetadata::fromMessage($message);
 
-                if ($consumerSeq === null || $streamSeq === null) {
+                if ($metadata === null) {
                     // No JetStream ACK metadata to order on; deliver best-effort.
                     $handler($message);
 
                     return;
                 }
 
-                if ($consumerSeq !== $expectedConsumerSeq) {
-                    // A push was missed (the consumer delivery sequence skipped). Recreate the
-                    // consumer starting just after the last in-order message, DISCARD this
-                    // out-of-order message, and restart the consumer-sequence count. The recreated
-                    // consumer replays the missing range in order; if the restart point was pruned
-                    // it simply resumes from the next available message (whose consumer sequence is
-                    // 1), so there is no out-of-order/duplicate delivery and no recreate storm.
-                    $consumerOptions['deliver_policy'] = 'by_start_sequence';
-                    $consumerOptions['opt_start_seq'] = $lastStreamSeq + 1;
+                if ($metadata->consumer !== $consumerName) {
+                    // A stale delivery from a previous (deleted) consumer instance arriving on the
+                    // reused deliver inbox after a recreate — ignore it so it cannot trigger a spurious
+                    // recreate or skew the new consumer-sequence count (#86).
+                    return;
+                }
 
-                    try {
-                        try {
-                            $this->deleteConsumer($stream, $consumerName)->await();
-                        } catch (JetStreamException) {
-                            // Best-effort cleanup for ephemeral consumers that may already be gone.
-                        }
-
-                        $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
-                        $consumerName = $consumer->name;
-                        $expectedConsumerSeq = 1;
-                    } catch (\Throwable) {
-                        // Recreate failed (stream pruned/deleted, leadership change, transient
-                        // timeout). Contain the failure to THIS ordered consumer instead of throwing
-                        // out of the shared subscription dispatch loop, which would abort delivery for
-                        // every other subscription on the connection.
-                    }
+                if ($metadata->consumerSequence !== $expectedConsumerSeq) {
+                    // A push was missed (the consumer delivery sequence skipped): recreate just after
+                    // the last in-order message and DISCARD this out-of-order message.
+                    $recreate();
 
                     return;
                 }
 
                 $expectedConsumerSeq++;
-                $lastStreamSeq = $streamSeq;
+                $lastStreamSeq = $metadata->streamSequence;
                 $handler($message);
             })->await();
         });
@@ -1724,6 +1743,19 @@ final class JetStreamContext
     }
 
     /**
+     * Reads the `Nats-Last-Consumer` sequence an idle-heartbeat control frame reports (the consumer
+     * sequence of the last message the server delivered to this consumer), or null when absent/
+     * non-numeric. Used by the ordered consumer to detect a missed tail of deliveries (#86).
+     */
+    private function heartbeatLastConsumerSeq(NatsMessage $message): ?int
+    {
+        $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
+        $value = trim((string) ($headers['Nats-Last-Consumer'] ?? ''));
+
+        return ($value !== '' && ctype_digit($value)) ? (int) $value : null;
+    }
+
+    /**
      * Resolves the consumer filter configuration. A consumer may filter on a single subject (the
      * `$filterSubject` argument → `filter_subject`) or on multiple subjects (a `filter_subjects` array
      * supplied via the options → `filter_subjects`), but not both. Validates the array and rejects the
@@ -1976,42 +2008,6 @@ final class JetStreamContext
         }
 
         $seq = filter_var($parts[$streamSeqIndex], FILTER_VALIDATE_INT);
-
-        return ($seq !== false) ? $seq : null;
-    }
-
-    /**
-     * Extracts the consumer (delivery) sequence number from a JetStream reply subject.
-     *
-     * Reply subjects follow the pattern: $JS.ACK.{stream}.{consumer}.{delivered}.{sseq}.{cseq}.{tm}.{pending}
-     * The consumer sequence increments by one per delivery (even when the stream sequence is
-     * non-contiguous for a filtered consumer), so it is the correct basis for ordered-delivery gap
-     * detection.
-     */
-    private function extractConsumerSequence(NatsMessage $message): ?int
-    {
-        if ($message->replyTo === null) {
-            return null;
-        }
-
-        $parts = explode('.', $message->replyTo);
-        if ($parts[0] !== '$JS' || ($parts[1] ?? null) !== 'ACK') {
-            return null;
-        }
-
-        // The consumer sequence sits at index 6 in the short (9-token) form and index 8 in both
-        // domain-qualified forms (11-token, and 11 + a trailing random token = 12).
-        $consumerSeqIndex = match (count($parts)) {
-            9 => 6,
-            11, 12 => 8,
-            default => null,
-        };
-
-        if ($consumerSeqIndex === null) {
-            return null;
-        }
-
-        $seq = filter_var($parts[$consumerSeqIndex], FILTER_VALIDATE_INT);
 
         return ($seq !== false) ? $seq : null;
     }
