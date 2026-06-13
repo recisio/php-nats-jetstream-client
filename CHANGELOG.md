@@ -71,6 +71,11 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   It now documents the outbound reconnect buffer (publishes are buffered up to `reconnectBufferSize`,
   default 8 MiB, and flushed on reconnect; rejected only when the buffer is full, buffering is disabled, or
   the connection is closed/not reconnecting), with test citations. (#102)
+- `[docs]` README "Configuration Option Mapping" table now lists the 11 previously-omitted `NatsOptions`
+  fields — `connectionListener`, `errorListener`, `jwtProvider`, `tokenProvider`, `reconnectBufferSize`,
+  `tlsContext`, `randomizeServers`, `retryOnFailedInitialConnect`, `webSocketHeaders`,
+  `webSocketCompression`, `logger` — with types/defaults. `NatsOptionsTest::testDefaultsMatchDocumentedValues`
+  now asserts these defaults too, keeping the table's "asserted by" claim accurate. (#103)
 
 ## [2.2.0] - 2026-06-10
 

@@ -1846,6 +1846,17 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 | `nonceSigner` | `?NonceSignerInterface` | `null` | Signs the server nonce for JWT or standalone NKey auth. |
 | `maxPendingMessagesPerSubscription` | `int` | `1024` | Slow consumer queue bound per SID. |
 | `slowConsumerPolicy` | `SlowConsumerPolicy` | `DropOldest` | One of `DropOldest`, `DropNewest`, `Error`. |
+| `connectionListener` | `?Closure(ConnectionEvent,?Throwable):void` | `null` | Typed hook for connection-lifecycle transitions (connect/disconnect/reconnect/close/discovery/lame-duck). Listener exceptions are swallowed. |
+| `errorListener` | `?Closure(Throwable):void` | `null` | Typed hook for async errors. Listener exceptions are swallowed. |
+| `jwtProvider` | `?Closure():string` | `null` | Supplies the JWT at connect time (e.g. for credential rotation), overriding `jwt`. |
+| `tokenProvider` | `?Closure():string` | `null` | Supplies the auth token at connect time (e.g. for credential rotation), overriding `token`. |
+| `reconnectBufferSize` | `int` | `8388608` | Max bytes of outbound publishes buffered while reconnecting; flushed on a successful reconnect. `0` disables buffering (publishes while disconnected throw). 8 MiB, matching nats.go. |
+| `tlsContext` | `?ClientTlsContext` | `null` | Escape hatch: a pre-built Amp TLS context used verbatim for the handshake (in-memory PEM, ALPN, custom verification). When set, the connection is treated as TLS-required. |
+| `randomizeServers` | `bool` | `false` | Shuffle the configured server pool once at construction so a client fleet spreads its initial connections across the cluster. |
+| `retryOnFailedInitialConnect` | `bool` | `false` | Retry the very first connection (up to `maxReconnectAttempts`, with backoff) when it fails, even if `reconnectEnabled` is off. |
+| `webSocketHeaders` | `array<string,string>` | `[]` | Extra headers sent on the WebSocket upgrade request (only used by the WebSocket transport). |
+| `webSocketCompression` | `bool` | `false` | Negotiate permessage-deflate on the WebSocket transport (requires `ext-zlib`). |
+| `logger` | `?Psr\Log\LoggerInterface` | `null` | PSR-3 logger for lifecycle/reconnect/error events; defaults to a `NullLogger`. |
 
 ## Performance Benchmark Recipe
 
