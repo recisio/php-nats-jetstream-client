@@ -9,4 +9,4 @@ use RuntimeException;
 /**
  * Base exception type for all library-level NATS errors.
  */
-class NatsException extends RuntimeException {}
+class NatsException extends RuntimeException implements NatsThrowable {}
