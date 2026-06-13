@@ -65,6 +65,13 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   (the return-value check already raises `ProtocolException`), so apps that promote warnings to exceptions
   get the intended `ProtocolException` instead of a generic `ErrorException` leaking from the codec. (#100)
 
+### Documentation
+
+- `[docs]` README "Reconnect Behavior" no longer wrongly states that publishes during reconnect are lost.
+  It now documents the outbound reconnect buffer (publishes are buffered up to `reconnectBufferSize`,
+  default 8 MiB, and flushed on reconnect; rejected only when the buffer is full, buffering is disabled, or
+  the connection is closed/not reconnecting), with test citations. (#102)
+
 ## [2.2.0] - 2026-06-10
 
 ### Added

@@ -1787,7 +1787,7 @@ When a connection drops and `reconnectEnabled` is `true`:
 2. **Server rotation**: the client cycles through configured servers in order.
 3. **Subscription replay**: all active subscriptions are replayed (SUB commands resent) after reconnect.
 4. **Replay validation**: reconnect does not treat replayed subscriptions as successful if the server immediately answers with a fatal `-ERR` during replay. In that case reconnect keeps retrying until a healthy server accepts the replay or attempts are exhausted.
-5. **Published messages during reconnect are lost**: there is no outbound buffer for in-flight publishes. Only subscriptions are restored.
+5. **Published messages during reconnect are buffered and replayed**: while a reconnect is in flight, publishes are held in an outbound buffer (up to `reconnectBufferSize`, default 8 MiB, matching nats.go) and flushed in order on a successful reconnect. A publish is rejected (throws) only when the buffer is full, when `reconnectBufferSize` is `0` (buffering disabled), or when the connection is closed / not reconnecting. _Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testPublishBuffersDuringReconnectAndFlushesOnReconnect`, `testPublishWithHeadersBuffersDuringReconnectAndRecordsOutbound`, `testPublishBufferOverflowThrowsDuringReconnect`)._
 
 Recoverable server `-ERR` frames such as `Invalid Subject` or `Permissions Violation for Publish/Subscription to ...` do not automatically close an already-open connection. Fatal connection-level errors still do.
 
