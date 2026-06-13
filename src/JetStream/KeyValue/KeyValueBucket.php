@@ -15,6 +15,7 @@ use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamApi;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\MessageTtl;
+use IDCT\NATS\JetStream\Models\ConsumerInfo;
 use IDCT\NATS\JetStream\Models\JsMessageMetadata;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
@@ -416,6 +417,15 @@ final class KeyValueBucket
                 },
                 filterSubject: $filter,
                 consumerOptions: $consumerOptions,
+                onConsumerCreated: static function (ConsumerInfo $consumer) use ($onCaughtUp, &$caughtUpFired): void {
+                    // End-of-initial-data on an empty / no-match bucket: the consumer starts with nothing
+                    // pending, so no delivery will ever arrive to drive the in-handler caught-up check —
+                    // fire the signal now instead of leaving a blocked caller hanging (#99).
+                    if ($onCaughtUp !== null && !$caughtUpFired && (int) ($consumer->raw['num_pending'] ?? 0) === 0) {
+                        $caughtUpFired = true;
+                        $onCaughtUp();
+                    }
+                },
             )->await();
         });
     }

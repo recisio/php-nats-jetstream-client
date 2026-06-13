@@ -32,6 +32,11 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ### Fixed
 
+- `[bugfix]` KeyValue: `watch()`'s `onCaughtUp` (end-of-initial-data) signal now fires on an empty or
+  no-match bucket. Previously it could only fire from a delivered message reporting `num_pending = 0`, so
+  with nothing to deliver it never fired and a caller blocking on it hung forever. The signal is now also
+  derived from the created consumer's `num_pending` and fires immediately when the consumer starts with
+  nothing pending. (#99)
 - `[bugfix]` Protocol: the inbound MSG/HMSG frame bound is now coupled to the server's negotiated
   `max_payload` instead of a fixed 8 MiB. On a server with a raised `max_payload` (e.g. 16/32/64 MiB), a
   legitimately large message larger than 8 MiB was rejected as an oversized frame — throwing a
