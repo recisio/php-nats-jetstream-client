@@ -32,6 +32,11 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ### Fixed
 
+- `[bugfix]` Object Store: an object stored with empty/default metadata is now readable by the official
+  NATS clients. Empty `metadata` was serialized as a JSON array (`"metadata":[]`), which the Go client
+  rejects with "object-store meta information invalid" because it expects a `map`; the field is now omitted
+  when empty (matching `omitempty`), restoring interoperability with the `nats` CLI / nats.go for the
+  common default-metadata case. Verified live against the `nats` CLI. (#109)
 - `[bugfix]` KeyValue: `watch()`'s `onCaughtUp` (end-of-initial-data) signal now fires on an empty or
   no-match bucket. Previously it could only fire from a delivered message reporting `num_pending = 0`, so
   with nothing to deliver it never fired and a caller blocking on it hung forever. The signal is now also
@@ -88,6 +93,8 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   supplied; `watch()` called with `$options = null` is updates-only and replays nothing. (#107)
 - `[docs]` PHPDoc: `ObjectInfo::$digest` is no longer described as "Server-provided" — it is the content
   digest recorded by the writing client and verified on read. (#108)
+- `[docs]` Added a runnable performance baseline script (`scripts/benchmark.php`, request/reply + publish
+  throughput) and a sample-results table in the README's Performance section.
 
 ## [2.2.0] - 2026-06-10
 

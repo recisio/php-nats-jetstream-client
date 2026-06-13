@@ -1048,6 +1048,14 @@ final class ObjectStoreBucket
      */
     private function publishMeta(string $name, array $info): void
     {
+        // The official Object Store meta schema declares `metadata` as a map with `omitempty`. PHP's
+        // json_encode([]) emits a JSON array (`"metadata":[]`), which the Go client cannot unmarshal into
+        // map[string]string ("object-store meta information invalid"). Omit an empty map so the record
+        // stays interoperable with the `nats` CLI / nats.go (#109).
+        if (($info['metadata'] ?? null) === []) {
+            unset($info['metadata']);
+        }
+
         $message = $this->client->requestWithHeaders(
             $this->metaSubject($name),
             json_encode($info, JSON_THROW_ON_ERROR),

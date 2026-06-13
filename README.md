@@ -1962,13 +1962,24 @@ $client->disconnect()->await();
 $server->disconnect()->await();
 ```
 
-Run recipe:
+A ready-to-run version of this recipe ships at [`scripts/benchmark.php`](scripts/benchmark.php) (it also measures fire-and-forget publish throughput):
 
 ```bash
-docker compose up -d
-php -d zend.assertions=1 path/to/benchmark.php
+docker compose up -d nats
+NATS_URL=nats://127.0.0.1:14222 BENCH_ITER=5000 php scripts/benchmark.php
 docker compose down
 ```
+
+### Sample baseline
+
+Single process, single connection, loopback. Numbers are environment-specific (CPU, loopback vs network, server config) and are a relative baseline, not a guarantee.
+
+| Metric | Result |
+| --- | --- |
+| Request/reply (synchronous round-trip) | ~800 req/s (~1.25 ms/req) |
+| Fire-and-forget publish (each awaited) | ~15,000 msg/s |
+
+_Measured with PHP 8.5, `nats-server` 2.12.9, 5,000 iterations, 16-byte payloads, on a WSL2 loopback. Request/reply is latency-bound (each request awaits its reply on one connection); both publish and request loops await every call, so these reflect serialized per-call throughput rather than peak pipelined rates._
 
 ## Testing
 
