@@ -209,11 +209,22 @@ final class NatsConnection
                 throw new ConnectionException('Connection is not open');
             }
 
-            $start = microtime(true);
+            $start = $this->monotonicSeconds();
             $this->flush()->await();
 
-            return microtime(true) - $start;
+            return $this->monotonicSeconds() - $start;
         });
+    }
+
+    /**
+     * Monotonic clock in seconds (hrtime-based) for deadline/elapsed math, immune to wall-clock
+     * jumps (NTP steps, suspend/resume) that make the wall clock non-monotonic (#70). The hard
+     * timeout bound on every wait is already a monotonic TimeoutCancellation; this keeps the
+     * surrounding loop-guard/elapsed arithmetic monotonic too.
+     */
+    private function monotonicSeconds(): float
+    {
+        return hrtime(true) / 1e9;
     }
 
     /**
@@ -854,7 +865,7 @@ final class NatsConnection
             }
 
             $messages[] = $message;
-            $lastAt = microtime(true);
+            $lastAt = $this->monotonicSeconds();
         })->await();
 
         try {
@@ -864,7 +875,7 @@ final class NatsConnection
                 $this->publishWithHeaders($subject, $payload, $headers, $inbox)->await();
             }
 
-            $deadline = microtime(true) + $totalMs / 1000;
+            $deadline = $this->monotonicSeconds() + $totalMs / 1000;
             $totalCancellation = new TimeoutCancellation($totalMs / 1000);
             $waitCancellation = $cancellation === null
                 ? $totalCancellation
@@ -879,7 +890,7 @@ final class NatsConnection
                     break;
                 }
 
-                $now = microtime(true);
+                $now = $this->monotonicSeconds();
 
                 // Stall: stop once the gap since the last reply exceeds the configured interval.
                 if ($stallMs !== null && $lastAt !== null && ($now - $lastAt) * 1000 >= $stallMs) {
@@ -1311,7 +1322,7 @@ final class NatsConnection
         $deadline = $this->handshakeDeadline();
         $remainingPolls = $this->handshakePollBudget();
 
-        while ($remainingPolls-- > 0 && microtime(true) < $deadline) {
+        while ($remainingPolls-- > 0 && $this->monotonicSeconds() < $deadline) {
             $chunk = $this->readHandshakeChunk($deadline);
             if ($chunk === null || $chunk === '') {
                 continue;
@@ -1356,7 +1367,7 @@ final class NatsConnection
         $deadline = $this->handshakeDeadline();
         $remainingPolls = $this->handshakePollBudget();
 
-        while ($remainingPolls-- > 0 && microtime(true) < $deadline) {
+        while ($remainingPolls-- > 0 && $this->monotonicSeconds() < $deadline) {
             $chunk = $this->readHandshakeChunk($deadline);
             if ($chunk === null || $chunk === '') {
                 continue;
@@ -1394,7 +1405,7 @@ final class NatsConnection
     {
         $timeoutSeconds = max(0.001, $this->options->connectTimeoutMs / 1000);
 
-        return microtime(true) + $timeoutSeconds;
+        return $this->monotonicSeconds() + $timeoutSeconds;
     }
 
     /**
@@ -1410,7 +1421,7 @@ final class NatsConnection
      */
     private function readHandshakeChunk(float $deadline): ?string
     {
-        $remainingMs = (int) ceil(($deadline - microtime(true)) * 1000);
+        $remainingMs = (int) ceil(($deadline - $this->monotonicSeconds()) * 1000);
         if ($remainingMs <= 0) {
             return null;
         }

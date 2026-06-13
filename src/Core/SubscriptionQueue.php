@@ -105,6 +105,15 @@ final class SubscriptionQueue
     }
 
     /**
+     * Monotonic clock in seconds (hrtime-based) for deadline math, immune to wall-clock jumps
+     * (the underlying read is also bounded by a monotonic TimeoutCancellation) (#70).
+     */
+    private function monotonicSeconds(): float
+    {
+        return hrtime(true) / 1e9;
+    }
+
+    /**
      * Returns the next buffered message without blocking, or null if none available.
      */
     public function fetch(): ?NatsMessage
@@ -154,7 +163,7 @@ final class SubscriptionQueue
         // Bound the wait with a cancellation so the underlying socket read cannot block past the
         // configured timeout, then yield cooperatively between cycles to avoid a tight spin.
         $cancellation = new TimeoutCancellation($this->timeout);
-        $deadline = microtime(true) + $this->timeout;
+        $deadline = $this->monotonicSeconds() + $this->timeout;
 
         try {
             do {
@@ -165,7 +174,7 @@ final class SubscriptionQueue
                 }
 
                 delay(0.001, cancellation: $cancellation);
-            } while (microtime(true) < $deadline);
+            } while ($this->monotonicSeconds() < $deadline);
         } catch (CancelledException) {
             // Timeout elapsed without a message.
         }

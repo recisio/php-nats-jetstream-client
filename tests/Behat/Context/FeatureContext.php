@@ -356,9 +356,9 @@ final class FeatureContext implements Context
         $secondary = $this->client('secondary');
 
         $processor = async(function () use ($secondary): void {
-            $deadline = microtime(true) + 2.5;
+            $deadline = (hrtime(true) / 1e9) + 2.5;
 
-            while (microtime(true) < $deadline) {
+            while ((hrtime(true) / 1e9) < $deadline) {
                 $frames = $secondary->processIncoming()->await();
                 if ($frames > 0) {
                     return;
@@ -530,9 +530,9 @@ final class FeatureContext implements Context
         $secondary = $this->client('secondary');
 
         $processor = async(function () use ($secondary): void {
-            $deadline = microtime(true) + 2.5;
+            $deadline = (hrtime(true) / 1e9) + 2.5;
 
-            while (microtime(true) < $deadline) {
+            while ((hrtime(true) / 1e9) < $deadline) {
                 $frames = $secondary->processIncoming()->await();
                 if ($frames > 0) {
                     return;
@@ -673,8 +673,8 @@ final class FeatureContext implements Context
         $this->state->lastQueuePayloads = [];
 
         $first = null;
-        $deadline = microtime(true) + 2.0;
-        while ($first === null && microtime(true) < $deadline) {
+        $deadline = (hrtime(true) / 1e9) + 2.0;
+        while ($first === null && (hrtime(true) / 1e9) < $deadline) {
             $first = $queue->fetch();
             if ($first === null) {
                 delay(0.01);
@@ -1216,8 +1216,8 @@ final class FeatureContext implements Context
         }
 
         $redelivered = null;
-        $deadline = microtime(true) + 4.0;
-        while ($redelivered === null && microtime(true) < $deadline) {
+        $deadline = (hrtime(true) / 1e9) + 4.0;
+        while ($redelivered === null && (hrtime(true) / 1e9) < $deadline) {
             try {
                 $redelivered = $js->fetchNext($stream, $consumer, 800)->await();
             } catch (JetStreamException $e) {
@@ -2281,8 +2281,8 @@ final class FeatureContext implements Context
      */
     public function iShouldNotReceiveMyOwnNoEchoMessage(): void
     {
-        $deadline = microtime(true) + 0.8;
-        while (microtime(true) < $deadline) {
+        $deadline = (hrtime(true) / 1e9) + 0.8;
+        while ((hrtime(true) / 1e9) < $deadline) {
             $this->client('noecho')->processIncoming()->await();
             if ($this->state->receivedPayloads !== []) {
                 break;
@@ -2758,10 +2758,10 @@ final class FeatureContext implements Context
 
     private function pumpClient(string $alias, float $timeoutSeconds = 1.0): void
     {
-        $deadline = microtime(true) + $timeoutSeconds;
+        $deadline = (hrtime(true) / 1e9) + $timeoutSeconds;
         $client = $this->client($alias);
 
-        while (microtime(true) < $deadline) {
+        while ((hrtime(true) / 1e9) < $deadline) {
             $frames = $client->processIncoming()->await();
             if ($frames === 0) {
                 delay(0.01);
@@ -2858,9 +2858,9 @@ final class FeatureContext implements Context
 
     private function waitFor(callable $condition, float $timeoutSeconds = 4.0): void
     {
-        $deadline = microtime(true) + $timeoutSeconds;
+        $deadline = (hrtime(true) / 1e9) + $timeoutSeconds;
 
-        while (microtime(true) < $deadline) {
+        while ((hrtime(true) / 1e9) < $deadline) {
             if ($condition()) {
                 return;
             }
