@@ -8,7 +8,9 @@ use Amp\Socket\ConnectException as AmpConnectException;
 use Amp\Socket\TlsException;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Exception\ConnectionException;
+use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Transport\TlsAwareTransportInterface;
+use IDCT\NATS\Transport\WebSocketFrameCodec;
 use IDCT\NATS\Transport\WebSocketTransport;
 use PHPUnit\Framework\TestCase;
 
@@ -176,5 +178,81 @@ final class WebSocketTransportTest extends TestCase
         } finally {
             $server->close();
         }
+    }
+
+    /**
+     * Verifies CR/LF (and ':') are stripped from custom header NAMES, not just values, so a malicious
+     * header name cannot forge additional handshake header lines (#89).
+     */
+    public function testBuildUpgradeRequestSanitizesHeaderNamesAgainstInjection(): void
+    {
+        $request = WebSocketTransport::buildUpgradeRequest(
+            'h',
+            80,
+            '/',
+            'k',
+            ["X-Inject\r\nEvil-Header: pwned" => 'ok', 'X-Value' => "good\r\nSmuggled-Header: pwned"],
+            false,
+        );
+
+        // No injected line is emitted from either the name or the value.
+        foreach (explode("\r\n", $request) as $line) {
+            self::assertStringStartsNotWith('Evil-Header:', $line);
+            self::assertStringStartsNotWith('Smuggled-Header:', $line);
+        }
+
+        // The sanitized header survives on a single line (CR/LF gone; ':' stripped from the name).
+        self::assertStringContainsString("X-InjectEvil-Header pwned: ok\r\n", $request);
+        self::assertStringContainsString("X-Value: goodSmuggled-Header: pwned\r\n", $request);
+
+        // Exactly one header/body terminator — no extra blank line was injected.
+        self::assertSame(1, substr_count($request, "\r\n\r\n"));
+    }
+
+    /**
+     * Verifies a fragmented message within the cap is reassembled across continuation frames (#89).
+     */
+    public function testDrainReassemblesFragmentedMessageWithinBound(): void
+    {
+        $transport = new WebSocketTransport(new NatsOptions(), maxMessageBytes: 1024);
+
+        $buffer = $this->serverFrame(WebSocketFrameCodec::OP_BINARY, 'PI', fin: false)
+            . $this->serverFrame(WebSocketFrameCodec::OP_CONTINUATION, 'NG', fin: false)
+            . $this->serverFrame(WebSocketFrameCodec::OP_CONTINUATION, "\r\n", fin: true);
+
+        (new \ReflectionProperty(WebSocketTransport::class, 'readBuffer'))->setValue($transport, $buffer);
+        $result = (new \ReflectionMethod(WebSocketTransport::class, 'drainDataFrames'))->invoke($transport);
+
+        self::assertSame("PING\r\n", $result);
+    }
+
+    /**
+     * Verifies a fragmented message whose reassembly exceeds the cap is rejected (bounds memory against
+     * a hostile/buggy server streaming unbounded continuation frames) (#89).
+     */
+    public function testDrainRejectsOversizedFragmentedMessage(): void
+    {
+        $transport = new WebSocketTransport(new NatsOptions(), maxMessageBytes: 8);
+
+        // 4-byte start frame (within cap) + 6-byte continuation pushes the buffer to 10 > 8.
+        $buffer = $this->serverFrame(WebSocketFrameCodec::OP_BINARY, 'AAAA', fin: false)
+            . $this->serverFrame(WebSocketFrameCodec::OP_CONTINUATION, 'BBBBBB', fin: false);
+
+        (new \ReflectionProperty(WebSocketTransport::class, 'readBuffer'))->setValue($transport, $buffer);
+        $drain = new \ReflectionMethod(WebSocketTransport::class, 'drainDataFrames');
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('exceeded the maximum');
+        $drain->invoke($transport);
+    }
+
+    /**
+     * Builds an unmasked server-to-client WebSocket frame (payload <= 125 bytes) for decode tests.
+     */
+    private function serverFrame(int $opcode, string $payload, bool $fin): string
+    {
+        $firstByte = ($fin ? 0x80 : 0x00) | ($opcode & 0x0F);
+
+        return pack('CC', $firstByte, strlen($payload)) . $payload;
     }
 }
