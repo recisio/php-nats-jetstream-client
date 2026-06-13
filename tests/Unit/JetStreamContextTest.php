@@ -2163,6 +2163,46 @@ final class JetStreamContextTest extends TestCase
         self::assertSame('{"event":"first"}', $messages[0]->payload);
     }
 
+    /**
+     * Verifies a mid-batch terminal status (after >=1 message) is surfaced to the optional
+     * onTerminalStatus callback while the partial batch is still returned (#92).
+     */
+    public function testFetchBatchSurfacesMidBatchTerminalStatusToCallback(): void
+    {
+        $msg1 = '{"event":"first"}';
+        // A non-routine mid-batch termination: the consumer was deleted (409).
+        $statusHeaders = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\nDescription: Consumer Deleted\r\n\r\n";
+        $headerBytes = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg1), $msg1),
+            sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $observed = null;
+        $messages = $client->jetStream()->fetchBatch(
+            'ORDERS',
+            'PROC',
+            5,
+            2500,
+            [],
+            static function (int $code, string $description) use (&$observed): void {
+                $observed = ['code' => $code, 'description' => $description];
+            },
+        )->await();
+
+        // The partial batch is still returned (nats.go parity)...
+        self::assertCount(1, $messages);
+        self::assertSame('{"event":"first"}', $messages[0]->payload);
+        // ...and the mid-batch terminal status was surfaced to the callback.
+        self::assertSame(['code' => 409, 'description' => 'Consumer Deleted'], $observed);
+    }
+
     public function testFetchBatchIgnoresStatus100ControlFrames(): void
     {
         $msg1 = '{"event":"first"}';

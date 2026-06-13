@@ -1440,11 +1440,22 @@ final class JetStreamContext
      * a plain `{batch, expires}` fetch works on any JetStream server.
      *
      * @param array<string,mixed> $pull Optional pull-request fields.
+     * @param (callable(int $code, string $description):void)|null $onTerminalStatus Invoked once, after
+     *        a non-empty (partial) batch, when the pull ended with a terminal status (>=400) that
+     *        arrived mid-batch. The partial batch is still returned (nats.go parity); this only makes a
+     *        non-routine termination (e.g. 409 consumer deleted, 423 stale pin) observable. Routine
+     *        batch-completion codes (404/408) flow through too — inspect the code (#92).
      * @return Future<list<NatsMessage>>
      */
-    public function fetchBatch(string $stream, string $consumer, int $batch, int $expiresMs = 3000, array $pull = []): Future
-    {
-        return async(function () use ($stream, $consumer, $batch, $expiresMs, $pull): array {
+    public function fetchBatch(
+        string $stream,
+        string $consumer,
+        int $batch,
+        int $expiresMs = 3000,
+        array $pull = [],
+        ?callable $onTerminalStatus = null,
+    ): Future {
+        return async(function () use ($stream, $consumer, $batch, $expiresMs, $pull, $onTerminalStatus): array {
             if ($expiresMs <= 0) {
                 throw new JetStreamException('Pull fetch expiresMs must be greater than zero');
             }
@@ -1512,6 +1523,13 @@ final class JetStreamContext
                 }
 
                 throw new JetStreamException('No messages received within timeout', 408);
+            }
+
+            // A terminal status arrived AFTER >=1 message: the partial batch is returned (nats.go
+            // parity), but surface the status so a caller can observe a non-routine mid-batch
+            // termination (e.g. the consumer was deleted) instead of only learning on the next pull.
+            if ($terminalStatus !== null && $onTerminalStatus !== null) {
+                $onTerminalStatus($terminalStatus['code'], $terminalStatus['description']);
             }
 
             return $messages;
