@@ -14,6 +14,8 @@ use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\ObjectStore\ObjectData;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
+use IDCT\NATS\Tests\Support\DroppingTransport;
+use IDCT\NATS\Transport\AmpSocketTransport;
 use PHPUnit\Framework\TestCase;
 
 use function Amp\async;
@@ -1009,6 +1011,85 @@ final class JetStreamIntegrationTest extends TestCase
         }
 
         // The whole backlog replayed in order, complete, with no duplicates.
+        self::assertSame($expected, $received);
+        self::assertSame($received, array_values(array_unique($received)));
+
+        $client->unsubscribe($sid)->await();
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
+     * Forces a GENUINE ordered-consumer sequence gap on a live server by dropping one inbound delivery
+     * frame at the transport layer, then asserts the automatic recreate + server-side by-sequence
+     * replay restores complete, in-order, de-duplicated delivery. This validates the recreate path
+     * end-to-end (which FakeTransport cannot model and a healthy server will not produce on its own),
+     * and the stale-delivery fence (old-consumer frames still in flight after the recreate carry the
+     * old consumer name and must be ignored) (#86/#87).
+     */
+    public function testJetStreamOrderedConsumerRecoversFromDroppedDeliveryInOrder(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.evt';
+
+        // Drop exactly the SECOND JetStream data delivery, creating a consumer-sequence gap the client
+        // must detect and recover from. A data delivery is identified type-agnostically (MSG or HMSG)
+        // by its $JS.ACK reply subject (which carries the sequence metadata); idle heartbeats and
+        // flow-control frames have no $JS.ACK reply, so they are never dropped. (The delivered frame's
+        // subject is the original message subject, not the deliver inbox, so we key off the reply.)
+        $ordDeliveries = 0;
+        $dropped = 0;
+        $shouldDrop = static function (string $frame) use (&$ordDeliveries, &$dropped): bool {
+            if (!str_contains($frame, '$JS.ACK.')) {
+                return false;
+            }
+
+            $ordDeliveries++;
+            if ($ordDeliveries === 2 && $dropped === 0) {
+                $dropped++;
+
+                return true;
+            }
+
+            return false;
+        };
+
+        $options = new NatsOptions(servers: [$this->integrationServerUrl()]);
+        $client = new NatsClient($options, new DroppingTransport(new AmpSocketTransport($options), $shouldDrop));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subject])->await();
+
+        $received = [];
+        $sid = $js->subscribeOrderedConsumer(
+            $stream,
+            static function (NatsMessage $message) use (&$received): void {
+                $received[] = $message->payload;
+            },
+            $subject,
+        )->await();
+
+        $expected = [];
+        for ($i = 1; $i <= 5; $i++) {
+            $payload = sprintf('{"event":"ord-%d"}', $i);
+            $expected[] = $payload;
+            $js->publish($subject, $payload)->await();
+        }
+
+        $cancellation = new TimeoutCancellation(15.0);
+        try {
+            while (count($received) < count($expected)) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        // Exactly one delivery was dropped on the wire, yet every message arrives once and in order:
+        // the client detected the gap, recreated the consumer, and the server replayed the remainder.
+        self::assertSame(1, $dropped, 'the test must have dropped exactly one ordered delivery');
         self::assertSame($expected, $received);
         self::assertSame($received, array_values(array_unique($received)));
 
