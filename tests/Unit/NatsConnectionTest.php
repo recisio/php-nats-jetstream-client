@@ -774,6 +774,101 @@ final class NatsConnectionTest extends TestCase
         self::assertSame(1, $connection->statistics()->reconnects);
     }
 
+    public function testReconnectBufferFlushesMultiplePublishesInOrderBeforeLivePublishes(): void
+    {
+        // Hardening (3b): several publishes buffered during a reconnect must be replayed in their exact
+        // publish order, as a single ordered block, and BEFORE any publish issued after the reconnect
+        // completes — so a reconnect never reorders or interleaves the outbound stream.
+        $info = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
+        $release = new DeferredFuture();
+
+        $transport = new class ($info, $release) implements TransportInterface {
+            /** @var list<string> */
+            public array $writes = [];
+            private int $connects = 0;
+            /** @var list<list<string>> */
+            private array $reads;
+
+            /** @param DeferredFuture<void> $release */
+            public function __construct(string $info, private DeferredFuture $release)
+            {
+                $this->reads = [
+                    [$info, "PONG\r\n", '__EOF__'],
+                    [$info, "PONG\r\n"],
+                ];
+            }
+
+            public function connect(string $dsn, int $timeoutMs): Future
+            {
+                return async(function (): void {
+                    if ($this->connects === 1) {
+                        $this->release->getFuture()->await();
+                    }
+                    $this->connects++;
+                });
+            }
+
+            public function upgradeTls(): Future
+            {
+                return async(static fn(): null => null);
+            }
+
+            public function write(string $bytes): Future
+            {
+                return async(function () use ($bytes): void {
+                    $this->writes[] = $bytes;
+                });
+            }
+
+            public function readLine(?Cancellation $cancellation = null): Future
+            {
+                return async(function (): string {
+                    $conn = max(0, $this->connects - 1);
+                    $next = array_shift($this->reads[$conn]) ?? '';
+                    if ($next === '__EOF__') {
+                        throw new TransportClosedException('eof');
+                    }
+
+                    return $next;
+                });
+            }
+
+            public function close(): Future
+            {
+                return async(static fn(): null => null);
+            }
+        };
+
+        $connection = new NatsConnection(new NatsOptions(reconnectDelayMs: 1, reconnectJitterMs: 0), $transport);
+        $connection->connect()->await();
+
+        $pump = async(static fn(): int => $connection->processIncoming()->await());
+        delay(0.05); // reconnect begins and suspends on the held connect()
+        self::assertSame(ConnectionState::Connecting, $connection->state());
+
+        // Three publishes land during the reconnect window, in order.
+        $connection->publish('a.1', 'p1')->await();
+        $connection->publish('a.2', 'p2')->await();
+        $connection->publish('a.3', 'p3')->await();
+
+        $release->complete();
+        $pump->await();
+        self::assertSame(ConnectionState::Open, $connection->state());
+
+        // A publish issued after the reconnect completes.
+        $connection->publish('a.4', 'p4')->await();
+
+        // The buffered frames are flushed as one ordered block.
+        $flushed = "PUB a.1 2\r\np1\r\nPUB a.2 2\r\np2\r\nPUB a.3 2\r\np3\r\n";
+        $flushIndex = array_search($flushed, $transport->writes, true);
+        self::assertNotFalse($flushIndex, 'buffered publishes were not flushed as one in-order block');
+
+        // ...and that block precedes the post-reconnect live publish.
+        $liveIndex = array_search("PUB a.4 2\r\np4\r\n", $transport->writes, true);
+        self::assertNotFalse($liveIndex, 'post-reconnect live publish was not written');
+        self::assertLessThan($liveIndex, $flushIndex, 'buffered block must flush before later live publishes');
+    }
+
     /**
      * Verifies HMSG frames preserve raw headers and payload separation.
      */
