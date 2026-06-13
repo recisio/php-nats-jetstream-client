@@ -25,6 +25,10 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   connected in plaintext and wrote CONNECT (carrying credentials) in cleartext. The credentials fail-safe
   now also covers this path, so a `tlsContext` whose handshake cannot establish TLS fails fast instead of
   leaking credentials. (#95)
+- `[bugfix]` WebSocket: a corrupt permessage-deflate frame no longer emits an uncaught native `E_WARNING`
+  from `inflate_add()`/`deflate_add()` before the typed `ProtocolException`. The warning is now suppressed
+  (the return-value check already raises `ProtocolException`), so apps that promote warnings to exceptions
+  get the intended `ProtocolException` instead of a generic `ErrorException` leaking from the codec. (#100)
 
 ## [2.2.0] - 2026-06-10
 

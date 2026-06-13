@@ -147,7 +147,10 @@ final class WebSocketFrameCodec
             throw new ProtocolException('Failed to initialize DEFLATE context');
         }
 
-        $out = deflate_add($ctx, $payload, ZLIB_SYNC_FLUSH);
+        // Suppress the native E_WARNING: the false-check below already turns a failure into a typed
+        // ProtocolException. Without @, an app that promotes warnings to exceptions would see a generic
+        // ErrorException from inside the codec instead of the intended ProtocolException (#100).
+        $out = @deflate_add($ctx, $payload, ZLIB_SYNC_FLUSH);
         if ($out === false) {
             throw new ProtocolException('Failed to deflate WebSocket frame');
         }
@@ -170,7 +173,10 @@ final class WebSocketFrameCodec
             throw new ProtocolException('Failed to initialize INFLATE context');
         }
 
-        $result = inflate_add($ctx, $payload . "\x00\x00\xff\xff");
+        // Suppress the native E_WARNING ("inflate_add(): data error") on a corrupt peer-controlled frame:
+        // the false-check below already raises a typed ProtocolException. Without @, an app that promotes
+        // warnings to exceptions would get an ErrorException from inside the codec instead (#100).
+        $result = @inflate_add($ctx, $payload . "\x00\x00\xff\xff");
         if ($result === false) {
             throw new ProtocolException('Failed to inflate compressed WebSocket frame');
         }

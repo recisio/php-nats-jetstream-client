@@ -269,4 +269,31 @@ final class WebSocketFrameCodecTest extends TestCase
         // is not valid and inflate_add returns false, triggering the ProtocolException.
         WebSocketFrameCodec::inflate('this is not compressed data at all !!!!!!');
     }
+
+    /**
+     * #100: a well-behaved error handler (one that respects the @ operator via error_reporting()) must
+     * NOT observe the native inflate_add() warning, so an application that promotes warnings to
+     * exceptions still receives the typed ProtocolException rather than an ErrorException leaking from
+     * inside the codec. Before the @ suppression this raised an ErrorException from the inflate_add()
+     * call, never reaching the ProtocolException.
+     */
+    public function testInflateInvalidDataSuppressesNativeWarningForRespectfulHandlers(): void
+    {
+        set_error_handler(static function (int $errno, string $errstr): bool {
+            if ((error_reporting() & $errno) === 0) {
+                return false; // suppressed via @ — respect it, do not promote to an exception
+            }
+
+            throw new \ErrorException($errstr, 0, $errno);
+        });
+
+        try {
+            WebSocketFrameCodec::inflate('this is not compressed data at all !!!!!!');
+            self::fail('Expected a ProtocolException');
+        } catch (ProtocolException $e) {
+            self::assertStringContainsString('inflate compressed WebSocket frame', $e->getMessage());
+        } finally {
+            restore_error_handler();
+        }
+    }
 }
