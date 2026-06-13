@@ -15,6 +15,7 @@ use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamApi;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\MessageTtl;
+use IDCT\NATS\JetStream\Models\JsMessageMetadata;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 
@@ -403,8 +404,11 @@ final class KeyValueBucket
                     // End-of-initial-data signal: fire once when the replay has caught up to the
                     // current end of the stream (this delivery reports no further pending messages).
                     if ($onCaughtUp !== null && !$caughtUpFired) {
-                        $pending = $this->jetStream->messageMetadata($message)->numPending;
-                        if ($pending === 0) {
+                        // Use the null-tolerant metadata parse: a non-conformant delivery without a
+                        // parseable $JS.ACK subject must NOT throw out of the shared dispatch loop and
+                        // tear down every subscription on the connection (#90) — skip the check instead.
+                        $metadata = JsMessageMetadata::fromMessage($message);
+                        if ($metadata !== null && $metadata->numPending === 0) {
                             $caughtUpFired = true;
                             $onCaughtUp();
                         }
