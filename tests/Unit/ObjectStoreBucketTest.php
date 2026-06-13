@@ -174,6 +174,52 @@ final class ObjectStoreBucketTest extends TestCase
         self::assertStringContainsString('Nats-Rollup:sub', $writes);
     }
 
+    public function testPutOmitsEmptyMetadataSoOfficialClientsCanRead(): void
+    {
+        // #109: empty metadata must NOT serialize as a JSON array ("metadata":[]). The official Go client
+        // unmarshals metadata into map[string]string and rejects an array with
+        // "object-store meta information invalid"; it omits the field when empty. Match that so an object
+        // stored with default metadata stays readable by the nats CLI / nats.go.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(2)), $this->pubAck(2)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->objectStore('assets')->put('logo.txt', 'hello')->await();
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('HPUB $O.assets.M.' . $this->encodeName('logo.txt') . ' ', $writes);
+        self::assertStringNotContainsString('"metadata":[]', $writes);
+        // Omitted entirely when empty, exactly like the official client.
+        self::assertStringNotContainsString('"metadata":', $writes);
+    }
+
+    public function testPutSerializesNonEmptyMetadataAsJsonObject(): void
+    {
+        // #109: a populated metadata map must serialize as a JSON object so other clients can read it.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($this->notFound()), $this->notFound()),
+            sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($this->pubAck(1)), $this->pubAck(1)),
+            sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($this->pubAck(2)), $this->pubAck(2)),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->objectStore('assets')->put('logo.txt', 'hello', ['team' => 'brand'])->await();
+
+        $writes = implode('||', $transport->writes);
+        self::assertStringContainsString('"metadata":{"team":"brand"}', $writes);
+    }
+
     public function testPutStreamReChunksAndComputesDigestIncrementally(): void
     {
         $transport = new FakeTransport([
