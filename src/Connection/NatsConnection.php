@@ -1083,8 +1083,11 @@ final class NatsConnection
         $this->transport->write($this->codec->encodePing())->await();
 
         $this->awaitInitialPong();
-        // Reset parser state after handshake to avoid carrying partial bootstrap chunks.
-        $this->parser = new ProtocolParser();
+        // Reset parser state after handshake to avoid carrying partial bootstrap chunks, and couple the
+        // inbound frame bound to the server's negotiated max_payload so a legitimately large message
+        // (on a server with a raised max_payload) is receivable instead of being rejected as an
+        // oversized frame — which would throw and force a reconnect (#94).
+        $this->parser = new ProtocolParser($this->inboundFrameBound());
         // Seed the discovered-servers set from the initial INFO (without emitting a discovery event —
         // that is reserved for subsequent async INFO changes), so failover can use the cluster peers.
         if ($this->serverInfo !== null && $this->serverInfo->connectUrls !== []) {
@@ -1624,6 +1627,23 @@ final class NatsConnection
         foreach (array_keys($this->pendingMessages) as $sid) {
             $this->drainPendingForSid($sid);
         }
+    }
+
+    /**
+     * Computes the maximum inbound MSG/HMSG frame size to accept, derived from the server's negotiated
+     * `max_payload`. Inbound payloads never exceed `max_payload`; a margin is added for the HMSG header
+     * block, and the bound never drops below {@see ProtocolParser::DEFAULT_MAX_FRAME_SIZE} so small-
+     * `max_payload` servers keep the historical headroom. When `max_payload` is not advertised, a
+     * generous bound is used rather than the conservative default. (#94)
+     */
+    private function inboundFrameBound(): int
+    {
+        $serverInfo = $this->serverInfo;
+        if ($serverInfo === null || $serverInfo->maxPayload <= 0) {
+            return 64 * 1024 * 1024; // 64 MiB
+        }
+
+        return max(ProtocolParser::DEFAULT_MAX_FRAME_SIZE, $serverInfo->maxPayload + 1024 * 1024);
     }
 
     /**

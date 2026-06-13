@@ -32,6 +32,12 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ### Fixed
 
+- `[bugfix]` Protocol: the inbound MSG/HMSG frame bound is now coupled to the server's negotiated
+  `max_payload` instead of a fixed 8 MiB. On a server with a raised `max_payload` (e.g. 16/32/64 MiB), a
+  legitimately large message larger than 8 MiB was rejected as an oversized frame — throwing a
+  `ProtocolException` that the connection turned into a reconnect, so the message was effectively
+  undeliverable. The parser bound is raised from INFO (`max_payload` + a header-block margin, never below
+  the historical 8 MiB), with a generous 64 MiB fallback when `max_payload` is unknown. (#94)
 - `[bugfix]` TLS: a configured `NatsOptions::$tlsContext` now correctly forces the TLS upgrade, matching
   its documented "treated as TLS-required" contract. Previously `requiresTls()` ignored `tlsContext`, so
   a `tlsContext`-only configuration over a `nats://` DSN to a server that did not advertise `tls_required`
