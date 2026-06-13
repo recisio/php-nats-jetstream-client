@@ -344,6 +344,34 @@ final class KeyValueBucketTest extends TestCase
         self::assertSame([5, 6], array_map(static fn($e): ?int => $e->revision, $history));
     }
 
+    public function testHistoryToleratesDeliveryWithoutMetadataAndKeepsCollecting(): void
+    {
+        // #96: a delivery lacking a parseable $JS.ACK reply subject (a control / non-conformant frame)
+        // must be skipped — not thrown out of the shared dispatch loop (which would tear down delivery for
+        // every subscription, the #90 class) and not recorded as a bogus history entry.
+        $createReply = '{"stream_name":"KV_cfg","name":"HIST","num_pending":1,"config":{"deliver_subject":"d","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            // A metadata-less delivery (no $JS.ACK reply subject) on the history subscription (sid 2).
+            "MSG dlv 2 2\r\nxx\r\n",
+            // A well-formed delivery follows and completes the replay (num_pending=0, last token).
+            "MSG dlv 2 \$JS.ACK.KV_cfg.HIST.1.6.1.0.0 2\r\nv1\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $history = $client->jetStream()->keyValue('cfg')->history('theme')->await();
+
+        // The metadata-less frame was skipped; only the valid revision is recorded.
+        self::assertCount(1, $history);
+        self::assertSame('v1', $history[0]->value);
+        self::assertSame(6, $history[0]->revision);
+    }
+
     /**
      * Verifies keys() returns the live key names (deleted keys excluded) (#25).
      */
@@ -1690,7 +1718,10 @@ final class KeyValueBucketTest extends TestCase
      */
     public function testWatchWithOnCaughtUpToleratesMessageWithoutMetadata(): void
     {
-        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+        // num_pending:1 reflects the single pending delivery below, so the end-of-initial-data signal is
+        // driven by a delivery (not fired immediately at creation, which only happens when nothing is
+        // pending — see testWatchFiresOnCaughtUpImmediatelyOnEmptyBucket).
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","num_pending":1,"config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
 
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
@@ -1724,5 +1755,36 @@ final class KeyValueBucketTest extends TestCase
         self::assertSame('blue', $seenEntry->value);
         // Caught-up cannot be determined without metadata, so the signal does not (mis)fire.
         self::assertFalse($caughtUp);
+    }
+
+    /**
+     * #99: on an empty / no-match bucket the consumer starts with num_pending=0, so no delivery ever
+     * arrives to drive the in-handler caught-up check. The end-of-initial-data signal must instead fire
+     * from the created consumer's num_pending, or a caller blocking on it hangs forever.
+     */
+    public function testWatchFiresOnCaughtUpImmediatelyOnEmptyBucket(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","num_pending":0,"config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none","deliver_policy":"last_per_subject"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $caughtUp = false;
+        // No deliveries are queued: the signal must fire purely from the consumer's num_pending=0.
+        $client->jetStream()->keyValue('cfg')->watch(
+            static function (KeyValueEntry $entry): void {},
+            '>',
+            new KeyWatchOptions(onCaughtUp: static function () use (&$caughtUp): void {
+                $caughtUp = true;
+            }),
+        )->await();
+
+        self::assertTrue($caughtUp, 'onCaughtUp must fire on an empty bucket without any delivery');
     }
 }

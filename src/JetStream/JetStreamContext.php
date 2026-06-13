@@ -923,6 +923,9 @@ final class JetStreamContext
      *
      * @param callable(NatsMessage):void $handler
      * @param array<string,mixed> $consumerOptions Additional consumer config fields.
+     * @param (callable(ConsumerInfo):void)|null $onConsumerCreated Invoked with the created consumer
+     *        before the subscription is established — e.g. to inspect `num_pending` and signal an
+     *        end-of-initial-data when the consumer starts with nothing pending (#99).
      * @return Future<int>
      */
     public function subscribeEphemeralPushConsumer(
@@ -931,11 +934,16 @@ final class JetStreamContext
         ?string $deliverSubject = null,
         ?string $filterSubject = null,
         array $consumerOptions = [],
+        ?callable $onConsumerCreated = null,
     ): Future {
-        return async(function () use ($stream, $handler, $deliverSubject, $filterSubject, $consumerOptions): int {
+        return async(function () use ($stream, $handler, $deliverSubject, $filterSubject, $consumerOptions, $onConsumerCreated): int {
             $deliver = $deliverSubject ?? Inbox::generate('_INBOX.JS.PUSH');
 
-            $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
+            $consumer = $this->createEphemeralPushConsumer($stream, $deliver, $filterSubject, $consumerOptions)->await();
+
+            if ($onConsumerCreated !== null) {
+                $onConsumerCreated($consumer);
+            }
 
             return $this->client->subscribe($deliver, function (NatsMessage $message) use ($handler): void {
                 if ($this->handlePushControlMessage($message)->await()) {

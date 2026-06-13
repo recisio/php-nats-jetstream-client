@@ -846,18 +846,29 @@ final class ObjectStoreBucket
     /**
      * Watches metadata subjects and emits object metadata updates.
      *
+     * With `$options = null` only updates published after the watch starts are delivered
+     * (deliver_policy=new), preserving the original behavior. Pass an {@see ObjectStoreWatchOptions}
+     * instance to opt into the reference ObjectStore.Watch semantics — replay the current metadata of
+     * every existing object first, then follow (last_per_subject), or full history / explicit
+     * updates-only (#98).
+     *
      * @param callable(ObjectInfo):void $handler
      * @return Future<int>
      */
-    public function watch(callable $handler, string $pattern = '>'): Future
+    public function watch(callable $handler, string $pattern = '>', ?ObjectStoreWatchOptions $options = null): Future
     {
-        return async(function () use ($handler, $pattern): int {
+        return async(function () use ($handler, $pattern, $options): int {
             $filter = $this->metaPrefix() . $pattern;
 
             // Deliver via a JetStream push consumer (not a plain core subscription) so each update
-            // carries its stream sequence, exposed as the ObjectInfo revision — consistent with the
-            // KeyValue watch(). deliver_policy=new keeps live-updates-only semantics; the read is
-            // ack-free.
+            // carries its stream sequence, exposed as the ObjectInfo revision (this push-consumer
+            // mechanism is the part consistent with the KeyValue watch()). The read is ack-free.
+            // Default (no options) keeps live-updates-only semantics (deliver_policy=new); supplying
+            // options selects the reference snapshot-then-follow default (last_per_subject), full
+            // history (all), or explicit updates-only (new).
+            $consumerOptions = $options?->toConsumerConfig()
+                ?? ['deliver_policy' => 'new', 'ack_policy' => 'none'];
+
             return $this->jetStream->subscribeEphemeralPushConsumer(
                 $this->streamName(),
                 function (NatsMessage $message) use ($handler): void {
@@ -879,7 +890,7 @@ final class ObjectStoreBucket
                     $handler(ObjectInfo::fromArray($this->bucket, $metadata, $this->jetStream->streamSequenceOf($message)));
                 },
                 filterSubject: $filter,
-                consumerOptions: ['deliver_policy' => 'new', 'ack_policy' => 'none'],
+                consumerOptions: $consumerOptions,
             )->await();
         });
     }

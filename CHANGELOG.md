@@ -17,6 +17,66 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+### Added
+
+- `[feature]` Object Store: `ObjectStoreBucket::watch()` now accepts an optional `ObjectStoreWatchOptions`
+  to select the delivery policy, mirroring the KeyValue watch matrix and the reference ObjectStore.Watch.
+  With no options (`null`) the watcher stays updates-only (`deliver_policy=new`, unchanged). Passing an
+  `ObjectStoreWatchOptions` instance opts into "snapshot then follow" — replay the current metadata of
+  every existing object first, then live updates (`last_per_subject`, the reference default) — or full
+  history (`includeHistory`) / explicit updates-only (`updatesOnly`). (#98)
+- `[feature]` Services: a declared endpoint `schema` is now also surfaced in the standard `$SRV.INFO`
+  response endpoint entries. ADR-32 stabilizes only PING/INFO/STATS, so spec-conformant tooling (nats CLI
+  micro, nats.go) never queries the non-spec `$SRV.SCHEMA` verb; carrying the schema in INFO makes it
+  discoverable. The `$SRV.SCHEMA` verb is retained for backward compatibility. (#101)
+
+### Fixed
+
+- `[bugfix]` KeyValue: `watch()`'s `onCaughtUp` (end-of-initial-data) signal now fires on an empty or
+  no-match bucket. Previously it could only fire from a delivered message reporting `num_pending = 0`, so
+  with nothing to deliver it never fired and a caller blocking on it hung forever. The signal is now also
+  derived from the created consumer's `num_pending` and fires immediately when the consumer starts with
+  nothing pending. (#99)
+- `[bugfix]` Protocol: the inbound MSG/HMSG frame bound is now coupled to the server's negotiated
+  `max_payload` instead of a fixed 8 MiB. On a server with a raised `max_payload` (e.g. 16/32/64 MiB), a
+  legitimately large message larger than 8 MiB was rejected as an oversized frame — throwing a
+  `ProtocolException` that the connection turned into a reconnect, so the message was effectively
+  undeliverable. The parser bound is raised from INFO (`max_payload` + a header-block margin, never below
+  the historical 8 MiB), with a generous 64 MiB fallback when `max_payload` is unknown. (#94)
+- `[bugfix]` Services: the endpoint success path no longer lets a `json_encode` failure escape the shared
+  dispatch loop. A handler returning a value that cannot be JSON-encoded (binary / non-UTF-8 data, NAN/INF)
+  previously threw a `JsonException` out of the subscription callback, aborting delivery for every
+  subscription on the connection. The response publish is now guarded: an encode failure is recorded and
+  answered with a controlled `HANDLER_ERROR`/500 reply (mirroring the handler-exception path), so one
+  endpoint returning binary data can no longer take down the whole client's dispatch. (#97)
+- `[bugfix]` KeyValue: `history()` no longer uses the throwing `messageMetadata()` path. A delivery
+  lacking a parseable `$JS.ACK` reply subject (a control / non-conformant frame) is now skipped instead of
+  throwing out of the shared dispatch loop — which would tear down delivery for every subscription on the
+  connection (the same class fixed for `watch()` in #90) — and is no longer recorded as a bogus history
+  entry. (#96)
+- `[bugfix]` TLS: a configured `NatsOptions::$tlsContext` now correctly forces the TLS upgrade, matching
+  its documented "treated as TLS-required" contract. Previously `requiresTls()` ignored `tlsContext`, so
+  a `tlsContext`-only configuration over a `nats://` DSN to a server that did not advertise `tls_required`
+  connected in plaintext and wrote CONNECT (carrying credentials) in cleartext. The credentials fail-safe
+  now also covers this path, so a `tlsContext` whose handshake cannot establish TLS fails fast instead of
+  leaking credentials. (#95)
+- `[bugfix]` WebSocket: a corrupt permessage-deflate frame no longer emits an uncaught native `E_WARNING`
+  from `inflate_add()`/`deflate_add()` before the typed `ProtocolException`. The warning is now suppressed
+  (the return-value check already raises `ProtocolException`), so apps that promote warnings to exceptions
+  get the intended `ProtocolException` instead of a generic `ErrorException` leaking from the codec. (#100)
+
+### Documentation
+
+- `[docs]` README "Reconnect Behavior" no longer wrongly states that publishes during reconnect are lost.
+  It now documents the outbound reconnect buffer (publishes are buffered up to `reconnectBufferSize`,
+  default 8 MiB, and flushed on reconnect; rejected only when the buffer is full, buffering is disabled, or
+  the connection is closed/not reconnecting), with test citations. (#102)
+- `[docs]` README "Configuration Option Mapping" table now lists the 11 previously-omitted `NatsOptions`
+  fields — `connectionListener`, `errorListener`, `jwtProvider`, `tokenProvider`, `reconnectBufferSize`,
+  `tlsContext`, `randomizeServers`, `retryOnFailedInitialConnect`, `webSocketHeaders`,
+  `webSocketCompression`, `logger` — with types/defaults. `NatsOptionsTest::testDefaultsMatchDocumentedValues`
+  now asserts these defaults too, keeping the table's "asserted by" claim accurate. (#103)
+
 ## [2.2.0] - 2026-06-10
 
 ### Added

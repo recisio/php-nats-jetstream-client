@@ -24,9 +24,11 @@ final class KeyWatchOptions
      * @param int|null      $resumeFromRevision Start delivery at this stream sequence
      *                                          (deliver_policy=by_start_sequence), e.g. to resume a watch.
      * @param (\Closure():void)|null $onCaughtUp Invoked once when the initial replay has caught up to the
-     *                                          current end of the stream (a delivered message reports
-     *                                          num_pending = 0). Mirrors the reference "end of initial
-     *                                          data" signal.
+     *                                          current end of the stream — either a delivered message
+     *                                          reports num_pending = 0, or the consumer starts with nothing
+     *                                          pending (empty / no-match bucket), in which case it fires
+     *                                          immediately without any delivery (#99). Mirrors the
+     *                                          reference "end of initial data" signal.
      */
     public function __construct(
         public readonly bool $includeHistory = false,

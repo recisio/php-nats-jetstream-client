@@ -1787,7 +1787,7 @@ When a connection drops and `reconnectEnabled` is `true`:
 2. **Server rotation**: the client cycles through configured servers in order.
 3. **Subscription replay**: all active subscriptions are replayed (SUB commands resent) after reconnect.
 4. **Replay validation**: reconnect does not treat replayed subscriptions as successful if the server immediately answers with a fatal `-ERR` during replay. In that case reconnect keeps retrying until a healthy server accepts the replay or attempts are exhausted.
-5. **Published messages during reconnect are lost**: there is no outbound buffer for in-flight publishes. Only subscriptions are restored.
+5. **Published messages during reconnect are buffered and replayed**: while a reconnect is in flight, publishes are held in an outbound buffer (up to `reconnectBufferSize`, default 8 MiB, matching nats.go) and flushed in order on a successful reconnect. A publish is rejected (throws) only when the buffer is full, when `reconnectBufferSize` is `0` (buffering disabled), or when the connection is closed / not reconnecting. _Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testPublishBuffersDuringReconnectAndFlushesOnReconnect`, `testPublishWithHeadersBuffersDuringReconnectAndRecordsOutbound`, `testPublishBufferOverflowThrowsDuringReconnect`)._
 
 Recoverable server `-ERR` frames such as `Invalid Subject` or `Permissions Violation for Publish/Subscription to ...` do not automatically close an already-open connection. Fatal connection-level errors still do.
 
@@ -1846,6 +1846,17 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 | `nonceSigner` | `?NonceSignerInterface` | `null` | Signs the server nonce for JWT or standalone NKey auth. |
 | `maxPendingMessagesPerSubscription` | `int` | `1024` | Slow consumer queue bound per SID. |
 | `slowConsumerPolicy` | `SlowConsumerPolicy` | `DropOldest` | One of `DropOldest`, `DropNewest`, `Error`. |
+| `connectionListener` | `?Closure(ConnectionEvent,?Throwable):void` | `null` | Typed hook for connection-lifecycle transitions (connect/disconnect/reconnect/close/discovery/lame-duck). Listener exceptions are swallowed. |
+| `errorListener` | `?Closure(Throwable):void` | `null` | Typed hook for async errors. Listener exceptions are swallowed. |
+| `jwtProvider` | `?Closure():string` | `null` | Supplies the JWT at connect time (e.g. for credential rotation), overriding `jwt`. |
+| `tokenProvider` | `?Closure():string` | `null` | Supplies the auth token at connect time (e.g. for credential rotation), overriding `token`. |
+| `reconnectBufferSize` | `int` | `8388608` | Max bytes of outbound publishes buffered while reconnecting; flushed on a successful reconnect. `0` disables buffering (publishes while disconnected throw). 8 MiB, matching nats.go. |
+| `tlsContext` | `?ClientTlsContext` | `null` | Escape hatch: a pre-built Amp TLS context used verbatim for the handshake (in-memory PEM, ALPN, custom verification). When set, the connection is treated as TLS-required. |
+| `randomizeServers` | `bool` | `false` | Shuffle the configured server pool once at construction so a client fleet spreads its initial connections across the cluster. |
+| `retryOnFailedInitialConnect` | `bool` | `false` | Retry the very first connection (up to `maxReconnectAttempts`, with backoff) when it fails, even if `reconnectEnabled` is off. |
+| `webSocketHeaders` | `array<string,string>` | `[]` | Extra headers sent on the WebSocket upgrade request (only used by the WebSocket transport). |
+| `webSocketCompression` | `bool` | `false` | Negotiate permessage-deflate on the WebSocket transport (requires `ext-zlib`). |
+| `logger` | `?Psr\Log\LoggerInterface` | `null` | PSR-3 logger for lifecycle/reconnect/error events; defaults to a `NullLogger`. |
 
 ## Performance Benchmark Recipe
 

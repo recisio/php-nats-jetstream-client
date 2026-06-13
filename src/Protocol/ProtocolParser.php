@@ -23,6 +23,13 @@ final class ProtocolParser
      */
     private const MAX_CONTROL_LINE_BYTES = 1048576; // 1 MiB
 
+    /**
+     * Default inbound MSG/HMSG bound used before the server's negotiated `max_payload` is known. The
+     * connection raises this from INFO once connected so large messages on big-`max_payload` servers are
+     * receivable (#94).
+     */
+    public const DEFAULT_MAX_FRAME_SIZE = 8 * 1024 * 1024; // 8 MiB
+
     private string $buffer = '';
 
     /** Maximum total frame size (headers + payload) accepted from the server. */
@@ -42,7 +49,7 @@ final class ProtocolParser
      *
      * @param int $maxFrameSize Maximum total MSG/HMSG bytes accepted per frame to limit memory usage.
      */
-    public function __construct(int $maxFrameSize = 8 * 1024 * 1024)
+    public function __construct(int $maxFrameSize = self::DEFAULT_MAX_FRAME_SIZE)
     {
         $this->maxFrameSize = $maxFrameSize;
     }

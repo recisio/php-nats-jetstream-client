@@ -102,5 +102,16 @@ final class NatsOptionsTest extends TestCase
         self::assertNull($options->nonceSigner);
         self::assertSame(1024, $options->maxPendingMessagesPerSubscription);
         self::assertSame(SlowConsumerPolicy::DropOldest, $options->slowConsumerPolicy);
+        self::assertNull($options->connectionListener);
+        self::assertNull($options->errorListener);
+        self::assertNull($options->jwtProvider);
+        self::assertNull($options->tokenProvider);
+        self::assertSame(8_388_608, $options->reconnectBufferSize);
+        self::assertNull($options->tlsContext);
+        self::assertFalse($options->randomizeServers);
+        self::assertFalse($options->retryOnFailedInitialConnect);
+        self::assertSame([], $options->webSocketHeaders);
+        self::assertFalse($options->webSocketCompression);
+        self::assertNull($options->logger);
     }
 }

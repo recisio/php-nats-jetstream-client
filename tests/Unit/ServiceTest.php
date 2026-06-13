@@ -213,6 +213,54 @@ final class ServiceTest extends TestCase
         self::assertStringContainsString('"metadata":{"team":"core"}', implode('', $transport->writes));
     }
 
+    public function testInfoIncludesEndpointSchema(): void
+    {
+        // #101: ADR-32 stabilizes only PING/INFO/STATS, so a spec-conformant consumer reads schema from
+        // the standard $SRV.INFO response. A declared endpoint schema must appear in the info_response.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG \$SRV.INFO.echo 5 _INBOX.info 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $schema = ['type' => 'object', 'properties' => ['msg' => ['type' => 'string']]];
+        $service = $client->service('echo', '1.0.0', 'Echo service')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, schema: $schema);
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('io.nats.micro.v1.info_response', $writes);
+        self::assertStringContainsString('"schema":{"type":"object"', $writes);
+    }
+
+    public function testInfoOmitsSchemaWhenEndpointHasNone(): void
+    {
+        // An endpoint without a declared schema must not emit a schema key in the INFO response.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG \$SRV.INFO.echo 5 _INBOX.info 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0', 'Echo service')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('io.nats.micro.v1.info_response', $writes);
+        self::assertStringNotContainsString('"schema"', $writes);
+    }
+
     public function testDiscoveryReplies(): void
     {
         $transport = new FakeTransport([
@@ -266,6 +314,40 @@ final class ServiceTest extends TestCase
         $writes = implode('', $transport->writes);
         self::assertStringContainsString('PUB _INBOX.req', $writes);
         self::assertStringContainsString('{"echo":"hello"}', $writes);
+    }
+
+    public function testEndpointResponseEncodeFailureDoesNotTearDownDispatch(): void
+    {
+        // #97: a handler returning a value json_encode cannot encode (binary / non-UTF-8) must not let the
+        // JsonException escape the shared dispatch loop and abort delivery for every subscription. The bad
+        // request gets a controlled 500; a subsequent request to another endpoint is still served.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // Endpoint 'bad' (sid 13) returns an un-encodable array; endpoint 'good' (sid 14) returns 'ok'.
+            "MSG svc.bad 13 _INBOX.bad 5\r\nhello\r\n",
+            "MSG svc.good 14 _INBOX.good 5\r\nhello\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('svc', '1.0.0')
+            ->addEndpoint('bad', 'svc.bad', static fn(NatsMessage $message): array => ['data' => "\xff\xfe\xfa"])
+            ->addEndpoint('good', 'svc.good', static fn(NatsMessage $message): string => 'ok');
+        $service->start()->await();
+
+        // Neither delivery may throw out of the dispatch loop.
+        $client->processIncoming()->await();
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        // The bad request received a controlled service error (500) rather than crashing the loop.
+        self::assertStringContainsString('_INBOX.bad', $writes);
+        self::assertStringContainsString('Nats-Service-Error', $writes);
+        // The good endpoint was still served after the bad one's encode failure (dispatch survived).
+        self::assertStringContainsString('PUB _INBOX.good', $writes);
+        self::assertStringContainsString("ok\r\n", $writes);
     }
 
     /**

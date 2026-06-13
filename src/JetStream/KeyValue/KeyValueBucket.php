@@ -15,6 +15,7 @@ use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\JetStreamApi;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\MessageTtl;
+use IDCT\NATS\JetStream\Models\ConsumerInfo;
 use IDCT\NATS\JetStream\Models\JsMessageMetadata;
 use IDCT\NATS\JetStream\Models\PubAck;
 use IDCT\NATS\JetStream\Models\StreamInfo;
@@ -416,6 +417,15 @@ final class KeyValueBucket
                 },
                 filterSubject: $filter,
                 consumerOptions: $consumerOptions,
+                onConsumerCreated: static function (ConsumerInfo $consumer) use ($onCaughtUp, &$caughtUpFired): void {
+                    // End-of-initial-data on an empty / no-match bucket: the consumer starts with nothing
+                    // pending, so no delivery will ever arrive to drive the in-handler caught-up check —
+                    // fire the signal now instead of leaving a blocked caller hanging (#99).
+                    if ($onCaughtUp !== null && !$caughtUpFired && (int) ($consumer->raw['num_pending'] ?? 0) === 0) {
+                        $caughtUpFired = true;
+                        $onCaughtUp();
+                    }
+                },
             )->await();
         });
     }
@@ -507,9 +517,16 @@ final class KeyValueBucket
             $entries = [];
             $caughtUp = false;
             $sid = $this->client->subscribe($deliver, function (NatsMessage $message) use (&$entries, &$caughtUp, $key): void {
-                $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
-                $meta = $this->jetStream->messageMetadata($message);
+                // Use the null-tolerant metadata parse: a non-conformant / control delivery without a
+                // parseable $JS.ACK reply subject must NOT throw out of the shared dispatch loop and tear
+                // down every subscription on the connection (the #90 class, here for history() — #96).
+                // Skip such a frame instead of recording it as a bogus history entry.
+                $meta = JsMessageMetadata::fromMessage($message);
+                if ($meta === null) {
+                    return;
+                }
 
+                $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
                 $entries[] = $this->buildEntry($key, $message->payload, $this->operationFromHeaders($headers), $meta->streamSequence);
 
                 if ($meta->numPending === 0) {
