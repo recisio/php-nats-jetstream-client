@@ -507,9 +507,16 @@ final class KeyValueBucket
             $entries = [];
             $caughtUp = false;
             $sid = $this->client->subscribe($deliver, function (NatsMessage $message) use (&$entries, &$caughtUp, $key): void {
-                $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
-                $meta = $this->jetStream->messageMetadata($message);
+                // Use the null-tolerant metadata parse: a non-conformant / control delivery without a
+                // parseable $JS.ACK reply subject must NOT throw out of the shared dispatch loop and tear
+                // down every subscription on the connection (the #90 class, here for history() — #96).
+                // Skip such a frame instead of recording it as a bogus history entry.
+                $meta = JsMessageMetadata::fromMessage($message);
+                if ($meta === null) {
+                    return;
+                }
 
+                $headers = NatsHeaders::fromWireBlock($message->rawHeaders);
                 $entries[] = $this->buildEntry($key, $message->payload, $this->operationFromHeaders($headers), $meta->streamSequence);
 
                 if ($meta->numPending === 0) {

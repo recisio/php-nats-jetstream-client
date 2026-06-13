@@ -38,6 +38,11 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   `ProtocolException` that the connection turned into a reconnect, so the message was effectively
   undeliverable. The parser bound is raised from INFO (`max_payload` + a header-block margin, never below
   the historical 8 MiB), with a generous 64 MiB fallback when `max_payload` is unknown. (#94)
+- `[bugfix]` KeyValue: `history()` no longer uses the throwing `messageMetadata()` path. A delivery
+  lacking a parseable `$JS.ACK` reply subject (a control / non-conformant frame) is now skipped instead of
+  throwing out of the shared dispatch loop — which would tear down delivery for every subscription on the
+  connection (the same class fixed for `watch()` in #90) — and is no longer recorded as a bogus history
+  entry. (#96)
 - `[bugfix]` TLS: a configured `NatsOptions::$tlsContext` now correctly forces the TLS upgrade, matching
   its documented "treated as TLS-required" contract. Previously `requiresTls()` ignored `tlsContext`, so
   a `tlsContext`-only configuration over a `nats://` DSN to a server that did not advertise `tls_required`
