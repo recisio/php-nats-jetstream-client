@@ -5,15 +5,19 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Unit;
 
 use Amp\Socket\ConnectException as AmpConnectException;
+use Amp\Socket\Socket;
 use Amp\Socket\TlsException;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Transport\TlsAwareTransportInterface;
+use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\WebSocketFrameCodec;
 use IDCT\NATS\Transport\WebSocketTransport;
 use PHPUnit\Framework\TestCase;
 
+use function Amp\async;
+use function Amp\Socket\connect;
 use function Amp\Socket\listen;
 
 final class WebSocketTransportTest extends TestCase
@@ -254,5 +258,119 @@ final class WebSocketTransportTest extends TestCase
         $firstByte = ($fin ? 0x80 : 0x00) | ($opcode & 0x0F);
 
         return pack('CC', $firstByte, strlen($payload)) . $payload;
+    }
+
+    /**
+     * Verifies readLine() decodes a binary data frame read from a real socket (#87, exercises the
+     * read/decode loop, not just the pure codec).
+     */
+    public function testReadLineDecodesBinaryFrameFromSocket(): void
+    {
+        [$transport, $server, $serverSocket] = $this->connectedWebSocketTransport();
+
+        try {
+            $serverSocket->write(WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_BINARY, "PING\r\n", false));
+
+            self::assertSame("PING\r\n", $transport->readLine()->await());
+        } finally {
+            $transport->close()->await();
+            $serverSocket->close();
+            $server->close();
+        }
+    }
+
+    /**
+     * Verifies readLine() answers a server PING with a (masked) PONG carrying the same application data
+     * and then returns the following data frame (#87).
+     */
+    public function testReadLineAnswersPingWithPongAndContinues(): void
+    {
+        [$transport, $server, $serverSocket] = $this->connectedWebSocketTransport();
+
+        try {
+            $serverSocket->write(WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_PING, 'hb', false));
+            $serverSocket->write(WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_BINARY, 'DATA', false));
+
+            // The ping is answered inline; readLine returns the subsequent data frame.
+            self::assertSame('DATA', $transport->readLine()->await());
+
+            // The server received the client's PONG (masked) carrying the ping payload.
+            $buffer = (string) $serverSocket->read();
+            $frames = WebSocketFrameCodec::decode($buffer);
+            self::assertNotSame([], $frames);
+            self::assertSame(WebSocketFrameCodec::OP_PONG, $frames[0]['opcode']);
+            self::assertSame('hb', $frames[0]['payload']);
+        } finally {
+            $transport->close()->await();
+            $serverSocket->close();
+            $server->close();
+        }
+    }
+
+    /**
+     * Verifies readLine() inflates an RSV1 (permessage-deflate) compressed frame read from a socket (#87).
+     */
+    public function testReadLineInflatesCompressedFrameFromSocket(): void
+    {
+        [$transport, $server, $serverSocket] = $this->connectedWebSocketTransport();
+
+        try {
+            $payload = 'INFO {"server_id":"x","headers":true}';
+            $serverSocket->write(WebSocketFrameCodec::encode(
+                WebSocketFrameCodec::OP_BINARY,
+                WebSocketFrameCodec::deflate($payload),
+                false,
+                null,
+                true,
+            ));
+
+            self::assertSame($payload, $transport->readLine()->await());
+        } finally {
+            $transport->close()->await();
+            $serverSocket->close();
+            $server->close();
+        }
+    }
+
+    /**
+     * Verifies readLine() surfaces a server close frame as TransportClosedException (#87).
+     */
+    public function testReadLineThrowsOnCloseFrameFromSocket(): void
+    {
+        [$transport, $server, $serverSocket] = $this->connectedWebSocketTransport();
+
+        try {
+            $serverSocket->write(WebSocketFrameCodec::encode(WebSocketFrameCodec::OP_CLOSE, '', false));
+
+            $this->expectException(TransportClosedException::class);
+            $transport->readLine()->await();
+        } finally {
+            $transport->close()->await();
+            $serverSocket->close();
+            $server->close();
+        }
+    }
+
+    /**
+     * Connects a WebSocketTransport to a loopback TCP socket and injects the connected client socket
+     * (bypassing the HTTP upgrade handshake) so readLine()/the decode loop can be driven with
+     * pre-encoded server frames written from the returned server-side socket.
+     *
+     * @return array{0: WebSocketTransport, 1: \Amp\Socket\ServerSocket, 2: Socket}
+     */
+    private function connectedWebSocketTransport(): array
+    {
+        $server = listen('tcp://127.0.0.1:0');
+        $address = (string) $server->getAddress();
+
+        $accept = async(static fn (): ?Socket => $server->accept());
+        $clientSocket = connect('tcp://' . $address);
+        $serverSocket = $accept->await();
+        self::assertInstanceOf(Socket::class, $serverSocket);
+
+        $transport = new WebSocketTransport(new NatsOptions());
+        (new \ReflectionProperty(WebSocketTransport::class, 'socket'))->setValue($transport, $clientSocket);
+
+        return [$transport, $server, $serverSocket];
     }
 }
