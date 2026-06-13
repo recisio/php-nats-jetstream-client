@@ -1333,6 +1333,48 @@ final class JetStreamIntegrationTest extends TestCase
         $client->disconnect()->await();
     }
 
+    public function testJetStreamObjectStoreWatchReplaysExistingObjectsWithSnapshotOption(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $bucket = 'os' . strtolower(bin2hex(random_bytes(2)));
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $store = $client->jetStream()->objectStore($bucket);
+        $store->create()->await();
+
+        // Two objects exist BEFORE the watch starts. With the snapshot option the watcher must replay
+        // the current metadata of both (#98); the null-options default would deliver neither.
+        $store->put('alpha.txt', 'a-payload')->await();
+        $store->put('beta.txt', 'b-payload')->await();
+
+        /** @var array<string,int> $seen */
+        $seen = [];
+        $sid = $store->watch(
+            static function (\IDCT\NATS\JetStream\ObjectStore\ObjectInfo $info) use (&$seen): void {
+                $seen[$info->name] = ($seen[$info->name] ?? 0) + 1;
+            },
+            options: new \IDCT\NATS\JetStream\ObjectStore\ObjectStoreWatchOptions(),
+        )->await();
+
+        $cancellation = new TimeoutCancellation(5.0);
+        try {
+            while (count($seen) < 2) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        self::assertArrayHasKey('alpha.txt', $seen, 'pre-existing object alpha.txt was not replayed');
+        self::assertArrayHasKey('beta.txt', $seen, 'pre-existing object beta.txt was not replayed');
+
+        $client->unsubscribe($sid)->await();
+        $store->deleteBucket()->await();
+        $client->disconnect()->await();
+    }
+
     /**
      * Verifies stream retention/storage/discard policy options persist after create.
      */

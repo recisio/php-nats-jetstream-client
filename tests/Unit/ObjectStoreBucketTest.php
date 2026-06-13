@@ -10,6 +10,7 @@ use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\ObjectStore\ObjectData;
 use IDCT\NATS\JetStream\ObjectStore\ObjectInfo;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
+use IDCT\NATS\JetStream\ObjectStore\ObjectStoreWatchOptions;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use PHPUnit\Framework\TestCase;
 
@@ -965,6 +966,33 @@ final class ObjectStoreBucketTest extends TestCase
 
         $writes = implode('', $transport->writes);
         self::assertStringContainsString('"deliver_policy":"new"', $writes);
+        self::assertStringContainsString('"ack_policy":"none"', $writes);
+    }
+
+    public function testWatchWithOptionsRequestsSnapshotDeliverPolicy(): void
+    {
+        // #98: supplying ObjectStoreWatchOptions (no flags) must request the reference snapshot-then-follow
+        // policy (last_per_subject) on the CONSUMER.CREATE, so existing objects are replayed — unlike the
+        // null-options default which stays updates-only (deliver_policy=new).
+        $createReply = '{"stream_name":"OBJ_assets","name":"OBJWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $client->jetStream()->objectStore('assets')->watch(
+            static function (ObjectInfo $info): void {},
+            options: new ObjectStoreWatchOptions(),
+        )->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('"deliver_policy":"last_per_subject"', $writes);
+        self::assertStringNotContainsString('"deliver_policy":"new"', $writes);
         self::assertStringContainsString('"ack_policy":"none"', $writes);
     }
 

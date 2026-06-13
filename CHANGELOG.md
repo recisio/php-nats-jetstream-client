@@ -17,6 +17,15 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+### Added
+
+- `[feature]` Object Store: `ObjectStoreBucket::watch()` now accepts an optional `ObjectStoreWatchOptions`
+  to select the delivery policy, mirroring the KeyValue watch matrix and the reference ObjectStore.Watch.
+  With no options (`null`) the watcher stays updates-only (`deliver_policy=new`, unchanged). Passing an
+  `ObjectStoreWatchOptions` instance opts into "snapshot then follow" — replay the current metadata of
+  every existing object first, then live updates (`last_per_subject`, the reference default) — or full
+  history (`includeHistory`) / explicit updates-only (`updatesOnly`). (#98)
+
 ### Fixed
 
 - `[bugfix]` TLS: a configured `NatsOptions::$tlsContext` now correctly forces the TLS upgrade, matching
