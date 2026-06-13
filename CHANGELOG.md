@@ -17,6 +17,18 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-06-13
+
+### Security
+
+- **Credential exposure via a configured `tlsContext` (#95).** Versions before 2.3.0 could transmit the
+  CONNECT frame — which carries the configured credentials (token / user-password / JWT signature / NKey
+  signature) — in **cleartext** when a `NatsOptions::$tlsContext` was supplied but `tlsRequired` was off,
+  the DSN used the `nats://` scheme, and the server's INFO did not advertise `tls_required`. The TLS-required
+  check ignored `tlsContext`, so the upgrade and the cleartext fail-safe were both skipped. Fixed: a
+  configured `tlsContext` now forces the TLS upgrade (and fails fast if TLS cannot be established).
+  **Upgrading is recommended for anyone using the `tlsContext` escape hatch.** See the Fixed entry below.
+
 ### Added
 
 - `[feature]` Object Store: `ObjectStoreBucket::watch()` now accepts an optional `ObjectStoreWatchOptions`
