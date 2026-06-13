@@ -76,6 +76,18 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   `tlsContext`, `randomizeServers`, `retryOnFailedInitialConnect`, `webSocketHeaders`,
   `webSocketCompression`, `logger` — with types/defaults. `NatsOptionsTest::testDefaultsMatchDocumentedValues`
   now asserts these defaults too, keeping the table's "asserted by" claim accurate. (#103)
+- `[docs]` README: new "WebSocket Transport" section (with an Index entry) showing how to wire
+  `WebSocketTransport`, the `ws://` / `wss://` expectations, and the `webSocketHeaders` /
+  `webSocketCompression` options. (#104)
+- `[docs]` README: the Observability note now documents the typed `connectionListener` /
+  `errorListener` closures, not just the PSR-3 logger. (#105)
+- `[docs]` README: added a standalone-NKey authentication example (nkey + nonceSigner, no JWT) to the
+  Authentication Options block. (#106)
+- `[docs]` PHPDoc: `KeyWatchOptions` and `KeyValueBucket::watch()` now make clear that the
+  last-per-subject "snapshot then follow" default applies only when a `KeyWatchOptions` instance is
+  supplied; `watch()` called with `$options = null` is updates-only and replays nothing. (#107)
+- `[docs]` PHPDoc: `ObjectInfo::$digest` is no longer described as "Server-provided" — it is the content
+  digest recorded by the writing client and verified on read. (#108)
 
 ## [2.2.0] - 2026-06-10
 

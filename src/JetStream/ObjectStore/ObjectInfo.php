@@ -16,7 +16,8 @@ final class ObjectInfo
      * @param string $name Object name/key in the bucket.
      * @param int $size Total object size in bytes.
      * @param int $chunks Number of chunk messages used to store object bytes.
-     * @param string $digest Server-provided content digest for integrity checks.
+     * @param string $digest Content digest (`SHA-256=<base64url>`) recorded in the object metadata by the
+     *                       writing client; verified on read by `get()` / `getToCallback()`.
      * @param string $modified RFC3339 timestamp of last object modification.
      * @param bool $deleted Whether this metadata represents a deleted tombstone.
      * @param string $nuid Object NUID; chunks are stored under `$O.<bucket>.C.<nuid>` (official layout).
