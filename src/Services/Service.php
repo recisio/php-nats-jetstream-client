@@ -713,12 +713,23 @@ final class Service
         if (str_starts_with($subject, '$SRV.INFO')) {
             $endpoints = [];
             foreach ($this->endpoints as $endpoint) {
-                $endpoints[] = [
+                $entry = [
                     'name' => $endpoint->name,
                     'subject' => $endpoint->subject,
                     'queue_group' => $endpoint->queueGroup,
                     'metadata' => $endpoint->metadata,
                 ];
+
+                // Surface the declared endpoint schema via the standard $SRV.INFO verb. ADR-32 stabilizes
+                // only PING/INFO/STATS, so a spec-conformant consumer (nats CLI micro, nats.go) never
+                // queries the non-spec $SRV.SCHEMA channel; carrying the schema here makes it reachable.
+                // Conformant clients ignore the extra field. The $SRV.SCHEMA verb is retained for
+                // backward compatibility. (#101)
+                if ($endpoint->schema !== null) {
+                    $entry['schema'] = $endpoint->schema;
+                }
+
+                $endpoints[] = $entry;
             }
 
             return [

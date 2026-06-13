@@ -213,6 +213,54 @@ final class ServiceTest extends TestCase
         self::assertStringContainsString('"metadata":{"team":"core"}', implode('', $transport->writes));
     }
 
+    public function testInfoIncludesEndpointSchema(): void
+    {
+        // #101: ADR-32 stabilizes only PING/INFO/STATS, so a spec-conformant consumer reads schema from
+        // the standard $SRV.INFO response. A declared endpoint schema must appear in the info_response.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG \$SRV.INFO.echo 5 _INBOX.info 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $schema = ['type' => 'object', 'properties' => ['msg' => ['type' => 'string']]];
+        $service = $client->service('echo', '1.0.0', 'Echo service')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload, schema: $schema);
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('io.nats.micro.v1.info_response', $writes);
+        self::assertStringContainsString('"schema":{"type":"object"', $writes);
+    }
+
+    public function testInfoOmitsSchemaWhenEndpointHasNone(): void
+    {
+        // An endpoint without a declared schema must not emit a schema key in the INFO response.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG \$SRV.INFO.echo 5 _INBOX.info 0\r\n\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $service = $client->service('echo', '1.0.0', 'Echo service')
+            ->addEndpoint('echo', 'svc.echo', static fn(NatsMessage $message): string => $message->payload);
+        $service->start()->await();
+
+        $client->processIncoming()->await();
+
+        $writes = implode('', $transport->writes);
+        self::assertStringContainsString('io.nats.micro.v1.info_response', $writes);
+        self::assertStringNotContainsString('"schema"', $writes);
+    }
+
     public function testDiscoveryReplies(): void
     {
         $transport = new FakeTransport([

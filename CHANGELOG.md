@@ -25,6 +25,10 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   `ObjectStoreWatchOptions` instance opts into "snapshot then follow" — replay the current metadata of
   every existing object first, then live updates (`last_per_subject`, the reference default) — or full
   history (`includeHistory`) / explicit updates-only (`updatesOnly`). (#98)
+- `[feature]` Services: a declared endpoint `schema` is now also surfaced in the standard `$SRV.INFO`
+  response endpoint entries. ADR-32 stabilizes only PING/INFO/STATS, so spec-conformant tooling (nats CLI
+  micro, nats.go) never queries the non-spec `$SRV.SCHEMA` verb; carrying the schema in INFO makes it
+  discoverable. The `$SRV.SCHEMA` verb is retained for backward compatibility. (#101)
 
 ### Fixed
 
