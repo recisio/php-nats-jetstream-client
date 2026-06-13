@@ -394,9 +394,11 @@ final class ObjectStoreBucketTest extends TestCase
     }
 
     /**
-     * Verifies getToCallback streams the chunk payload to the handler.
+     * Verifies getToCallback invokes the callback exactly once for a single-chunk object and
+     * streams that chunk's payload to the handler. (Multi-chunk per-chunk streaming is proven by
+     * testGetToCallbackInvokesCallbackOncePerChunk.)
      */
-    public function testGetToCallbackStreamsChunks(): void
+    public function testGetToCallbackInvokesCallbackOnceForSingleChunkObject(): void
     {
         $nuid = 'nuidcb00001';
         $meta = $this->metaGetResponse('report.txt', [

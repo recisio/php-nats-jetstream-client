@@ -32,6 +32,8 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Authentication Options](#authentication-options)
 - [Connect and Publish/Subscribe](#connect-and-publishsubscribe)
 - [Request/Reply](#requestreply)
+- [Request Many (Scatter-Gather)](#request-many-scatter-gather)
+- [Connection Statistics and RTT](#connection-statistics-and-rtt)
 - [Headers and Server Info](#headers-and-server-info)
 - [JetStream Stream and Durable Consumer](#jetstream-stream-and-durable-consumer)
 - [JetStream Stream Update and Consumer Info](#jetstream-stream-update-and-consumer-info)
@@ -42,6 +44,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [JetStream Push Consumer (Durable)](#jetstream-push-consumer-durable)
 - [JetStream Ephemeral Consumers](#jetstream-ephemeral-consumers)
 - [Scheduled Publish Example (`@at`)](#scheduled-publish-example-at)
+- [Distributed Counter](#distributed-counter)
 - [KeyValue Bucket](#keyvalue-bucket)
 - [Object Store Bucket](#object-store-bucket)
 - [Object Store Streaming to Callback](#object-store-streaming-to-callback)
@@ -56,9 +59,11 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Consumer List](#consumer-list)
 - [Stream Message Get](#stream-message-get)
 - [JetStream Direct Get](#jetstream-direct-get)
+- [Atomic Batch Publish](#atomic-batch-publish)
 - [Credentials File Authentication](#credentials-file-authentication)
 - [Typed Stream Configuration](#typed-stream-configuration)
 - [Pull Consumer Batching/Iteration](#pull-consumer-batchingiteration)
+- [Pull Consumer Priority Groups](#pull-consumer-priority-groups)
 - [Stream Mirroring and Sourcing](#stream-mirroring-and-sourcing)
 - [Republish and Subject Transform](#republish-and-subject-transform)
 - [Compatibility Mapping](#compatibility-mapping)
@@ -90,10 +95,14 @@ Current functionality includes:
 - JetStream consumer pause/resume
 - JetStream publish ACK
 - JetStream stream message get by sequence — both the regular `STREAM.MSG.GET` request and the Direct Get API (`directGetStreamMessage()` / `directGetLastMessageForSubject()`)
+- JetStream atomic (all-or-nothing) batch publish (`batch()` → `BatchPublisher`, ADR-50; requires `allow_atomic`, NATS 2.12+)
 - Scheduled publish (`@at` support)
+- Distributed counter CRDT (atomic `incrementCounter()` / `counterValue()`, arbitrary-precision values)
 - KeyValue API (bucket lifecycle with history/TTL/storage options, put/get/update/delete/purge, watch, getAll/status)
 - ObjectStore API (bucket lifecycle, put/get/delete/list/watch, chunked uploads, streaming upload via `putStream()`, SHA-256 digest verification)
 - Connection `flush()` (PING/PONG round-trip) to confirm the server has processed prior writes
+- Request-many scatter-gather (`requestMany()`: collect multiple replies bounded by max-count / stall / timeout)
+- Connection traffic statistics (`statistics()` → `ConnectionStats`) and round-trip-time measurement (`rtt()`)
 - Microservices framework (service registration, PING/INFO/STATS/SCHEMA discovery, grouped endpoints)
 - Server authorization methods: token, username/password, JWT + nonce signer, built-in NKey seed signer, credentials file parser
 - Standalone NKey authentication (Ed25519 challenge signing without JWT)
@@ -260,9 +269,70 @@ echo $reply->payload . PHP_EOL;
 $client->disconnect()->await();
 ```
 
+### Request Many (Scatter-Gather)
+
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testRequestManyCollectsUpToMaxResponses`, `testRequestManyStopsOnStallInterval`, `testRequestManyReturnsEmptyOnNoResponders`)._
+
+`requestMany()` sends a single request and collects MULTIPLE replies (scatter-gather), returning a `list<NatsMessage>`. Collection stops on the first of: `$maxResponses` replies, a `no_responders` sentinel (returns `[]`), the per-message `$stallMs` gap, or `$totalTimeoutMs`.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+// Stop after 3 replies, or after the 2000ms total budget, whichever comes first.
+$replies = $client->requestMany('svc.scan', 'who-is-there', null, 3, 2000)->await();
+
+foreach ($replies as $reply) {
+	echo $reply->payload . PHP_EOL;
+}
+
+// Time-bounded only: keep collecting until 200ms pass with no new reply.
+$discovered = $client->requestMany('svc.scan', 'ping', null, null, 5000, 200)->await();
+echo count($discovered) . ' responders' . PHP_EOL;
+
+$client->disconnect()->await();
+```
+
+### Connection Statistics and RTT
+
+_Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testConnectionAccessorsAndStatistics`, `testRttMeasuresPingPong`)._
+
+`statistics()` returns an immutable `ConnectionStats` snapshot of traffic counters (`inMsgs`, `outMsgs`, `inBytes`, `outBytes`, `reconnects`). `rtt()` measures the round-trip time to the server with a PING/PONG exchange and resolves to a `float` in seconds.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$client->publish('events.orders', '{"id":1}')->await();
+
+$stats = $client->statistics();
+echo "out: {$stats->outMsgs} msgs / {$stats->outBytes} bytes" . PHP_EOL;
+echo "in:  {$stats->inMsgs} msgs / {$stats->inBytes} bytes" . PHP_EOL;
+echo "reconnects: {$stats->reconnects}" . PHP_EOL;
+
+$rttSeconds = $client->rtt()->await();
+echo 'rtt: ' . round($rttSeconds * 1000, 2) . ' ms' . PHP_EOL;
+
+$client->disconnect()->await();
+```
+
 ### Headers and Server Info
 
-_Verified by: [NatsClientTest::testClientPublishWithHeadersAndRequestWithHeaders](tests/Unit/NatsClientTest.php), [NatsConnectionTest::testProcessIncomingDispatchesHmsgWithRawHeaders](tests/Unit/NatsConnectionTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
+_Verified by: [NatsClientTest::testClientPublishWithHeadersAndRequestWithHeaders](tests/Unit/NatsClientTest.php), [NatsClientTest::testClientConnectAndPublishDelegatesToConnection](tests/Unit/NatsClientTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
 ```php
 <?php
@@ -351,6 +421,33 @@ $js->deleteStream('ORDERS')->await();
 $client->disconnect()->await();
 ```
 
+Idempotent upserts are available when you do not want to branch on "exists vs. not": `createOrUpdateStream()` creates the stream or falls back to updating it when the name is already in use, and `addOrUpdateConsumer()` creates or updates a durable consumer. Both mirror nats.go / nats.java `CreateOrUpdateStream` / `CreateOrUpdateConsumer`.
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testCreateOrUpdateStreamFallsBackToUpdate`, `testAddOrUpdateConsumerDelegatesToCreateConsumer`)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$js = $client->jetStream();
+
+// Create the stream, or update its config if it already exists.
+$js->createOrUpdateStream('ORDERS', ['orders.created', 'orders.updated'])->await();
+
+// Create or update a durable consumer in one idempotent call.
+$consumer = $js->addOrUpdateConsumer('ORDERS', 'PROC', 'orders.created')->await();
+echo $consumer->name . PHP_EOL;
+
+$client->disconnect()->await();
+```
+
 ### JetStream Pull Consumer (Fetch + ACK)
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testFetchNext`, `testFetchBatchThrowsTerminalStatusDescription`); [JetStreamIntegrationTest::testJetStreamPullFetchAndAck](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
@@ -378,6 +475,30 @@ $client->disconnect()->await();
 ```
 
 When a pull request ends with a terminal JetStream status frame and no user message is delivered, `fetchNext()` / `fetchBatch()` raise `JetStreamException` with the server status code and description, for example `JetStream pull request ended with status 404: No Messages`.
+
+For exactly-once-style processing use `ackSync()` instead of `ack()`: it sends the `+ACK` as a request and waits for the server to confirm the acknowledgement was durably recorded (double-ack). It throws if the delivered message carries no reply subject, and throws `TimeoutException` if no confirmation arrives within the optional timeout.
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testAckSyncSendsAckAsRequestAndAwaitsConfirmation`, `testAckSyncThrowsForEmptyReplySubject`)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$js = $client->jetStream();
+$message = $js->fetchNext('ORDERS', 'PULL', 3000)->await();
+
+// Double-ack: block until the server confirms the ACK (250ms confirmation timeout).
+$js->ackSync($message, 250)->await();
+
+$client->disconnect()->await();
+```
 
 ### JetStream Pull Consumer (NAK, Delayed NAK, TERM, In-Progress)
 
@@ -420,7 +541,7 @@ $client->disconnect()->await();
 
 ### Queue Group Subscribe
 
-_Verified by: [SubscriptionQueueTest::testSubscribeQueueWithQueueGroup](tests/Unit/SubscriptionQueueTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
+_Verified by: [NatsConnectionTest::testSubscribeWithQueueGroupSendsSubFrameAndDeliversToHandler](tests/Unit/NatsConnectionTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
 ```php
 <?php
@@ -597,6 +718,48 @@ $jetStream->publishScheduled(
 $client->disconnect()->await();
 ```
 
+### Distributed Counter
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testIncrementCounter`, `testIncrementCounterPreservesBigValue`, `testIncrementCounterRejectsMalformedDelta`, `testCounterValue`, `testCounterValueMissingReturnsZero`, `testCounterValueRethrowsNon404Exception`, `testIncrementCounterWithMalformedResponsePayload`, `testIncrementCounterWithApiErrorInResponse`, `testIncrementCounterWithIntegerValField`, `testIncrementCounterWithMissingValFieldThrows`)._
+
+Distributed counters are an atomic, conflict-free (CRDT) increment subject backed by a JetStream stream. `incrementCounter()` applies a signed delta and returns the new total; `counterValue()` reads the current total via Direct Get (returning `"0"` when nothing is stored yet).
+
+Requires NATS server 2.12+, and the backing stream must be created with `allow_msg_counter: true`. On a pre-2.12 server, `createStream()` with that flag fails fast with an `UnsupportedFeatureException` (the server rejects the unknown config field). A stream created without the flag causes the increment request to be rejected, surfaced as a `JetStreamException`.
+
+The delta is passed as an integer **string** (e.g. `"+5"`, `"-3"`, `"10"`); a malformed delta is rejected before dispatch. Counter totals are likewise returned as **strings** so values beyond `PHP_INT_MAX` are preserved exactly rather than truncated to a float.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions(servers: ['nats://127.0.0.1:4222']));
+$client->connect()->await();
+
+$js = $client->jetStream();
+
+// The backing stream must enable allow_msg_counter (NATS 2.12+).
+$js->createStream('COUNTERS', ['counters.>'], [
+	'allow_msg_counter' => true,
+])->await();
+
+// Atomically increment; the new total is returned as a string.
+$total = $js->incrementCounter('counters.visits', '+5')->await();
+echo "After increment: {$total}\n"; // "5"
+
+$js->incrementCounter('counters.visits', '+3')->await();
+$js->incrementCounter('counters.visits', '-1')->await();
+
+// Read the current value via Direct Get ("0" if nothing stored yet).
+$current = $js->counterValue('COUNTERS', 'counters.visits')->await();
+echo "Current value: {$current}\n"; // "7"
+
+$client->disconnect()->await();
+```
+
 ### KeyValue Bucket
 
 _Verified by: [KeyValueBucketTest](tests/Unit/KeyValueBucketTest.php); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamKeyValueLifecycle`, `testJetStreamKeyValueAdvancedParityOperations`); [features/jetstream-data/key_value.feature](features/jetstream-data/key_value.feature)._
@@ -655,6 +818,30 @@ $kv->deleteBucket()->await();
 $client->disconnect()->await();
 ```
 
+To read a specific historical revision (stream sequence) of a key, use `getRevision()`. It returns `null` when nothing is stored at that sequence or when the sequence belongs to a different key, and throws for a non-positive revision.
+
+_Verified by: [KeyValueBucketTest](tests/Unit/KeyValueBucketTest.php) (`testGetRevisionReturnsEntryAtSequence`, `testGetRevisionReturnsNullForDifferentKey`)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$kv = $client->jetStream()->keyValue('cfg');
+
+// Load the value of 'theme' as it existed at stream sequence 2.
+$historical = $kv->getRevision('theme', 2)->await();
+echo $historical?->value ?? '<none>', PHP_EOL;
+
+$client->disconnect()->await();
+```
+
 ### Object Store Bucket
 
 _Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php); [JetStreamIntegrationTest::testJetStreamObjectStoreLifecycle](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
@@ -692,9 +879,44 @@ $store->deleteBucket()->await();
 $client->disconnect()->await();
 ```
 
+Buckets and objects support extra management operations. `seal()` makes a bucket permanently read-only (irreversible). `addLink()` / `addBucketLink()` create link objects pointing at another object or a whole bucket. `updateMeta()` renames an object and/or replaces its metadata WITHOUT re-uploading its bytes (the stored chunks are kept by NUID).
+
+_Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testSeal`, `testAddLink`, `testAddBucketLink`, `testUpdateMetaRenamesPreservingNuid`, `testUpdateMetaReplacesMetadataInPlace`)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$store = $client->jetStream()->objectStore('assets');
+
+// Link to another object (optionally in a different bucket).
+$store->addLink('shortcut', 'real.bin')->await();
+
+// Link to a whole bucket.
+$store->addBucketLink('mirror', 'other-bucket')->await();
+
+// Rename without re-uploading; the stored chunks are preserved by NUID.
+$store->updateMeta('logo.txt', 'brand.txt')->await();
+
+// Replace only the metadata bag (no rename, no re-upload).
+$store->updateMeta('brand.txt', null, ['team' => 'brand'])->await();
+
+// Make the bucket permanently read-only (irreversible).
+$store->seal()->await();
+
+$client->disconnect()->await();
+```
+
 ### Object Store Streaming to Callback
 
-_Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testGetToCallbackStreamsChunks`, `testGetToCallbackInvokesCallbackOncePerChunk`); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
+_Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testGetToCallbackInvokesCallbackOncePerChunk`, `testGetToCallbackInvokesCallbackOnceForSingleChunkObject`); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
 
 ```php
 <?php
@@ -807,6 +1029,42 @@ $serviceClient->disconnect()->await();
 
 // Optional runtime helper: start + process loop + auto-stop on timeout.
 // $service->run(timeoutSeconds: 30.0)->await();
+```
+
+Services expose runtime helpers: `statsSnapshot()` returns the current `io.nats.micro.v1.stats_response` array (per-endpoint `num_requests` / `num_errors` / `last_error` / `processing_time` / `average_processing_time`), `reset()` zeroes those counters, and `withRequestValidator()` enables opt-in per-request validation for endpoints declared with a `schema`. The validator receives the message and the endpoint schema and returns `null` to accept or a string rejection reason (which becomes a `VALIDATION_ERROR` error reply).
+
+_Verified by: [ServiceTest](tests/Unit/ServiceTest.php) (`testStatsIncludeDetailedMetrics`, `testResetClearsStats`, `testRequestValidatorCanRejectRequests`)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Core\NatsMessage;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$service = $client->service('echo', '1.0.0')
+	->withRequestValidator(static function (NatsMessage $message, array $schema): ?string {
+		// Return null to accept, or a string describing why the request is rejected.
+		return $message->payload === '' ? 'payload must not be empty' : null;
+	})
+	->addEndpoint('echo', 'svc.echo', static fn (NatsMessage $message): string => $message->payload, schema: ['type' => 'object']);
+
+$service->start()->await();
+
+// Inspect live counters.
+$stats = $service->statsSnapshot();
+echo $stats['endpoints'][0]['num_requests'] . PHP_EOL;
+
+// Zero the runtime statistics.
+$service->reset();
+
+$service->stop()->await();
+$client->disconnect()->await();
 ```
 
 ### Services: SCHEMA Discovery
@@ -1083,6 +1341,32 @@ $js->deleteStream('EVENTS')->await();
 $client->disconnect()->await();
 ```
 
+Stored messages can be removed by sequence with `deleteMessage()`. By default this is a fast delete (`no_erase`: the sequence is unlinked but the bytes are left in place). Pass `secureErase: true` for a secure delete that overwrites the message data before removal (slower; mirrors nats.go `SecureDeleteMsg`).
+
+_Verified by: [JetStreamContextTest::testDeleteMessageFastAndSecure](tests/Unit/JetStreamContextTest.php)._
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$js = $client->jetStream();
+
+// Fast delete (default): unlink sequence 7, leave the bytes on disk.
+$js->deleteMessage('ORDERS', 7)->await();
+
+// Secure erase: overwrite the data for sequence 8 before removing it.
+$js->deleteMessage('ORDERS', 8, secureErase: true)->await();
+
+$client->disconnect()->await();
+```
+
 ### JetStream Direct Get
 
 `directGetStreamMessage()` and `directGetLastMessageForSubject()` use the JetStream Direct Get API
@@ -1120,6 +1404,93 @@ $client->disconnect()->await();
 ```
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testDirectGetStreamMessageReturnsRawBodyAndHeaders`, `testDirectGetLastMessageForSubjectRequestsLastBySubj`, `testDirectGetStreamMessageThrowsOnNotFound`); [JetStreamIntegrationTest::testJetStreamDirectGetStreamMessage](tests/Integration/JetStreamIntegrationTest.php)._
+
+#### Batched / multi Direct Get
+
+For multi-message reads the client adds two batched Direct Get helpers (ADR-31), which **require NATS
+server 2.11+** in addition to the stream's `allow_direct`. Each issues a single request whose replies
+stream to a private inbox, terminated by a 204 end-of-batch marker (or a final message carrying
+`Nats-Num-Pending: 0`); the wait is bounded by `$expiresMs` (default 5000) so a silent server cannot
+hang the call. `directGetBatch()` returns a `list<NatsMessage>`; an error status (e.g. `408`) is
+raised as a `JetStreamException`.
+
+- `directGetLastForSubjects(string $stream, array $subjects, int $expiresMs = 5000)` fetches the
+  latest message for each named subject in one round trip (`multi_last`). It expects **exact**
+  subjects: a subject containing `*` or `>` is rejected with a `JetStreamException`. An empty
+  `$subjects` array returns `[]` without contacting the server.
+- `directGetBatch(string $stream, array $body, int $expiresMs = 5000)` issues a raw batched request;
+  `$body` accepts keys such as `batch`, `seq`, `up_to_seq` and `multi_last`. `$expiresMs` must be
+  greater than zero.
+
+```php
+$js = $client->jetStream();
+$js->createStream('EVENTS', ['events.>'], ['allow_direct' => true])->await();
+$js->publish('events.order', '{"id":1}')->await();
+$js->publish('events.user', '{"id":2}')->await();
+
+// Latest message per subject, in a single request.
+$latest = $js->directGetLastForSubjects('EVENTS', ['events.order', 'events.user'])->await();
+foreach ($latest as $msg) {
+	echo $msg->subject . ': ' . $msg->payload . PHP_EOL;
+}
+
+// Raw batched get over a sequence range (here: up to 10 messages from sequence 1).
+$range = $js->directGetBatch('EVENTS', ['seq' => 1, 'batch' => 10])->await();
+echo count($range) . ' messages' . PHP_EOL;
+```
+
+_Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testDirectGetBatchCollectsUntilEob`, `testDirectGetLastForSubjects`, `testDirectGetBatchSurfacesError`, `testDirectGetLastForSubjectsWithEmptySubjectsReturnsEmpty`, `testDirectGetLastForSubjectsRejectsWildcardSubjectWithStar`, `testDirectGetLastForSubjectsRejectsWildcardSubjectWithGreaterThan`, `testDirectGetBatchRejectsZeroExpiresMs`); [JetStreamIntegrationTest::testJetStreamBatchedDirectGet](tests/Integration/JetStreamIntegrationTest.php)._
+
+### Atomic Batch Publish
+
+_Verified by: [BatchPublisherTest](tests/Unit/BatchPublisherTest.php) (`testCommitSendsBatchHeadersAndParsesAck`, `testCommitRejectedAtStart`, `testCommitAbortSurfacesError`, `testCommitEmptyBatchThrows`, `testBatchRejectsOversizedId`, `testAddAfterCommitThrows`, `testCountReturnsNumberOfStagedMessages`, `testBatchIdReturnsConstructedId`); [JetStreamIntegrationTest::testJetStreamAtomicBatchPublish](tests/Integration/JetStreamIntegrationTest.php)._
+
+`$js->batch()` opens an atomic (all-or-nothing) JetStream publish batch (ADR-50). Messages are staged
+with the fluent `add($subject, $payload, $headers = [])` and sent together on `commit()`, which returns
+a `Future<PubAck>`. Every message carries a shared `Nats-Batch-Id` and an incrementing
+`Nats-Batch-Sequence`; the final message carries `Nats-Batch-Commit: 1`, on which the server atomically
+commits the whole batch and replies with a single `PubAck` whose `batchCount` is the committed count and
+whose `batchId` echoes the batch id. If any consistency check fails the entire batch is aborted and
+nothing is stored — the failure surfaces as a `JetStreamException`.
+
+This is a NATS 2.12+ feature: the target stream must be created with `allow_atomic` enabled. On a
+pre-2.12 server `createStream(..., ['allow_atomic' => true])` fails fast with an
+`UnsupportedFeatureException` (see [NATS Server Version Requirements](#nats-server-version-requirements));
+if the stream exists without `allow_atomic`, `commit()` surfaces a `JetStreamException` (e.g. "atomic
+publish not enabled"). Pass your own batch id (1..64 characters) to `batch()`, or omit it to have one
+generated. A single batch is capped at `BatchPublisher::MAX_MESSAGES` (1000) messages.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$js = $client->jetStream();
+
+// The stream must allow atomic batches (NATS 2.12+).
+$js->createStream('ORDERS', ['orders.>'], ['allow_atomic' => true])->await();
+
+// Stage messages, then commit them all atomically.
+$batch = $js->batch()
+	->add('orders.created', '{"id":1}')
+	->add('orders.created', '{"id":2}')
+	->add('orders.created', '{"id":3}');
+
+echo $batch->count() . " messages staged in batch {$batch->batchId()}" . PHP_EOL;
+
+$ack = $batch->commit()->await();
+
+echo "Committed {$ack->batchCount} messages (batch {$ack->batchId})" . PHP_EOL;
+
+$js->deleteStream('ORDERS')->await();
+$client->disconnect()->await();
+```
 
 ### Credentials File Authentication
 
@@ -1231,6 +1602,58 @@ $totalProcessed = $js->pullConsumer('ORDERS', 'PROC')
 	})->await();
 
 echo "Processed {$totalProcessed} messages total." . PHP_EOL;
+
+$client->disconnect()->await();
+```
+
+### Pull Consumer Priority Groups
+
+_Verified by: [PullConsumerIteratorTest::testHandleRePinsOnStalePin](tests/Unit/PullConsumerIteratorTest.php); [PullConsumerIteratorTest::testBuildPullIncludesAllOptionalFields](tests/Unit/PullConsumerIteratorTest.php); [JetStreamContextTest::testCreateConsumerWithPriorityGroups](tests/Unit/JetStreamContextTest.php); [JetStreamContextTest::testUnpinConsumer](tests/Unit/JetStreamContextTest.php); [JetStreamContextTest::testPinIdOf](tests/Unit/JetStreamContextTest.php)._
+
+ADR-42 priority groups let several pull clients share one consumer while the server steers delivery. Create the consumer with `priority_groups` (a non-empty array of 1..16-character group names) and a `priority_policy` — one of `overflow`, `pinned_client`, or `prioritized`. The priority-group fields require **NATS server 2.11+**; the `prioritized` policy requires **2.12+** (an older server rejects them). See [NATS Server Version Requirements](#nats-server-version-requirements).
+
+Then pull under a group with the `PullConsumerIterator` setters: `setGroup()` (required for any priority policy), and as the policy needs them `setPriority()` (0-9, for `prioritized`), `setMinPending()` / `setMinAckPending()` (for `overflow`), plus the general `setMaxBytes()` and `setNoWait()`. Under the `pinned_client` policy the server pins one client at a time: the iterator automatically captures the `Nats-Pin-Id` from the first delivered message and resends it on subsequent pulls, and transparently re-pins if the pin goes stale (the server returns a 423 status). Call `JetStreamContext::pinIdOf($msg)` to read a message's pin id, and `JetStreamContext::unpinConsumer($stream, $consumer, $group)` to release the active pin so another client can take over.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\Core\NatsMessage;
+use IDCT\NATS\JetStream\JetStreamContext;
+
+$client = new NatsClient(new NatsOptions());
+$client->connect()->await();
+
+$js = $client->jetStream();
+
+// Create a pull consumer with a pinned-client priority group (NATS 2.11+).
+$js->createConsumer('ORDERS', 'PROC', null, [
+	'priority_groups' => ['g1'],
+	'priority_policy' => 'pinned_client',
+])->await();
+
+// Pull under the group. The iterator captures and resends the Nats-Pin-Id
+// automatically, and re-pins transparently if the pin goes stale (423).
+$totalProcessed = $js->pullConsumer('ORDERS', 'PROC')
+	->setGroup('g1')
+	->setBatching(10)
+	->setExpiresMs(5000)
+	->setIterations(5)
+	->setMaxBytes(1048576)
+	->handle(function (NatsMessage $msg, JetStreamContext $js): void {
+		// Inspect the pin id carried by the first message of the pinned group.
+		$pinId = $js->pinIdOf($msg); // string|null
+		echo 'Processing: ' . $msg->payload . PHP_EOL;
+		$js->ack($msg)->await();
+	})->await();
+
+echo "Processed {$totalProcessed} messages total." . PHP_EOL;
+
+// Release the active pin so another client can take over the group.
+$js->unpinConsumer('ORDERS', 'PROC', 'g1')->await();
 
 $client->disconnect()->await();
 ```
@@ -1387,7 +1810,7 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 
 ## Configuration Option Mapping
 
-`NatsOptions` fields and defaults (verified by [NatsOptionsTest](tests/Unit/NatsOptionsTest.php)):
+`NatsOptions` fields and defaults (every default below is asserted by [NatsOptionsTest::testDefaultsMatchDocumentedValues](tests/Unit/NatsOptionsTest.php)):
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

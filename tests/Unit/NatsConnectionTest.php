@@ -276,6 +276,40 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
+     * Verifies the callback subscribe() API with a queue group emits a `SUB <subject> <queue> <sid>`
+     * frame and that a matching MSG is dispatched to the registered handler. This is the exact API the
+     * README "Queue Group Subscribe" example uses: subscribe($subject, $handler, queue: 'workers').
+     */
+    public function testSubscribeWithQueueGroupSendsSubFrameAndDeliversToHandler(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            "MSG tasks.process 1 4\r\nwork\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $received = null;
+        $sid = $connection->subscribe('tasks.process', static function (NatsMessage $message) use (&$received): void {
+            $received = $message;
+        }, 'workers')->await();
+
+        self::assertSame(1, $sid);
+        self::assertSame("SUB tasks.process workers 1\r\n", $transport->writes[2]);
+
+        $frames = $connection->processIncoming()->await();
+
+        self::assertSame(1, $frames);
+        self::assertInstanceOf(NatsMessage::class, $received);
+        /** @var NatsMessage $receivedMessage */
+        $receivedMessage = $received;
+        self::assertSame('tasks.process', $receivedMessage->subject);
+        self::assertSame('work', $receivedMessage->payload);
+    }
+
+    /**
      * Verifies MSG frames are dispatched to matching subscription handlers.
      */
     public function testProcessIncomingDispatchesMsgToSubscriber(): void
@@ -1959,7 +1993,10 @@ final class NatsConnectionTest extends TestCase
     }
 
     /**
-     * Verifies an injected PSR-3 logger records connection lifecycle events (#69).
+     * Verifies an injected PSR-3 logger records the full connection lifecycle — connect/close,
+     * server discovery + lame-duck (from an async INFO), and a real reconnect (disconnect,
+     * per-attempt backoff warning, reconnect) — with the exact message strings and levels the
+     * connection emits (#69).
      */
     public function testLoggerCapturesLifecycleEvents(): void
     {
@@ -1973,18 +2010,81 @@ final class NatsConnectionTest extends TestCase
             }
         };
 
-        $transport = new FakeTransport([
+        // 1) connect() -> Connected (info); disconnect() -> Closed (info).
+        $connectClose = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
         ]);
+        $lifecycle = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, logger: $logger), $connectClose);
+        $lifecycle->connect()->await();
+        $lifecycle->disconnect()->await();
 
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, logger: $logger), $transport);
-        $connection->connect()->await();
-        $connection->disconnect()->await();
+        // 2) An async INFO advertising a new peer + lame-duck mode -> DiscoveredServers then LameDuck
+        //    (info). reconnectEnabled: false isolates the events from auto-failover.
+        $discovery = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","max_payload":1048576,"headers":true,"ldm":true,"connect_urls":["10.0.0.2:4222"]}' . "\r\n",
+        ]);
+        $discoveryConnection = new NatsConnection(
+            new NatsOptions(pingIntervalSeconds: 0, reconnectEnabled: false, logger: $logger),
+            $discovery,
+        );
+        $discoveryConnection->connect()->await();
+        $discoveryConnection->processIncoming()->await();
 
-        $messages = array_column($logger->records, 'message');
-        self::assertContains('NATS connection Connected', $messages);
-        self::assertContains('NATS connection Closed', $messages);
+        // 3) A real recovery: the first reconnect attempt fails its handshake read (per-attempt
+        //    backoff warning), the next succeeds -> Disconnected, backoff warning, Reconnected.
+        $flaky = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                    '__THROW__',
+                ],
+                [
+                    '__THROW__',
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+        $reconnecting = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: true,
+                maxReconnectAttempts: 3,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                pingIntervalSeconds: 0,
+                logger: $logger,
+            ),
+            $flaky,
+        );
+        $reconnecting->connect()->await();
+        self::assertSame(0, $reconnecting->processIncoming()->await());
+        self::assertSame(ConnectionState::Open, $reconnecting->state());
+
+        // Every advertised lifecycle event is logged with its exact message string and level.
+        self::assertContains(['level' => 'info', 'message' => 'NATS connection Connected'], $logger->records);
+        self::assertContains(['level' => 'info', 'message' => 'NATS connection Closed'], $logger->records);
+        self::assertContains(['level' => 'info', 'message' => 'NATS connection DiscoveredServers'], $logger->records);
+        self::assertContains(['level' => 'info', 'message' => 'NATS connection LameDuck'], $logger->records);
+        self::assertContains(['level' => 'info', 'message' => 'NATS connection Disconnected'], $logger->records);
+        self::assertContains(['level' => 'info', 'message' => 'NATS connection Reconnected'], $logger->records);
+
+        // The failed first recovery attempt logged a per-attempt backoff warning at warning level.
+        $backoffWarnings = array_filter(
+            $logger->records,
+            static fn (array $record): bool =>
+                $record['level'] === 'warning'
+                && str_starts_with($record['message'], 'NATS reconnect attempt ')
+                && str_contains($record['message'], 'failed; retrying in'),
+        );
+        self::assertNotEmpty($backoffWarnings);
     }
 
     public function testFlushSendsPingAndResolvesOnPong(): void

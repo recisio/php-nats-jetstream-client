@@ -143,29 +143,52 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
-     * Verifies stream purge removes published messages.
+     * Verifies a subject-filtered purge removes only the matching subject's messages and leaves the
+     * other subject's messages intact (a real filtered purge, not a whole-stream purge).
      */
     public function testJetStreamPurgeStreamByFilter(): void
     {
         $this->requireIntegrationEnabled();
 
         $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
-        $subject = 'it.' . strtolower($stream) . '.purge';
+        $prefix = 'it.' . strtolower($stream);
+        $purgeSubject = $prefix . '.purge';
+        $keepSubject = $prefix . '.keep';
 
         $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
         $client->connect()->await();
 
         $js = $client->jetStream();
-        $js->createStream($stream, [$subject])->await();
+        $js->createStream($stream, [$purgeSubject, $keepSubject])->await();
 
-        $js->publish($subject, '{"event":"one"}')->await();
-        $js->publish($subject, '{"event":"two"}')->await();
+        // Two messages on the subject we will purge, one on the subject we will keep.
+        $js->publish($purgeSubject, '{"event":"one"}')->await();
+        $js->publish($purgeSubject, '{"event":"two"}')->await();
+        $js->publish($keepSubject, '{"event":"keep"}')->await();
 
-        $purge = $js->purgeStream($stream)->await();
-        $state = $js->getStream($stream)->await()->raw['state'] ?? [];
+        $stateBefore = $js->getStream($stream)->await()->raw['state'] ?? [];
+        self::assertSame(3, (int) ($stateBefore['messages'] ?? -1));
 
-        self::assertGreaterThanOrEqual(2, $purge['purged']);
-        self::assertSame(0, (int) ($state['messages'] ?? -1));
+        // Filtered purge: only the matching subject's messages are removed.
+        $purge = $js->purgeStream($stream, ['filter' => $purgeSubject])->await();
+        self::assertSame(2, $purge['purged']);
+
+        // Total count drops to exactly the kept subject's single message.
+        $stateAfter = $js->getStream($stream)->await()->raw['state'] ?? [];
+        self::assertSame(1, (int) ($stateAfter['messages'] ?? -1));
+
+        // The kept subject's message is still retrievable.
+        $kept = $js->getLastMessageForSubject($stream, $keepSubject)->await();
+        self::assertSame($keepSubject, $kept->subject);
+        self::assertSame('{"event":"keep"}', $kept->payload);
+
+        // The purged subject has no remaining messages: the leader reports a 404.
+        try {
+            $js->getLastMessageForSubject($stream, $purgeSubject)->await();
+            self::fail('Expected purged subject to have no remaining messages.');
+        } catch (JetStreamException $e) {
+            self::assertGreaterThanOrEqual(400, $e->getCode());
+        }
 
         $js->deleteStream($stream)->await();
         $client->disconnect()->await();
