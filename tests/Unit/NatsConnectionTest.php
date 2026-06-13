@@ -1361,6 +1361,37 @@ final class NatsConnectionTest extends TestCase
         self::assertCount(1, $transport->connectCalls);
     }
 
+    /**
+     * Verifies disconnect() releases per-connection state (subscriptions, buffered messages, parser
+     * buffer, reconnect buffer) so a reused/pooled client does not retain it until GC (#85).
+     */
+    public function testDisconnectReleasesSubscriptionAndBufferState(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection->connect()->await();
+        $connection->subscribe('updates', static function (NatsMessage $message): void {})->await();
+
+        $metaProp = new \ReflectionProperty(NatsConnection::class, 'subscriptionMeta');
+        $parserProp = new \ReflectionProperty(NatsConnection::class, 'parser');
+
+        self::assertNotEmpty($metaProp->getValue($connection));
+        $parserBefore = $parserProp->getValue($connection);
+
+        $connection->disconnect()->await();
+
+        self::assertSame([], (new \ReflectionProperty(NatsConnection::class, 'subscriptions'))->getValue($connection));
+        self::assertSame([], $metaProp->getValue($connection));
+        self::assertSame([], (new \ReflectionProperty(NatsConnection::class, 'pendingMessages'))->getValue($connection));
+        self::assertSame('', (new \ReflectionProperty(NatsConnection::class, 'reconnectBuffer'))->getValue($connection));
+        // The parser is reset to a fresh instance (no residual partial-frame bytes retained).
+        self::assertNotSame($parserBefore, $parserProp->getValue($connection));
+    }
+
     public function testCallbackMayPublishDuringPostReconnectDeliveryWithoutDeadlock(): void
     {
         // A message buffered during reconnect replay is now delivered AFTER recovery exits its critical

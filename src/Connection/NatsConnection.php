@@ -294,6 +294,16 @@ final class NatsConnection
             $this->cancelPingTimer();
             $this->transport->close()->await();
             $this->state = ConnectionState::Closed;
+
+            // Release per-connection state so a long-lived/pooled client (or one disconnect()ed and
+            // later reused) does not retain handler closures, buffered messages, parser bytes, or the
+            // reconnect buffer until the whole object is GC'd (#85). Mirrors drain()'s teardown.
+            $this->subscriptions = [];
+            $this->subscriptionMeta = [];
+            $this->pendingMessages = [];
+            $this->reconnectBuffer = '';
+            $this->parser = new ProtocolParser();
+
             $this->emitEvent(ConnectionEvent::Closed);
         });
     }
