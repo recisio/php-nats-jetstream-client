@@ -13,6 +13,7 @@ use Amp\Socket\Socket;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Exception\ConnectionException;
+use IDCT\NATS\Exception\ProtocolException;
 
 use function Amp\async;
 use function Amp\Socket\connect;
@@ -28,6 +29,9 @@ use function Amp\Socket\connect;
  */
 final class WebSocketTransport implements TlsAwareTransportInterface
 {
+    /** Hard cap on a reassembled fragmented message, bounding memory against a hostile/buggy server (#89). */
+    private const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
     private ?Socket $socket = null;
     private int $lastConnectTimeoutMs = 5_000;
     private bool $tlsEstablished = false;
@@ -46,8 +50,13 @@ final class WebSocketTransport implements TlsAwareTransportInterface
 
     /**
      * @param NatsOptions $options Client options controlling TLS (used for `wss://`) and socket behavior.
+     * @param int $maxMessageBytes Hard cap on a single reassembled fragmented message; a server that
+     *                             streams continuation frames past this is treated as hostile (#89).
      */
-    public function __construct(private readonly NatsOptions $options = new NatsOptions()) {}
+    public function __construct(
+        private readonly NatsOptions $options = new NatsOptions(),
+        private readonly int $maxMessageBytes = self::DEFAULT_MAX_MESSAGE_BYTES,
+    ) {}
 
     /**
      * Connects to a `ws://` or `wss://` NATS endpoint and completes the WebSocket upgrade handshake.
@@ -208,12 +217,14 @@ final class WebSocketTransport implements TlsAwareTransportInterface
                         $this->fragmenting = true;
                         // permessage-deflate marks RSV1 only on the first frame of the message.
                         $this->fragmentCompressed = $frame['rsv1'];
+                        $this->enforceFragmentBound();
                     }
                     break;
 
                 case WebSocketFrameCodec::OP_CONTINUATION:
                     if ($this->fragmenting) {
                         $this->fragmentBuffer .= $frame['payload'];
+                        $this->enforceFragmentBound();
                         if ($frame['fin']) {
                             $out .= $this->fragmentCompressed
                                 ? WebSocketFrameCodec::inflate($this->fragmentBuffer)
@@ -228,6 +239,26 @@ final class WebSocketTransport implements TlsAwareTransportInterface
         }
 
         return $out;
+    }
+
+    /**
+     * Bounds the in-progress fragment-reassembly buffer so a server streaming unbounded continuation
+     * frames cannot OOM the client. Resets the fragment state and throws when the cap is exceeded (#89).
+     */
+    private function enforceFragmentBound(): void
+    {
+        if (strlen($this->fragmentBuffer) <= $this->maxMessageBytes) {
+            return;
+        }
+
+        $limit = $this->maxMessageBytes;
+        $this->fragmentBuffer = '';
+        $this->fragmenting = false;
+        $this->fragmentCompressed = false;
+
+        throw new ProtocolException(
+            sprintf('WebSocket fragmented message exceeded the maximum of %d bytes', $limit),
+        );
     }
 
     /**
@@ -333,8 +364,10 @@ final class WebSocketTransport implements TlsAwareTransportInterface
             if (in_array(strtolower($name), $reserved, true)) {
                 continue;
             }
-            // Strip CR/LF to prevent header/request injection.
-            $lines[] = $name . ': ' . str_replace(["\r", "\n"], '', $value);
+            // Strip CR/LF from BOTH name and value (and ':' from the name) to prevent header/request
+            // injection — a CR/LF or colon in the name would otherwise forge additional header lines.
+            $cleanName = str_replace(["\r", "\n", ':'], '', $name);
+            $lines[] = $cleanName . ': ' . str_replace(["\r", "\n"], '', $value);
         }
 
         return implode("\r\n", $lines) . "\r\n\r\n";

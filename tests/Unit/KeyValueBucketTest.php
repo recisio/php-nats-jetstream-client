@@ -1681,4 +1681,48 @@ final class KeyValueBucketTest extends TestCase
         $createRequest = implode('', $transport->writes);
         self::assertStringContainsString('"deliver_policy":"last_per_subject"', $createRequest);
     }
+
+    /**
+     * Verifies a watch() with an onCaughtUp callback does NOT throw out of the shared dispatch loop
+     * when a delivery lacks a parseable $JS.ACK reply subject (no JetStream metadata). Before the fix
+     * the caught-up check called the throwing messageMetadata(), which would tear down delivery for
+     * every subscription on the connection (#90).
+     */
+    public function testWatchWithOnCaughtUpToleratesMessageWithoutMetadata(): void
+    {
+        $createReply = '{"stream_name":"KV_cfg","name":"KVWATCH","config":{"deliver_subject":"_INBOX.JS.PUSH.x","ack_policy":"none"}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
+            // Delivered WITHOUT a $JS.ACK reply subject -> JsMessageMetadata::fromMessage() returns null.
+            "MSG \$KV.cfg.theme 2 4\r\nblue\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $seen = null;
+        $caughtUp = false;
+        $client->jetStream()->keyValue('cfg')->watch(
+            static function (KeyValueEntry $entry) use (&$seen): void {
+                $seen = $entry;
+            },
+            '>',
+            new KeyWatchOptions(onCaughtUp: static function () use (&$caughtUp): void {
+                $caughtUp = true;
+            }),
+        )->await();
+
+        // The metadata-less delivery is dispatched without throwing; the entry still reaches the handler.
+        self::assertSame(1, $client->processIncoming()->await());
+        self::assertInstanceOf(KeyValueEntry::class, $seen);
+        /** @var KeyValueEntry $seenEntry */
+        $seenEntry = $seen;
+        self::assertSame('theme', $seenEntry->key);
+        self::assertSame('blue', $seenEntry->value);
+        // Caught-up cannot be determined without metadata, so the signal does not (mis)fire.
+        self::assertFalse($caughtUp);
+    }
 }

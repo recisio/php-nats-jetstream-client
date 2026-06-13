@@ -2,9 +2,10 @@
   "name": "idct/php-nats-jetstream-client",
   "description": "Async-first NATS + JetStream client for PHP 8.2+",
   "type": "library",
-  "license": "MIT",
+  "license": "BSD-3-Clause",
   "require": {
     "php": "^8.2",
+    "ext-openssl": "*",
     "amphp/amp": "^3.1",
     "amphp/socket": "^2.3",
     "psr/log": "^3.0"
@@ -14,6 +15,10 @@
     "phpunit/phpunit": "^11.0",
     "phpstan/phpstan": "^2.1",
     "friendsofphp/php-cs-fixer": "^3.64"
+  },
+  "suggest": {
+    "ext-sodium": "Required for NKey / JWT nonce-signed authentication (NkeySeedSigner).",
+    "ext-zlib": "Required for WebSocket permessage-deflate compression (ws:// / wss:// with compression enabled)."
   },
   "autoload": {
     "psr-4": {
@@ -46,6 +51,10 @@
     "coverage:html": "XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-html coverage-report --coverage-text --only-summary-for-coverage-text --colors=never",
     "coverage:check": "bash scripts/check-coverage.sh 90",
     "coverage:check:clover": "bash scripts/check-clover-coverage.sh 97 coverage.xml",
+    "coverage:check:unit": [
+      "@coverage:clover",
+      "bash scripts/check-clover-coverage.sh 95 coverage.xml"
+    ],
     "stan": "phpstan analyse",
     "fix": "php-cs-fixer fix"
   },

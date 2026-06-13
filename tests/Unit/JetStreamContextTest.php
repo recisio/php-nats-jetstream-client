@@ -2163,6 +2163,46 @@ final class JetStreamContextTest extends TestCase
         self::assertSame('{"event":"first"}', $messages[0]->payload);
     }
 
+    /**
+     * Verifies a mid-batch terminal status (after >=1 message) is surfaced to the optional
+     * onTerminalStatus callback while the partial batch is still returned (#92).
+     */
+    public function testFetchBatchSurfacesMidBatchTerminalStatusToCallback(): void
+    {
+        $msg1 = '{"event":"first"}';
+        // A non-routine mid-batch termination: the consumer was deleted (409).
+        $statusHeaders = "NATS/1.0 409 Consumer Deleted\r\nStatus: 409\r\nDescription: Consumer Deleted\r\n\r\n";
+        $headerBytes = strlen($statusHeaders);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg1), $msg1),
+            sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $observed = null;
+        $messages = $client->jetStream()->fetchBatch(
+            'ORDERS',
+            'PROC',
+            5,
+            2500,
+            [],
+            static function (int $code, string $description) use (&$observed): void {
+                $observed = ['code' => $code, 'description' => $description];
+            },
+        )->await();
+
+        // The partial batch is still returned (nats.go parity)...
+        self::assertCount(1, $messages);
+        self::assertSame('{"event":"first"}', $messages[0]->payload);
+        // ...and the mid-batch terminal status was surfaced to the callback.
+        self::assertSame(['code' => 409, 'description' => 'Consumer Deleted'], $observed);
+    }
+
     public function testFetchBatchIgnoresStatus100ControlFrames(): void
     {
         $msg1 = '{"event":"first"}';
@@ -2535,16 +2575,14 @@ final class JetStreamContextTest extends TestCase
         $js = $client->jetStream();
 
         $streamMethod = new \ReflectionMethod($js, 'extractStreamSequence');
-        $consumerMethod = new \ReflectionMethod($js, 'extractConsumerSequence');
 
         // Domain-qualified ACK subject WITHOUT a trailing random token (11 tokens): stream sequence at
-        // index 7, consumer sequence at index 8 — same as the 12-token form. Previously fell through to
-        // null, silently disabling ordered-consumer gap detection and KV/ObjectStore revision on
-        // JetStream-domain/leaf deployments.
+        // index 7. Previously fell through to null, silently disabling KV/ObjectStore revision on
+        // JetStream-domain/leaf deployments. (Consumer-sequence parsing for every token form is now
+        // covered by JsMessageMetadataTest, which the ordered consumer uses.)
         $message = new NatsMessage('s', 1, '$JS.ACK.hub.ACC123.ORDERS.CONS.1.42.7.123.0', 'x');
 
         self::assertSame(42, $streamMethod->invoke($js, $message));
-        self::assertSame(7, $consumerMethod->invoke($js, $message));
     }
 
     public function testExtractStreamSequenceReturnsNullForInvalidReplySubject(): void
@@ -2819,6 +2857,104 @@ final class JetStreamContextTest extends TestCase
         // ... and two CREATEs total (the initial consumer plus the single recreate) — no storm.
         self::assertSame(2, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
         // The recreate resumes from the expected (first missing) sequence, not the out-of-order one.
+        self::assertStringContainsString('"opt_start_seq":2', $written);
+    }
+
+    /**
+     * Verifies a stale delivery from a previous (deleted) consumer instance — arriving on the reused
+     * deliver inbox after a recreate — is ignored by consumer-instance name, so it cannot be
+     * mis-delivered or trigger a spurious recreate even when its consumer sequence matches (#86).
+     */
+    public function testSubscribeOrderedConsumerIgnoresStaleDeliveryFromPreviousConsumerInstance(): void
+    {
+        $createReply = json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => 'ORD1',
+            'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen((string) $createReply), (string) $createReply),
+            // In-order delivery from the current consumer ORD1 (consumer seq 1 -> expected next 2).
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
+            // A STALE delivery from a DIFFERENT consumer instance (ORDX) whose consumer seq (2) would
+            // otherwise match the expected next sequence and be (wrongly) delivered/advanced.
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORDX.1.2.2.0.0 5\r\nstale\r\n",
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        }, 'events.>')->await();
+
+        for ($i = 0; $i < 4; $i++) {
+            $client->processIncoming()->await();
+        }
+
+        // Only the in-order ORD1 message is delivered; the stale ORDX delivery is ignored.
+        self::assertSame(['msg1'], $received);
+
+        $written = implode('', $transport->writes);
+        // The stale delivery did not trigger a recreate (no delete, only the initial create).
+        self::assertSame(0, substr_count($written, '$JS.API.CONSUMER.DELETE.EVENTS'));
+        self::assertSame(1, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
+    }
+
+    /**
+     * Verifies an idle heartbeat whose Nats-Last-Consumer is ahead of what was processed triggers a
+     * proactive recreate from the last in-order point — detecting a missed TAIL of deliveries that no
+     * further message would otherwise expose (#86).
+     */
+    public function testSubscribeOrderedConsumerRecreatesOnHeartbeatTailGap(): void
+    {
+        $createReply = static fn (string $name): string => json_encode([
+            'stream_name' => 'EVENTS',
+            'name' => $name,
+            'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
+        ], JSON_THROW_ON_ERROR);
+        $deleteReply = '{"success":true}';
+        // Heartbeat reporting the server delivered up to consumer seq 3, while we only processed seq 1.
+        $hbHeaders = NatsHeaders::toWireBlock([
+            'Status' => '100',
+            'Description' => 'Idle Heartbeat',
+            'Nats-Last-Consumer' => '3',
+        ]);
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply('ORD1')), $createReply('ORD1')),
+            // In-order msg1 (consumer seq 1, stream seq 1) -> expected next 2, lastStreamSeq 1.
+            "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
+            // Idle heartbeat: last delivered consumer seq 3 > processed (1) -> tail gap -> recreate.
+            sprintf("HMSG deliver.ord 2 %d %d\r\n%s\r\n", strlen($hbHeaders), strlen($hbHeaders), $hbHeaders),
+            sprintf("MSG _INBOX.b 3 %d\r\n%s\r\n", strlen($deleteReply), $deleteReply),
+            sprintf("MSG _INBOX.c 4 %d\r\n%s\r\n", strlen($createReply('ORD2')), $createReply('ORD2')),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $received = [];
+        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        }, 'events.>')->await();
+
+        for ($i = 0; $i < 6; $i++) {
+            $client->processIncoming()->await();
+        }
+
+        self::assertSame(['msg1'], $received);
+
+        $written = implode('', $transport->writes);
+        // Exactly one recreate from the last in-order point (stream seq 1 + 1 = 2).
+        self::assertSame(1, substr_count($written, '$JS.API.CONSUMER.DELETE.EVENTS.ORD1'));
+        self::assertSame(2, substr_count($written, '$JS.API.CONSUMER.CREATE.EVENTS'));
         self::assertStringContainsString('"opt_start_seq":2', $written);
     }
 
@@ -3572,71 +3708,6 @@ final class JetStreamContextTest extends TestCase
         } finally {
             self::assertCount(2, $transport->writes);
         }
-    }
-
-    /**
-     * Verifies extractConsumerSequence() returns null when replyTo is null (line 1976).
-     */
-    public function testExtractConsumerSequenceReturnsNullForNullReplyTo(): void
-    {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
-        $js = $client->jetStream();
-
-        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
-
-        $message = new NatsMessage('events.x', 1, null, 'body');
-
-        self::assertNull($method->invoke($js, $message));
-    }
-
-    /**
-     * Verifies extractConsumerSequence() returns null when the reply subject does not start with
-     * '$JS.ACK' (line 1981 — non-ACK prefix).
-     */
-    public function testExtractConsumerSequenceReturnsNullForNonAckPrefix(): void
-    {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
-        $js = $client->jetStream();
-
-        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
-
-        $wrongPrefix = new NatsMessage('events.x', 1, '$JS.FC.ORDERS.token', 'body');
-
-        self::assertNull($method->invoke($js, $wrongPrefix));
-    }
-
-    /**
-     * Verifies extractConsumerSequence() returns null for an ACK subject with an unexpected
-     * number of tokens (line 1989 — default => null in the match).
-     */
-    public function testExtractConsumerSequenceReturnsNullForInvalidTokenCount(): void
-    {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
-        $js = $client->jetStream();
-
-        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
-
-        // 5-token ACK subject — not 9, 11, or 12.
-        $shortReply = new NatsMessage('events.x', 1, '$JS.ACK.ORDERS.CONS.1', 'body');
-
-        self::assertNull($method->invoke($js, $shortReply));
-    }
-
-    /**
-     * Verifies extractConsumerSequence() returns null when the consumer-sequence token is not a
-     * valid integer (line 1993 — $consumerSeqIndex !== null but filter_var fails).
-     */
-    public function testExtractConsumerSequenceReturnsNullForNonIntValue(): void
-    {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
-        $js = $client->jetStream();
-
-        $method = new \ReflectionMethod($js, 'extractConsumerSequence');
-
-        // 9-token form; consumer-seq index is 6; token at index 6 is "NaN".
-        $nonInt = new NatsMessage('events.x', 1, '$JS.ACK.ORDERS.CONS.1.42.NaN.123.0', 'body');
-
-        self::assertNull($method->invoke($js, $nonInt));
     }
 
     /**

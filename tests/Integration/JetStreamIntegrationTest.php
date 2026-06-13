@@ -958,6 +958,66 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
+     * Verifies an ordered consumer started AFTER messages already exist replays the full backlog of
+     * matching messages in order and de-duplicated, over a stream whose matching messages have
+     * non-contiguous stream sequences (interleaved with non-matching subjects). This exercises the
+     * same in-order replay path the gap-recovery recreate uses (by-sequence replay over a filtered
+     * consumer), validated end-to-end against a live server (#87). A genuine mid-stream delivery gap
+     * cannot be forced from the client against a healthy server, so the recreate trigger itself is
+     * covered by the unit tests in JetStreamContextTest.
+     */
+    public function testJetStreamOrderedConsumerReplaysPreExistingBacklogInOrder(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subjectPrefix = 'it.' . strtolower($stream);
+        $matchingSubject = $subjectPrefix . '.match';
+        $nonMatchingSubject = $subjectPrefix . '.other';
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subjectPrefix . '.>'])->await();
+
+        // Publish a backlog BEFORE the ordered consumer exists: matching messages interleaved with
+        // non-matching ones, so the matching set has non-contiguous stream sequences.
+        $expected = [];
+        for ($i = 1; $i <= 8; $i++) {
+            $js->publish($nonMatchingSubject, '{"event":"other"}')->await();
+            $payload = sprintf('{"event":"backlog-%d"}', $i);
+            $expected[] = $payload;
+            $js->publish($matchingSubject, $payload)->await();
+        }
+
+        $received = [];
+        $sid = $js->subscribeOrderedConsumer(
+            $stream,
+            static function (NatsMessage $message) use (&$received): void {
+                $received[] = $message->payload;
+            },
+            $matchingSubject,
+        )->await();
+
+        $cancellation = new TimeoutCancellation(10.0);
+        try {
+            while (count($received) < count($expected)) {
+                $client->processIncoming($cancellation)->await();
+            }
+        } catch (CancelledException) {
+        }
+
+        // The whole backlog replayed in order, complete, with no duplicates.
+        self::assertSame($expected, $received);
+        self::assertSame($received, array_values(array_unique($received)));
+
+        $client->unsubscribe($sid)->await();
+        $js->deleteStream($stream)->await();
+        $client->disconnect()->await();
+    }
+
+    /**
      * Verifies ephemeral pull consumer can fetch and ACK a live message.
      */
     public function testJetStreamEphemeralPullConsumerFetchAndAck(): void
