@@ -310,7 +310,38 @@ final class Service
                                 return;
                             }
 
-                            $this->publishResponse($message->replyTo, $response, $errorHeaders);
+                            try {
+                                $this->publishResponse($message->replyTo, $response, $errorHeaders);
+                            } catch (\JsonException $e) {
+                                // The response cannot be JSON-encoded (e.g. a handler returned binary /
+                                // non-UTF-8 data, or NAN/INF). A JsonException here would otherwise escape
+                                // the shared dispatch loop and abort delivery for every subscription on the
+                                // connection (#97). Treat it like an internal fault: record it and reply
+                                // with a controlled 500, mirroring the handler-exception path. The error
+                                // payload is plain strings, so it always encodes.
+                                $endpoint->errors++;
+                                $endpoint->lastError = $e->getMessage();
+                                $this->notifyObservers('request_error', $endpoint, $message, $context + [
+                                    'code' => 'HANDLER_ERROR',
+                                    'error' => $e->getMessage(),
+                                ]);
+
+                                try {
+                                    $this->publishResponse(
+                                        $message->replyTo,
+                                        $this->errorPayload(
+                                            code: 'HANDLER_ERROR',
+                                            message: 'Internal server error',
+                                            correlationId: is_string($context['correlation_id'] ?? null)
+                                                ? $context['correlation_id']
+                                                : null,
+                                        ),
+                                        $this->serviceErrorHeaders('500', 'Internal server error'),
+                                    );
+                                } catch (\Throwable) {
+                                    // Best effort: never let a reply-publish failure escape the loop.
+                                }
+                            }
                         },
                         $endpoint->queueGroup,
                     )->await();

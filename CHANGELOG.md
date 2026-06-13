@@ -38,6 +38,12 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   `ProtocolException` that the connection turned into a reconnect, so the message was effectively
   undeliverable. The parser bound is raised from INFO (`max_payload` + a header-block margin, never below
   the historical 8 MiB), with a generous 64 MiB fallback when `max_payload` is unknown. (#94)
+- `[bugfix]` Services: the endpoint success path no longer lets a `json_encode` failure escape the shared
+  dispatch loop. A handler returning a value that cannot be JSON-encoded (binary / non-UTF-8 data, NAN/INF)
+  previously threw a `JsonException` out of the subscription callback, aborting delivery for every
+  subscription on the connection. The response publish is now guarded: an encode failure is recorded and
+  answered with a controlled `HANDLER_ERROR`/500 reply (mirroring the handler-exception path), so one
+  endpoint returning binary data can no longer take down the whole client's dispatch. (#97)
 - `[bugfix]` KeyValue: `history()` no longer uses the throwing `messageMetadata()` path. A delivery
   lacking a parseable `$JS.ACK` reply subject (a control / non-conformant frame) is now skipped instead of
   throwing out of the shared dispatch loop — which would tear down delivery for every subscription on the
