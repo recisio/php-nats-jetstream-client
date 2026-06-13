@@ -5,6 +5,7 @@
   "license": "BSD-3-Clause",
   "require": {
     "php": "^8.2",
+    "ext-openssl": "*",
     "amphp/amp": "^3.1",
     "amphp/socket": "^2.3",
     "psr/log": "^3.0"
@@ -14,6 +15,10 @@
     "phpunit/phpunit": "^11.0",
     "phpstan/phpstan": "^2.1",
     "friendsofphp/php-cs-fixer": "^3.64"
+  },
+  "suggest": {
+    "ext-sodium": "Required for NKey / JWT nonce-signed authentication (NkeySeedSigner).",
+    "ext-zlib": "Required for WebSocket permessage-deflate compression (ws:// / wss:// with compression enabled)."
   },
   "autoload": {
     "psr-4": {

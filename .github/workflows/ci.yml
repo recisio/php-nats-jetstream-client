@@ -24,7 +24,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php-version }}
-          extensions: sockets
+          extensions: openssl, sodium, zlib
       - uses: ramsey/composer-install@v3
       - name: Static Analysis
         run: composer stan
@@ -43,7 +43,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.5"
-          extensions: sockets, xdebug
+          extensions: openssl, sodium, zlib, xdebug
       - uses: ramsey/composer-install@v3
       - name: JWT Fixtures
         run: composer fixture:jwt
