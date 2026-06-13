@@ -2,7 +2,7 @@
   "name": "idct/php-nats-jetstream-client",
   "description": "Async-first NATS + JetStream client for PHP 8.2+",
   "type": "library",
-  "license": "MIT",
+  "license": "BSD-3-Clause",
   "require": {
     "php": "^8.2",
     "amphp/amp": "^3.1",

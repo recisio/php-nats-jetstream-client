@@ -74,6 +74,7 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Testing](#testing)
 - [Contributing and contributors](#contributing-and-contributors)
 - [Current Test Baseline](#current-test-baseline)
+- [License](#license)
 
 ## Features
 
@@ -2079,3 +2080,7 @@ Many thanks for all the contributions:
 - Integration tests also cover local token auth, username/password auth, TLS handshake-first auth including strict peer-validation, hostname mismatch, and missing-client-cert failures, resolver-backed JWT auth, and standalone NKey auth.
 - Static analysis runs with PHPStan level 8.
 - Combined unit + integration line coverage is ~98%, enforced at a 97% floor in CI (the build fails below it).
+
+## License
+
+This project is licensed under the **BSD 3-Clause License** — see the [LICENSE](LICENSE) file for the full text. Copyright © IDCT — Bartosz Pachołek.
