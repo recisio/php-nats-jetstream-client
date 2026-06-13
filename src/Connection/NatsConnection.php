@@ -983,12 +983,18 @@ final class NatsConnection
     }
 
     /**
-     * Determines whether the connection must be upgraded to TLS, based on the configured option,
-     * the server URL scheme, and the server's advertised TLS requirement.
+     * Determines whether the connection must be upgraded to TLS, based on the configured options
+     * (explicit {@see NatsOptions::$tlsRequired} or a supplied {@see NatsOptions::$tlsContext}), the
+     * server URL scheme, and the server's advertised TLS requirement.
+     *
+     * A configured `tlsContext` implies TLS-required (per its documented contract): without this, a
+     * `tlsContext`-only configuration over a `nats://` DSN to a server that does not advertise
+     * `tls_required` would skip the upgrade and write CONNECT (credentials) in cleartext.
      */
     private function requiresTls(string $server, ServerInfo $serverInfo): bool
     {
         return $this->options->tlsRequired
+            || $this->options->tlsContext !== null
             || str_starts_with($server, 'tls://')
             || $serverInfo->tlsRequired;
     }

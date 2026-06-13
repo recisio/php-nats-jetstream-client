@@ -17,6 +17,15 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+### Fixed
+
+- `[bugfix]` TLS: a configured `NatsOptions::$tlsContext` now correctly forces the TLS upgrade, matching
+  its documented "treated as TLS-required" contract. Previously `requiresTls()` ignored `tlsContext`, so
+  a `tlsContext`-only configuration over a `nats://` DSN to a server that did not advertise `tls_required`
+  connected in plaintext and wrote CONNECT (carrying credentials) in cleartext. The credentials fail-safe
+  now also covers this path, so a `tlsContext` whose handshake cannot establish TLS fails fast instead of
+  leaking credentials. (#95)
+
 ## [2.2.0] - 2026-06-10
 
 ### Added

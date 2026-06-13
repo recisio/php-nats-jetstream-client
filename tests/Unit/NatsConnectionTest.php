@@ -11,6 +11,7 @@ use Amp\DeferredFuture;
 use Amp\Future;
 use IDCT\NATS\Connection\ConnectionStats;
 use IDCT\NATS\Connection\Enum\ConnectionEvent;
+use Amp\Socket\ClientTlsContext;
 use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Connection\NatsConnection;
@@ -3569,6 +3570,72 @@ final class NatsConnectionTest extends TestCase
 
         self::assertSame(ConnectionState::Open, $connection->state());
         self::assertSame(0, $transport->upgradeTlsCalls);
+    }
+
+    public function testTlsContextForcesUpgradeEvenWhenServerDoesNotAdvertiseTlsRequired(): void
+    {
+        // #95: a configured tlsContext is documented to imply TLS-required. The server's INFO does NOT
+        // advertise tls_required and the DSN is plaintext (nats://), yet the client must still upgrade
+        // to TLS before writing CONNECT (which carries credentials) — otherwise credentials leak in
+        // cleartext despite the user having configured a TLS context.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->canUpgrade = true;
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                tlsRequired: false,
+                tlsHandshakeFirst: false,
+                tlsContext: new ClientTlsContext(),
+                reconnectEnabled: false,
+                pingIntervalSeconds: 0,
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        self::assertSame(ConnectionState::Open, $connection->state());
+        self::assertSame(1, $transport->upgradeTlsCalls);
+        self::assertTrue($transport->tlsActive());
+        self::assertStringContainsString('CONNECT ', implode('', $transport->writes));
+    }
+
+    public function testTlsContextWithoutEstablishedTlsFailsBeforeWritingConnect(): void
+    {
+        // #95: when a tlsContext is configured but the handshake cannot establish TLS (canUpgrade=false),
+        // the credentials fail-safe must fire and CONNECT/PING must NOT be written over the plaintext
+        // socket — even though neither tlsRequired nor the server's INFO requested TLS.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->canUpgrade = false;
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                tlsRequired: false,
+                tlsHandshakeFirst: false,
+                tlsContext: new ClientTlsContext(),
+                reconnectEnabled: false,
+                pingIntervalSeconds: 0,
+            ),
+            $transport,
+        );
+
+        try {
+            $connection->connect()->await();
+            self::fail('Expected a TLS ConnectionException');
+        } catch (ConnectionException $e) {
+            self::assertStringContainsStringIgnoringCase('tls', $e->getMessage());
+        }
+
+        $writes = implode('', $transport->writes);
+        self::assertStringNotContainsString('CONNECT ', $writes);
+        self::assertStringNotContainsString('PING', $writes);
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        self::assertSame(1, $transport->upgradeTlsCalls);
     }
 
     // ─── New coverage additions ──────────────────────────────────────────
