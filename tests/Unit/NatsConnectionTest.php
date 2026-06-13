@@ -1260,6 +1260,107 @@ final class NatsConnectionTest extends TestCase
         self::assertSame("SUB updates 1\r\n", $transport->writes[5]);
     }
 
+    /**
+     * Verifies a recovery that races a user disconnect() does NOT re-open the connection: once
+     * close-intent is set, recoverConnection() is a no-op even though a healthy server is reachable
+     * (#84). Simulates the race by invoking recovery (as an in-flight heartbeat/read path would) after
+     * disconnect() has signalled close-intent.
+     */
+    public function testDisconnectIsNotReversedByAnInFlightRecovery(): void
+    {
+        $events = [];
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+                [
+                    // A healthy server a reconnect WOULD latch onto if recovery were allowed to run.
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: true,
+                maxReconnectAttempts: 3,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                pingIntervalSeconds: 0,
+                connectionListener: static function (ConnectionEvent $e) use (&$events): void {
+                    $events[] = $e;
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+        $connection->disconnect()->await();
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+
+        // The race outcome: a recovery is triggered around disconnect time. It must be a no-op.
+        (new \ReflectionMethod(NatsConnection::class, 'recoverConnection'))->invoke($connection);
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        self::assertNotContains(ConnectionEvent::Reconnected, $events);
+        // The second server was never latched onto, and no extra connect happened.
+        self::assertSame('S1', $connection->serverInfo()?->serverId);
+        self::assertCount(1, $transport->connectCalls);
+    }
+
+    /**
+     * Verifies performRecovery() itself bails when close-intent is set (defense in depth for the case
+     * where recovery had already started before disconnect()/drain()), without reopening (#84).
+     */
+    public function testPerformRecoveryBailsWhenClosing(): void
+    {
+        $events = [];
+        $transport = new FlakyTransport(
+            readQueuesByConnection: [
+                [
+                    'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+                [
+                    'INFO {"server_id":"S2","server_name":"n2","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+                    "PONG\r\n",
+                ],
+            ],
+            connectFailures: 0,
+            readFailures: 0,
+        );
+
+        $connection = new NatsConnection(
+            new NatsOptions(
+                reconnectEnabled: true,
+                maxReconnectAttempts: 3,
+                reconnectDelayMs: 1,
+                reconnectJitterMs: 0,
+                pingIntervalSeconds: 0,
+                connectionListener: static function (ConnectionEvent $e) use (&$events): void {
+                    $events[] = $e;
+                },
+            ),
+            $transport,
+        );
+        $connection->connect()->await();
+
+        // Simulate close-intent already latched (as disconnect()/drain() would set it).
+        (new \ReflectionProperty(NatsConnection::class, 'closing'))->setValue($connection, true);
+
+        (new \ReflectionMethod(NatsConnection::class, 'performRecovery'))->invoke($connection);
+
+        self::assertSame(ConnectionState::Closed, $connection->state());
+        self::assertNotContains(ConnectionEvent::Reconnected, $events);
+        self::assertSame('S1', $connection->serverInfo()?->serverId);
+        self::assertCount(1, $transport->connectCalls);
+    }
+
     public function testCallbackMayPublishDuringPostReconnectDeliveryWithoutDeadlock(): void
     {
         // A message buffered during reconnect replay is now delivered AFTER recovery exits its critical

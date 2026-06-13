@@ -78,6 +78,12 @@ final class NatsConnection
     /** Guards against two overlapping socket reads (user read vs heartbeat self-read). */
     private bool $readInProgress = false;
     /**
+     * Set by disconnect()/drain() to signal user close-intent. The reconnect paths bail when it is set
+     * so an in-flight heartbeat/read-path recovery cannot re-open a connection the user just closed
+     * (#84). Cleared on a fresh connect().
+     */
+    private bool $closing = false;
+    /**
      * Publish callback bound onto every delivered {@see NatsMessage} so it can reply to its own
      * reply subject via {@see NatsMessage::respond()}. Built once and reused for all messages.
      *
@@ -239,6 +245,9 @@ final class NatsConnection
                 return;
             }
 
+            // A fresh connect re-arms the recovery paths after a prior disconnect()/drain() (#84).
+            $this->closing = false;
+
             try {
                 $this->connectOnce();
                 $this->emitEvent(ConnectionEvent::Connected);
@@ -279,6 +288,9 @@ final class NatsConnection
     public function disconnect(): Future
     {
         return async(function (): void {
+            // Signal close-intent BEFORE closing the socket so an in-flight reconnect/heartbeat read
+            // cannot race to re-open the connection after the user asked to close it (#84).
+            $this->closing = true;
             $this->cancelPingTimer();
             $this->transport->close()->await();
             $this->state = ConnectionState::Closed;
@@ -299,6 +311,8 @@ final class NatsConnection
             }
 
             $this->state = ConnectionState::Draining;
+            // Close-intent: a recovery triggered mid-drain must not re-open the connection (#84).
+            $this->closing = true;
             $this->cancelPingTimer();
 
             // Send UNSUB for all active subscriptions so no new messages arrive.
@@ -1109,6 +1123,12 @@ final class NatsConnection
      */
     private function recoverConnection(): void
     {
+        // The user asked to close (disconnect/drain): never start or join a reconnect that would
+        // re-open the connection (#84).
+        if ($this->closing) {
+            return;
+        }
+
         $inProgress = $this->reconnecting;
         if ($inProgress !== null) {
             $inProgress->getFuture()->await();
@@ -1182,6 +1202,13 @@ final class NatsConnection
      */
     private function performRecovery(): void
     {
+        // User close-intent set before/while recovery began: do not re-open (#84).
+        if ($this->closing) {
+            $this->state = ConnectionState::Closed;
+
+            return;
+        }
+
         if (!$this->options->reconnectEnabled) {
             $this->state = ConnectionState::Closed;
             $this->emitEvent(ConnectionEvent::Closed);
@@ -1195,6 +1222,13 @@ final class NatsConnection
         $lastError = null;
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            // disconnect()/drain() may have been called between attempts: stop reopening (#84).
+            if ($this->closing) {
+                $this->state = ConnectionState::Closed;
+
+                return;
+            }
+
             try {
                 $this->transport->close()->await();
             } catch (\Throwable) {
@@ -1203,6 +1237,20 @@ final class NatsConnection
 
             try {
                 $this->connectOnce();
+
+                // The user closed while this attempt was connecting: tear the new socket back down
+                // instead of flipping to Open/Reconnected (#84).
+                if ($this->closing) {
+                    try {
+                        $this->transport->close()->await();
+                    } catch (\Throwable) {
+                        // Already gone; the Closed state below is what matters.
+                    }
+                    $this->state = ConnectionState::Closed;
+
+                    return;
+                }
+
                 $this->resubscribeAll();
                 $this->reconnectCount++;
                 $this->flushReconnectBuffer();
