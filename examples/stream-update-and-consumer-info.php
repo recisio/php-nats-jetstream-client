@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Stream Update and Consumer Info — reconfigure + introspect.
+ *
+ * Widens a stream's accepted subjects with updateStream(), creates a consumer, and
+ * reads it back with getConsumer() to inspect its ConsumerInfo.
+ *
+ * Mirrors the README "JetStream Stream Update and Consumer Info" example. Run: php examples/stream-update-and-consumer-info.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

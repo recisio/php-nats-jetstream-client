@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Scheduled Publish (@at) — deliver a message at a future time.
+ *
+ * Creates a schedule-enabled stream and uses publishScheduled() with Schedule::at() to
+ * queue a delayed delivery, then polls the target subject (via Direct Get) until the
+ * scheduled message lands. Requires allow_msg_schedules (and allow_msg_ttl for a TTL).
+ *
+ * Mirrors the README "Scheduled Publish Example (@at)" example. Run: php examples/scheduled-publish.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

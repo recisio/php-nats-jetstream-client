@@ -21,6 +21,9 @@ composer fixture:jwt            # JWT + creds fixtures (auth-jwt-nkey, auth-cred
 NATS_URL=nats://127.0.0.1:14222 bash scripts/run-examples.sh
 ```
 
+CI runs this same set as a required gate (the `examples` job) with `EXAMPLES_STRICT=1`, which treats a
+skipped example as a failure — so every example must actually execute and pass.
+
 Every base example reads `NATS_URL` (default `nats://127.0.0.1:4222`). The auth/WebSocket examples read
 their own variant-server env vars (`NATS_TOKEN_URL`, `NATS_USERPASS_URL`, `NATS_JWT_URL`, `NATS_NKEY_URL`,
 `NATS_TLS_URL`, `NATS_WS_URL`), each defaulting to the dev docker-compose port.
@@ -82,8 +85,9 @@ These need the matching variant server from `docker compose up -d`:
 - `auth-token.php` — token auth (`nats-token`, default `:14223`).
 - `auth-userpass.php` — username/password auth (`nats-userpass`, default `:14224`).
 - `auth-jwt-nkey.php` — JWT + NKey auth (`nats-jwt`, default `:14227`; needs `composer fixture:jwt`).
-- `auth-standalone-nkey.php` — standalone NKey challenge auth (`nats-nkey`, default `:14226`). Skips unless
-  `NATS_NKEY_SEED` is set to a seed the server trusts (no seed fixture is shipped for this server).
+- `auth-standalone-nkey.php` — standalone NKey challenge auth (`nats-nkey`, default `:14226`). Run via
+  `scripts/run-examples.sh` (it exports the dev seed trusted by `build/nats/nkey.conf`); run directly it
+  skips unless `NATS_NKEY_SEED` is set to a seed the server trusts.
 - `auth-tls.php` — mutual TLS (`nats-tls`, default `:14225`; uses `build/tls/*` fixtures).
 - `auth-credentials-file.php` — `.creds` file auth (needs `composer fixture:jwt`).
 - `websocket-transport.php` — NATS over WebSocket (`nats-ws`, default `ws://…:14229`).

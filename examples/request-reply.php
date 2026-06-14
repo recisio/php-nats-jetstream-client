@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Request / Reply — one request, the first reply.
+ *
+ * Stands up a local echo responder, then uses request() to send a message and
+ * await the first reply, pumping incoming frames concurrently so the responder
+ * handler can run on the same connection.
+ *
+ * Mirrors the README "Request/Reply" example. Run: php examples/request-reply.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

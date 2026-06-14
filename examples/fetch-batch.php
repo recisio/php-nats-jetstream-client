@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Fetch Batch — pull several messages in one request.
+ *
+ * Publishes several messages, then retrieves up to N of them in a single pull with
+ * fetchBatch() (bounded by a pull expiry) and acks each one.
+ *
+ * Mirrors the README "Fetch Batch" example. Run: php examples/fetch-batch.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

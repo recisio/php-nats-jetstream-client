@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Stream Message Get — fetch a stored message by sequence.
+ *
+ * Publishes a message, reads the stream sequence from its PubAck, and fetches the
+ * stored message back by that sequence with getStreamMessage().
+ *
+ * Mirrors the README "Stream Message Get" example. Run: php examples/stream-message-get.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

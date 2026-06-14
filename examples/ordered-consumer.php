@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Ordered Consumer — gap-free, strictly in-order delivery.
+ *
+ * Uses subscribeOrderedConsumer() (an ephemeral push consumer with flow control, idle
+ * heartbeat and ack_policy=none). The helper transparently recreates the consumer on a
+ * sequence gap so delivery stays strictly in order.
+ *
+ * Mirrors the README "Ordered Consumer" example. Run: php examples/ordered-consumer.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * JetStream Stream and Durable Consumer — the basic JetStream setup.
+ *
+ * Creates a stream and a durable (explicit-ack) consumer, publishes a message, and
+ * reads the resulting PubAck (the stream it landed in and its stream sequence).
+ *
+ * Mirrors the README "JetStream Stream and Durable Consumer" example. Run: php examples/jetstream-stream-and-consumer.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

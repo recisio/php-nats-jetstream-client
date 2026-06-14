@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Republish and Subject Transform — stream-level message routing.
+ *
+ * Creates streams configured with Republish (including a headers-only variant) to mirror
+ * messages onto another subject, and with SubjectTransform to remap subjects on ingest.
+ *
+ * Mirrors the README "Republish and Subject Transform" example. Run: php examples/republish-and-subject-transform.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

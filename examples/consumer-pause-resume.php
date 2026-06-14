@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Consumer Pause / Resume — temporarily stop delivery.
+ *
+ * Pauses a consumer until a future RFC 3339 instant with pauseConsumer() (a dynamic
+ * +1h time keeps the example re-runnable), then clears the pause with resumeConsumer().
+ *
+ * Mirrors the README "Consumer Pause/Resume" example. Run: php examples/consumer-pause-resume.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

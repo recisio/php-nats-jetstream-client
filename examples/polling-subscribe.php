@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Polling Subscribe — synchronous consumption with SubscriptionQueue.
+ *
+ * Uses subscribeQueue() to get a SubscriptionQueue, then pulls messages with the
+ * blocking next() (single, returns null on timeout) and fetchAll() (batch within
+ * the configured timeout window).
+ *
+ * Mirrors the README "Polling Subscribe (SubscriptionQueue)" example. Run: php examples/polling-subscribe.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

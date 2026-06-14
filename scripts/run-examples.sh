@@ -13,18 +13,35 @@
 #
 # For just the core examples, `docker compose up -d nats` is enough; the auth/WebSocket ones will then fail
 # to connect (expected without the variant servers).
+#
+# EXAMPLES_STRICT=1 (used in CI) makes a skipped example fail the run too, so the gate enforces that every
+# example actually executes and passes. EXAMPLE_TIMEOUT overrides the per-example timeout (seconds).
 set -uo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
 
 export NATS_URL="${NATS_URL:-nats://127.0.0.1:4222}"
+
+# Dev-stack standalone-NKey seed: the seed whose public key build/nats/nkey.conf trusts (the same dev
+# seed the integration suite defaults). Lets auth-standalone-nkey.php run as a real functional test
+# instead of self-skipping. Override (or unset and re-export empty) to point at a different nkey server.
+export NATS_NKEY_SEED="${NATS_NKEY_SEED:-SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY}"
+
 timeout_s="${EXAMPLE_TIMEOUT:-60}"
+
+# Strict mode (CI): a skipped example counts as a failure, so the gate enforces that every example
+# actually runs and passes — not just that none failed outright. Truthy values: 1/true/yes/on.
+strict="${EXAMPLES_STRICT:-0}"
+case "${strict,,}" in 1|true|yes|on) strict=1 ;; *) strict=0 ;; esac
+strict_label=""
+[ "$strict" = "1" ] && strict_label=" (strict)"
 
 pass=0
 skip=0
 fail=0
 failed=""
+skipped=""
 
 for file in examples/*.php; do
   name="$(basename "$file" .php)"
@@ -38,6 +55,7 @@ for file in examples/*.php; do
     printf 'FAIL  %-34s %s\n' "$name" "$(printf '%s\n' "$out" | tail -1)"
   elif printf '%s' "$summary" | grep -q '^SKIP'; then
     skip=$((skip + 1))
+    skipped="$skipped $name"
     printf 'SKIP  %-34s %s\n' "$name" "$summary"
   else
     pass=$((pass + 1))
@@ -46,9 +64,17 @@ for file in examples/*.php; do
 done
 
 echo
-echo "examples: ${pass} passed, ${skip} skipped, ${fail} failed"
+echo "examples: ${pass} passed, ${skip} skipped, ${fail} failed${strict_label}"
 
+status=0
 if [ -n "$failed" ]; then
   echo "failed:$failed"
-  exit 1
+  status=1
 fi
+
+if [ "$strict" = "1" ] && [ -n "$skipped" ]; then
+  echo "skipped (strict mode treats these as failures):$skipped"
+  status=1
+fi
+
+exit "$status"

@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Pull Consumer Batching / Iteration — the fluent pull iterator.
+ *
+ * Uses the fluent pullConsumer() builder (setBatching / setExpiresMs / setIterations)
+ * with handle() to process messages in bounded batches across a bounded number of
+ * pull iterations; the iterator wraps fetchBatch().
+ *
+ * Mirrors the README "Pull Consumer Batching/Iteration" example. Run: php examples/pull-consumer-batching-iteration.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

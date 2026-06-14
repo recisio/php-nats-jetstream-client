@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Connection Statistics and RTT — client counters + latency.
+ *
+ * Reads the synchronous statistics() snapshot (in/out message + byte counts and
+ * reconnects) and measures round-trip latency to the server with rtt().
+ *
+ * Mirrors the README "Connection Statistics and RTT" example. Run: php examples/connection-stats-rtt.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

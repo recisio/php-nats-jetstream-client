@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * WebSocket Transport — NATS over a ws:// connection.
+ *
+ * Connects with WebSocketTransport (negotiating permessage-deflate compression and
+ * sending custom upgrade headers) and round-trips a message to prove the WebSocket
+ * transport carries real traffic.
+ *
+ * Mirrors the README "WebSocket Transport" example. Run: php examples/websocket-transport.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

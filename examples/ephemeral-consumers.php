@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * JetStream Ephemeral Consumers — server-named, auto-cleaned consumers.
+ *
+ * Creates an ephemeral PULL consumer (server-assigned name) and fetches/acks from it,
+ * then runs an ephemeral PUSH consumer via subscribeEphemeralPushConsumer(). Both are
+ * auto-removed by the server when the client goes away.
+ *
+ * Mirrors the README "JetStream Ephemeral Consumers" example. Run: php examples/ephemeral-consumers.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

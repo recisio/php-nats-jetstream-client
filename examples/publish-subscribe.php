@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Publish / Subscribe — the most basic core messaging round-trip.
+ *
+ * Subscribes to a subject, publishes one JSON message to it, then drives
+ * processIncoming() until the subscription callback receives the message.
+ * Demonstrates subscribe()/publish() and the manual read pump on one connection.
+ *
+ * Mirrors the README "Connect and Publish/Subscribe" example. Run: php examples/publish-subscribe.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

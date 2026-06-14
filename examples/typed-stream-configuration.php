@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Typed Stream Configuration — configure with enums, not magic strings.
+ *
+ * Creates a stream and consumer using the typed configuration enums (RetentionPolicy,
+ * StorageBackend, DiscardPolicy, DeliverPolicy, AckPolicy, ReplayPolicy) instead of
+ * raw string values.
+ *
+ * Mirrors the README "Typed Stream Configuration" example. Run: php examples/typed-stream-configuration.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

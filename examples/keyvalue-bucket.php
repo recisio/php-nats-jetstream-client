@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * KeyValue Bucket — the JetStream KV store.
+ *
+ * Demonstrates put / get / optimistic-concurrency update / getAll / getStatus / delete /
+ * purge on a KV bucket, plus a live watch() that observes updates and their revisions.
+ *
+ * Mirrors the README "KeyValue Bucket" example. Run: php examples/keyvalue-bucket.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

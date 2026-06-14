@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Pull Consumer (NAK / Delayed NAK / TERM / In-Progress) — redelivery control.
+ *
+ * On a pulled message, demonstrates inProgress() (extend the ack deadline), nak()
+ * (redeliver now), nakWithDelay() (redeliver after a delay), and term() (stop
+ * redelivery entirely).
+ *
+ * Mirrors the README "JetStream Pull Consumer (NAK, Delayed NAK, TERM, In-Progress)" example. Run: php examples/pull-consumer-nak-term.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

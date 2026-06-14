@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Services Framework — a NATS micro-service.
+ *
+ * Builds a service exposing a flat endpoint and a grouped endpoint, calls both, and
+ * queries the spec discovery channel ($SRV.PING.<name>). The service shares the
+ * connection, so incoming frames are pumped concurrently while requesting.
+ *
+ * Mirrors the README "Services Framework" example. Run: php examples/services-framework.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

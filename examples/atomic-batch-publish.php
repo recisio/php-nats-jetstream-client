@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Atomic Batch Publish — commit many messages atomically (NATS 2.12+).
+ *
+ * Stages several messages with the fluent $js->batch()->add(...) API and commits them
+ * atomically in one operation. Requires a stream created with allow_atomic; on a
+ * pre-2.12 server it skips cleanly via UnsupportedFeatureException.
+ *
+ * Mirrors the README "Atomic Batch Publish" example. Run: php examples/atomic-batch-publish.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

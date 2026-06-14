@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * JetStream Push Consumer (Durable) — server-pushed delivery.
+ *
+ * Uses subscribePushConsumer(), which creates the durable consumer and transparently
+ * handles JetStream flow-control / idle-heartbeat control frames, invoking the handler
+ * once per user message; the message is acked in the handler.
+ *
+ * Mirrors the README "JetStream Push Consumer (Durable)" example. Run: php examples/push-consumer-durable.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

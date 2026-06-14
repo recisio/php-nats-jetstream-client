@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Object Store Streaming to Callback — download chunk-by-chunk.
+ *
+ * Uses getToCallback() to stream a stored object to a callback one chunk at a time
+ * (the whole object is never buffered in memory) and verifies the SHA-256 digest
+ * incrementally after the final chunk.
+ *
+ * Mirrors the README "Object Store Streaming to Callback" example. Run: php examples/object-store-streaming-to-callback.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

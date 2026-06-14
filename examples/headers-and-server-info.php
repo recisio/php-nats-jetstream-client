@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Headers and Server Info — NATS headers + server metadata.
+ *
+ * Publishes a message carrying NATS headers, runs an echo responder that reflects a
+ * request-id header back via requestWithHeaders(), and reads the negotiated
+ * serverInfo().
+ *
+ * Mirrors the README "Headers and Server Info" example. Run: php examples/headers-and-server-info.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

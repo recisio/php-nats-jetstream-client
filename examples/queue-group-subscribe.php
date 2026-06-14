@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Queue Group Subscribe — load-balanced delivery across workers.
+ *
+ * Subscribes with a queue group so the server delivers each message to exactly one
+ * member of the group, then publishes a message and drives delivery to a worker.
+ *
+ * Mirrors the README "Queue Group Subscribe" example. Run: php examples/queue-group-subscribe.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
