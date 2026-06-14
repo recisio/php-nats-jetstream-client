@@ -1948,8 +1948,36 @@ final class JetStreamContextTest extends TestCase
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
-        $this->expectExceptionMessage('Stream subjects must not be empty unless mirror configuration is provided');
+        $this->expectExceptionMessage('Stream subjects must not be empty unless mirror or sources configuration is provided');
         $client->jetStream()->createStream('test', [])->await();
+    }
+
+    public function testCreateStreamAllowsSourcesWithoutSubjects(): void
+    {
+        // A pure aggregate stream ingests only from sources and legitimately has no subjects of its own;
+        // createStream() must not reject empty subjects when a non-empty sources config is provided.
+        $streamPayload = '{"config":{"name":"AGG","subjects":[],"sources":[{"name":"ORDERS"},{"name":"PAYMENTS"}]}}';
+
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
+        ]);
+
+        $client = new NatsClient(new NatsOptions(), $transport);
+        $client->connect()->await();
+
+        $created = $client->jetStream()->createStream('AGG', [], [
+            'sources' => [
+                StreamSource::source('ORDERS')->toArray(),
+                StreamSource::source('PAYMENTS')->toArray(),
+            ],
+        ])->await();
+
+        self::assertSame('AGG', $created->name);
+        self::assertSame([], $created->subjects);
+        self::assertStringContainsString('"sources":[', $transport->writes[3]);
+        self::assertStringContainsString('"subjects":[]', $transport->writes[3]);
     }
 
     public function testCreateStreamAllowsMirrorWithoutSubjects(): void

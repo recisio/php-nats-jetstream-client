@@ -186,10 +186,13 @@ final class JetStreamContext
     public function createStream(string $name, array $subjects, array $options = []): Future
     {
         return async(function () use ($name, $subjects, $options): StreamInfo {
+            // A stream may legitimately have no subjects of its own when it ingests from a mirror or from
+            // one or more sources (a pure aggregate/replica stream); only reject empty subjects otherwise.
             $hasMirrorConfig = is_array($options['mirror'] ?? null);
+            $hasSourcesConfig = is_array($options['sources'] ?? null) && $options['sources'] !== [];
 
-            if ($subjects === [] && !$hasMirrorConfig) {
-                throw new JetStreamException('Stream subjects must not be empty unless mirror configuration is provided');
+            if ($subjects === [] && !$hasMirrorConfig && !$hasSourcesConfig) {
+                throw new JetStreamException('Stream subjects must not be empty unless mirror or sources configuration is provided');
             }
 
             $payload = array_merge($options, [

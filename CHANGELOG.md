@@ -26,6 +26,10 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ### Fixed
 
+- `[bugfix]` JetStream: `createStream()` no longer rejects an empty `subjects` list when a non-empty
+  `sources` configuration is provided. A pure aggregate/sourcing stream legitimately has no subjects of its
+  own (the server allows it); the client previously only exempted `mirror`, so creating a sources-only
+  aggregate stream failed with "Stream subjects must not be empty…".
 - `[bugfix]` Connection: a malformed async `INFO` frame is no longer allowed to throw out of the core
   `processIncoming()` read loop. Previously a non-JSON async INFO (corruption in flight, or a non-conformant
   server push) raised an uncaught `JsonException` that aborted the read cycle and skipped delivery of the
