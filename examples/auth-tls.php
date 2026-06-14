@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Mutual TLS — encrypted connection with a client certificate.
+ *
+ * Connects over tls:// presenting a client certificate (CA + cert + key fixtures) for
+ * mutual TLS, then round-trips a message to prove the encrypted channel carries
+ * traffic. Skips cleanly if the TLS fixtures are missing.
+ *
+ * Mirrors the README "Authentication Options" example. Run: php examples/auth-tls.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

@@ -51,6 +51,17 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 - `[docs]` Distributed Counter example now creates its backing stream with `allow_direct: true` (required
   because `counterValue()` reads via Direct Get); without it the documented example threw "no responders
   for $JS.API.DIRECT.GET". Prose updated accordingly.
+- `[docs]` Each `examples/*.php` script now opens with a file-level intro docblock describing exactly what
+  it does and which README section it mirrors.
+- `[docs]` Every example heading in the README now carries a "Runnable example" pointer linking to the
+  matching `examples/*.php` script, so each documented feature is one click from a runnable, verified file.
+- `[docs]` `scripts/run-examples.sh` now defaults `NATS_NKEY_SEED` to the dev seed trusted by
+  `build/nats/nkey.conf`, so `auth-standalone-nkey.php` runs as a real functional test in the dev stack
+  instead of self-skipping. With this, all 42 examples pass against the full dockerized stack.
+- `[docs]` CI now runs every example as a required gate (a dedicated `examples` job in
+  `.github/workflows/ci.yml` that boots the full dockerized stack and runs `scripts/run-examples.sh`).
+  The runner gained an `EXAMPLES_STRICT` mode (used by CI) that treats a skipped example as a failure, so
+  the build fails unless every example actually executes and passes.
 
 ## [2.3.0] - 2026-06-13
 

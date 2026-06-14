@@ -69,3 +69,35 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+
+  examples:
+    name: Examples (PHP 8.5)
+    runs-on: ubuntu-latest
+    env:
+      NATS_WAIT_TIMEOUT_SECONDS: "120"
+      NATS_PROJECT_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          extensions: openssl, sodium, zlib
+      - uses: ramsey/composer-install@v3
+      - name: JWT Fixtures
+        # Generates build/nats/jwt + .creds used by the auth-jwt-nkey / auth-credentials-file examples,
+        # before the stack starts (so nats-jwt boots with the generated config) — same order as the e2e job.
+        run: composer fixture:jwt
+      - name: Start NATS services
+        run: docker compose up -d
+      - name: Wait for NATS services
+        run: bash scripts/wait-for-nats-services.sh
+      - name: Run examples (all must pass)
+        # Every examples/*.php must run and pass. EXAMPLES_STRICT=1 makes a skipped example fail the job too,
+        # so this gate guarantees all examples actually execute and succeed against the full dockerized stack.
+        run: bash scripts/run-examples.sh
+        env:
+          NATS_URL: nats://127.0.0.1:14222
+          EXAMPLES_STRICT: "1"
+      - name: Stop NATS services
+        if: always()
+        run: docker compose down

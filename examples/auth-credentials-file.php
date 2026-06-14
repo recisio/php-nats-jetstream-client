@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Credentials File Authentication — auth from a .creds bundle.
+ *
+ * Parses a .creds file (bundled user JWT + NKey seed) with CredentialsParser, signs the
+ * nonce with NkeySeedSigner, connects, and round-trips a message. Skips cleanly if the
+ * credentials file (from `composer fixture:jwt`) is missing.
+ *
+ * Mirrors the README "Credentials File Authentication" example. Run: php examples/auth-credentials-file.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

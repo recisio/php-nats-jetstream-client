@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Services: SCHEMA Discovery — request validation + observability.
+ *
+ * An endpoint declares a JSON schema validated by BasicJsonSchemaValidator (invalid
+ * requests get a VALIDATION_ERROR reply), registers a lifecycle observer, and exposes
+ * its schema via the $SRV.SCHEMA.<name> discovery channel.
+ *
+ * Mirrors the README "Services: SCHEMA Discovery" example. Run: php examples/services-schema-discovery.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

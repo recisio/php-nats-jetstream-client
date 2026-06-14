@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Stream Purge and List — purge messages, enumerate streams.
+ *
+ * Purges a stream by subject filter and then fully with purgeStream() (reading the
+ * purged counts), and enumerates all streams on the server with listStreams().
+ *
+ * Mirrors the README "Stream Purge and List" example. Run: php examples/stream-purge-and-list.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

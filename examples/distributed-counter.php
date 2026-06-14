@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Distributed Counter — CRDT counters on a stream (NATS 2.12+).
+ *
+ * On a stream with allow_msg_counter + allow_direct, atomically increments a subject
+ * with incrementCounter() and reads the running total with counterValue() (served by
+ * Direct Get).
+ *
+ * Mirrors the README "Distributed Counter" example. Run: php examples/distributed-counter.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

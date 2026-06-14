@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Request Many (scatter-gather) — one request, many replies.
+ *
+ * Stands up several responders on a shared subject and uses requestMany() to
+ * scatter one request and gather every reply, bounded by a total timeout and a
+ * stall timeout (stop once no new reply arrives within the window).
+ *
+ * Mirrors the README "Request Many (Scatter-Gather)" example. Run: php examples/request-many.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

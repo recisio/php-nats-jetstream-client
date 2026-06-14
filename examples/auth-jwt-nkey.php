@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * JWT + NKey Authentication — operator/account credentials.
+ *
+ * Loads a user JWT and its NKey seed (from `composer fixture:jwt`), signs the server's
+ * nonce challenge with NkeySeedSigner, connects, and round-trips a message. Skips
+ * cleanly if the fixtures are not present.
+ *
+ * Mirrors the README "Authentication Options" example. Run: php examples/auth-jwt-nkey.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

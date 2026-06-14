@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Stream Mirroring and Sourcing — mirror one stream, aggregate many.
+ *
+ * Builds StreamSource configs to create a subjectless mirror-only stream
+ * (StreamSource::mirror) and a subjectless multi-source aggregate stream
+ * (StreamSource::source, with subject filter / start sequence).
+ *
+ * Mirrors the README "Stream Mirroring and Sourcing" example. Run: php examples/stream-mirroring-and-sourcing.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

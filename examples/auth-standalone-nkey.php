@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Standalone NKey Authentication — challenge signing without a JWT.
+ *
+ * Ed25519 nonce-challenge auth using only nkey + nonceSigner (no JWT): the server trusts
+ * the account's public NKey and the client proves ownership by signing the nonce. Skips
+ * unless NATS_NKEY_SEED is set to a seed the server trusts.
+ *
+ * Mirrors the README "Authentication Options" example. Run: php examples/auth-standalone-nkey.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

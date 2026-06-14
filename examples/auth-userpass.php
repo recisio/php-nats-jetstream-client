@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Username / Password Authentication — connect with user + pass.
+ *
+ * Sends a username and password in the CONNECT frame; connect() only resolves once the
+ * server accepts them. Round-trips a message to prove the authenticated session works.
+ *
+ * Mirrors the README "Authentication Options" example. Run: php examples/auth-userpass.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

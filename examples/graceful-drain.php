@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Graceful Drain — flush in-flight work before closing.
+ *
+ * Publishes a message that is in flight, then calls drain(): it unsubscribes all
+ * subscriptions, delivers the pending messages to their handlers, and closes the
+ * connection cleanly (the right shutdown for workers).
+ *
+ * Mirrors the README "Graceful Drain" example. Run: php examples/graceful-drain.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * Pull Consumer Priority Groups — pinned-client steering (NATS 2.11+).
+ *
+ * Creates a pull consumer with a pinned-client priority group, pulls under the group
+ * (the iterator captures and resends the Nats-Pin-Id and re-pins transparently on a
+ * stale-pin 423), then releases the pin with unpinConsumer().
+ *
+ * Mirrors the README "Pull Consumer Priority Groups" example. Run: php examples/pull-consumer-priority-groups.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

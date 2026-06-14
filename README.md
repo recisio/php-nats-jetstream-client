@@ -172,6 +172,8 @@ You can also query the requirement programmatically: `IDCT\NATS\JetStream\Featur
 
 ### Authentication Options
 
+> 📄 **Runnable examples:** [`examples/auth-token.php`](examples/auth-token.php), [`examples/auth-userpass.php`](examples/auth-userpass.php), [`examples/auth-jwt-nkey.php`](examples/auth-jwt-nkey.php), [`examples/auth-standalone-nkey.php`](examples/auth-standalone-nkey.php), [`examples/auth-tls.php`](examples/auth-tls.php)
+
 _Verified by: [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php), [NatsConnectionTest::testConnectIncludesJwtSignatureFromInfoNonce](tests/Unit/NatsConnectionTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testTokenAuthSuccessAndFailure`, `testUserPasswordAuthSuccessAndFailure`, `testJwtNonceAuthenticationFlow`, `testStandaloneNkeyAuthenticationFlow`, `testTlsHandshakeFirstConnection`); [features/auth/](features/auth/)._
 
 ```php
@@ -228,6 +230,8 @@ $tlsClient = new NatsClient(new NatsOptions(
 
 ### WebSocket Transport
 
+> 📄 **Runnable example:** [`examples/websocket-transport.php`](examples/websocket-transport.php)
+
 By default `NatsClient` uses the TCP transport (`AmpSocketTransport`). To connect over WebSocket — e.g. through a NATS gateway that only exposes `ws://` / `wss://` — construct a `WebSocketTransport` and inject it. The `ws://` / `wss://` endpoint goes in `servers`; `wss://` negotiates TLS during connect (using the same `tls*` options), and the optional `webSocketHeaders` / `webSocketCompression` options apply to the upgrade handshake.
 
 ```php
@@ -254,6 +258,8 @@ $client->connect()->await();
 _Verified by: [WebSocketTransportTest](tests/Unit/WebSocketTransportTest.php), [WebSocketFrameCodecTest](tests/Unit/WebSocketFrameCodecTest.php); live: [ClientParityIntegrationTest](tests/Integration/ClientParityIntegrationTest.php) (`testWebSocketTransportCarriesPubSubAndJetStream`, `testWebSocketCompressionAndCustomHeaders`)._
 
 ### Connect and Publish/Subscribe
+
+> 📄 **Runnable example:** [`examples/publish-subscribe.php`](examples/publish-subscribe.php)
 
 _Verified by: [NatsClientTest::testClientSubscribeAndProcessIncoming](tests/Unit/NatsClientTest.php); [NatsClientIntegrationTest::testFlushRoundTripConfirmsServerProcessing](tests/Integration/NatsClientIntegrationTest.php) (`flush()` round-trip); [features/core/connection.feature](features/core/connection.feature)._
 
@@ -283,6 +289,8 @@ $client->disconnect()->await();
 
 ### Request/Reply
 
+> 📄 **Runnable example:** [`examples/request-reply.php`](examples/request-reply.php)
+
 _Verified by: [NatsClientTest::testClientRequestReturnsReply](tests/Unit/NatsClientTest.php), [NatsConnectionTest::testRequestReturnsFirstReplyMessage](tests/Unit/NatsConnectionTest.php); [features/core/request_reply.feature](features/core/request_reply.feature)._
 
 ```php
@@ -303,6 +311,8 @@ $client->disconnect()->await();
 ```
 
 ### Request Many (Scatter-Gather)
+
+> 📄 **Runnable example:** [`examples/request-many.php`](examples/request-many.php)
 
 _Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testRequestManyCollectsUpToMaxResponses`, `testRequestManyStopsOnStallInterval`, `testRequestManyReturnsEmptyOnNoResponders`)._
 
@@ -335,6 +345,8 @@ $client->disconnect()->await();
 
 ### Connection Statistics and RTT
 
+> 📄 **Runnable example:** [`examples/connection-stats-rtt.php`](examples/connection-stats-rtt.php)
+
 _Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testConnectionAccessorsAndStatistics`, `testRttMeasuresPingPong`)._
 
 `statistics()` returns an immutable `ConnectionStats` snapshot of traffic counters (`inMsgs`, `outMsgs`, `inBytes`, `outBytes`, `reconnects`). `rtt()` measures the round-trip time to the server with a PING/PONG exchange and resolves to a `float` in seconds.
@@ -364,6 +376,8 @@ $client->disconnect()->await();
 ```
 
 ### Headers and Server Info
+
+> 📄 **Runnable example:** [`examples/headers-and-server-info.php`](examples/headers-and-server-info.php)
 
 _Verified by: [NatsClientTest::testClientPublishWithHeadersAndRequestWithHeaders](tests/Unit/NatsClientTest.php), [NatsClientTest::testClientConnectAndPublishDelegatesToConnection](tests/Unit/NatsClientTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
@@ -395,6 +409,8 @@ $client->disconnect()->await();
 
 ### JetStream Stream and Durable Consumer
 
+> 📄 **Runnable example:** [`examples/jetstream-stream-and-consumer.php`](examples/jetstream-stream-and-consumer.php)
+
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testStreamCrud`, `testConsumerCrud`, `testPublishWithAck`, `testCreateConsumerDefaultsAckPolicyToExplicit`); [JetStreamIntegrationTest::testJetStreamConsumerAndPublishAck](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/stream_lifecycle.feature](features/jetstream-core/stream_lifecycle.feature)._
 
 ```php
@@ -423,6 +439,8 @@ $client->disconnect()->await();
 ```
 
 ### JetStream Stream Update and Consumer Info
+
+> 📄 **Runnable example:** [`examples/stream-update-and-consumer-info.php`](examples/stream-update-and-consumer-info.php)
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testUpdateStream`, `testConsumerCrud`); [JetStreamIntegrationTest::testJetStreamUpdateStreamConfiguration](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/management.feature](features/jetstream-core/management.feature)._
 
@@ -483,6 +501,8 @@ $client->disconnect()->await();
 
 ### JetStream Pull Consumer (Fetch + ACK)
 
+> 📄 **Runnable example:** [`examples/pull-consumer-fetch-ack.php`](examples/pull-consumer-fetch-ack.php)
+
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testFetchNext`, `testFetchBatchThrowsTerminalStatusDescription`); [JetStreamIntegrationTest::testJetStreamPullFetchAndAck](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
@@ -535,6 +555,8 @@ $client->disconnect()->await();
 
 ### JetStream Pull Consumer (NAK, Delayed NAK, TERM, In-Progress)
 
+> 📄 **Runnable example:** [`examples/pull-consumer-nak-term.php`](examples/pull-consumer-nak-term.php)
+
 _Verified by: [JetStreamContextTest::testAckHelpersPublishProtocolTokens](tests/Unit/JetStreamContextTest.php); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamPullNakWithDelayRedelivery`, `testJetStreamTermAndInProgressTokens`); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
@@ -574,6 +596,8 @@ $client->disconnect()->await();
 
 ### Queue Group Subscribe
 
+> 📄 **Runnable example:** [`examples/queue-group-subscribe.php`](examples/queue-group-subscribe.php)
+
 _Verified by: [NatsConnectionTest::testSubscribeWithQueueGroupSendsSubFrameAndDeliversToHandler](tests/Unit/NatsConnectionTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
 ```php
@@ -601,6 +625,8 @@ $client->disconnect()->await();
 ```
 
 ### Polling Subscribe (SubscriptionQueue)
+
+> 📄 **Runnable example:** [`examples/polling-subscribe.php`](examples/polling-subscribe.php)
 
 _Verified by: [SubscriptionQueueTest](tests/Unit/SubscriptionQueueTest.php) (`fetch`/`next`/`fetchAll`/`setTimeout`); [NatsClientIntegrationTest::testSubscriptionQueuePollingDeliversLive](tests/Integration/NatsClientIntegrationTest.php); [features/core/headers_queueing.feature](features/core/headers_queueing.feature)._
 
@@ -634,6 +660,8 @@ $client->disconnect()->await();
 ```
 
 ### JetStream Push Consumer (Durable)
+
+> 📄 **Runnable example:** [`examples/push-consumer-durable.php`](examples/push-consumer-durable.php)
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testSubscribePushConsumerHandlesFlowControl`, `testSubscribePushConsumerIgnoresHeartbeat`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamPushConsumerHelperDelivery`, `testJetStreamPushFlowControlAndHeartbeat`); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
@@ -673,6 +701,8 @@ $client->disconnect()->await();
 
 ### JetStream Ephemeral Consumers
 
+> 📄 **Runnable example:** [`examples/ephemeral-consumers.php`](examples/ephemeral-consumers.php)
+
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testCreateEphemeralConsumer`, `testSubscribeEphemeralPushConsumer`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamEphemeralPullConsumerFetchAndAck`, `testJetStreamEphemeralPushConsumerDelivery`); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
@@ -709,6 +739,8 @@ $client->disconnect()->await();
 ```
 
 ### Scheduled Publish Example (`@at`)
+
+> 📄 **Runnable example:** [`examples/scheduled-publish.php`](examples/scheduled-publish.php)
 
 _Verified by: [ScheduleTest](tests/Unit/ScheduleTest.php), [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testPublishScheduled`, `testPublishScheduledOmitsTtlWhenNotProvided`, `testPublishScheduledRejectsUnsupportedPattern`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamScheduledPublish`, `testJetStreamScheduledPublishWithPerMessageTtl`, `testJetStreamScheduledPublishRejectsUnsupportedPatterns`); [features/jetstream-data/scheduled_publish.feature](features/jetstream-data/scheduled_publish.feature)._
 
@@ -753,6 +785,8 @@ $client->disconnect()->await();
 
 ### Distributed Counter
 
+> 📄 **Runnable example:** [`examples/distributed-counter.php`](examples/distributed-counter.php)
+
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testIncrementCounter`, `testIncrementCounterPreservesBigValue`, `testIncrementCounterRejectsMalformedDelta`, `testCounterValue`, `testCounterValueMissingReturnsZero`, `testCounterValueRethrowsNon404Exception`, `testIncrementCounterWithMalformedResponsePayload`, `testIncrementCounterWithApiErrorInResponse`, `testIncrementCounterWithIntegerValField`, `testIncrementCounterWithMissingValFieldThrows`)._
 
 Distributed counters are an atomic, conflict-free (CRDT) increment subject backed by a JetStream stream. `incrementCounter()` applies a signed delta and returns the new total; `counterValue()` reads the current total via Direct Get (returning `"0"` when nothing is stored yet).
@@ -796,6 +830,8 @@ $client->disconnect()->await();
 ```
 
 ### KeyValue Bucket
+
+> 📄 **Runnable example:** [`examples/keyvalue-bucket.php`](examples/keyvalue-bucket.php)
 
 _Verified by: [KeyValueBucketTest](tests/Unit/KeyValueBucketTest.php); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamKeyValueLifecycle`, `testJetStreamKeyValueAdvancedParityOperations`); [features/jetstream-data/key_value.feature](features/jetstream-data/key_value.feature)._
 
@@ -879,6 +915,8 @@ $client->disconnect()->await();
 
 ### Object Store Bucket
 
+> 📄 **Runnable example:** [`examples/object-store-bucket.php`](examples/object-store-bucket.php)
+
 _Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php); [JetStreamIntegrationTest::testJetStreamObjectStoreLifecycle](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
 
 ```php
@@ -951,6 +989,8 @@ $client->disconnect()->await();
 
 ### Object Store Streaming to Callback
 
+> 📄 **Runnable example:** [`examples/object-store-streaming-to-callback.php`](examples/object-store-streaming-to-callback.php)
+
 _Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testGetToCallbackInvokesCallbackOncePerChunk`, `testGetToCallbackInvokesCallbackOnceForSingleChunkObject`); [features/jetstream-data/object_store.feature](features/jetstream-data/object_store.feature)._
 
 ```php
@@ -983,6 +1023,8 @@ $client->disconnect()->await();
 ```
 
 ### Object Store Streaming Upload
+
+> 📄 **Runnable example:** [`examples/object-store-streaming-upload.php`](examples/object-store-streaming-upload.php)
 
 _Verified by: [ObjectStoreBucketTest](tests/Unit/ObjectStoreBucketTest.php) (`testPutStreamReChunksAndComputesDigestIncrementally`, `testPutStreamReChunksLargeBlockAcrossManyChunks`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamObjectStorePutStreamRoundTrip`)._
 
@@ -1019,6 +1061,8 @@ $client->disconnect()->await();
 ```
 
 ### Services Framework
+
+> 📄 **Runnable example:** [`examples/services-framework.php`](examples/services-framework.php)
 
 _Verified by: [ServiceTest](tests/Unit/ServiceTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testServiceDiscoveryAndEndpoint`, `testServiceMultipleEndpoints`, `testServiceGroupedEndpointsHierarchy`, `testServiceEndpointsLoadBalanceAcrossInstances`); [features/services/](features/services/)._
 
@@ -1104,6 +1148,8 @@ $client->disconnect()->await();
 
 ### Services: SCHEMA Discovery
 
+> 📄 **Runnable example:** [`examples/services-schema-discovery.php`](examples/services-schema-discovery.php)
+
 _Verified by: [ServiceTest](tests/Unit/ServiceTest.php) (schema validation + lifecycle observers), [BasicJsonSchemaValidatorTest](tests/Unit/BasicJsonSchemaValidatorTest.php); [NatsClientIntegrationTest::testServiceStatsAndObserversWithHeaders](tests/Integration/NatsClientIntegrationTest.php); [features/services/service_discovery.feature](features/services/service_discovery.feature)._
 
 ```php
@@ -1150,6 +1196,8 @@ $client->disconnect()->await();
 
 ### Graceful Drain
 
+> 📄 **Runnable example:** [`examples/graceful-drain.php`](examples/graceful-drain.php)
+
 _Verified by: [NatsConnectionTest](tests/Unit/NatsConnectionTest.php) (`testDrainUnsubscribesAllAndCloses`, `testDrainDeliversBufferedMessagesBeforeClosing`); [features/resilience/client_resilience.feature](features/resilience/client_resilience.feature)._
 
 ```php
@@ -1173,6 +1221,8 @@ $client->drain()->await();
 ```
 
 ### Ordered Consumer
+
+> 📄 **Runnable example:** [`examples/ordered-consumer.php`](examples/ordered-consumer.php)
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testSubscribeOrderedConsumerSendsCorrectConfig`, `testSubscribeOrderedConsumerRecreatesOnSequenceGap`, `testSubscribeOrderedConsumerDeliversFilteredMessagesWithoutSpuriousRecreate`); [JetStreamIntegrationTest::testJetStreamOrderedConsumerWithFilteredSubjectAfterPriorMessages](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
@@ -1211,6 +1261,8 @@ $client->disconnect()->await();
 
 ### Consumer Pause/Resume
 
+> 📄 **Runnable example:** [`examples/consumer-pause-resume.php`](examples/consumer-pause-resume.php)
+
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testPauseConsumerSendsCorrectPayload`, `testResumeConsumerSendsEmptyBody`); [JetStreamIntegrationTest::testJetStreamPauseAndResumeConsumer](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 ```php
@@ -1240,6 +1292,8 @@ $client->disconnect()->await();
 ```
 
 ### Fetch Batch
+
+> 📄 **Runnable example:** [`examples/fetch-batch.php`](examples/fetch-batch.php)
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testFetchBatch`, `testFetchBatchIgnoresTerminalStatusFrames`, `testFetchBatchThrowsWhenNoMessagesArrive`); [JetStreamIntegrationTest::testJetStreamFetchBatchHandlesStatusFrames](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
@@ -1279,6 +1333,8 @@ Notes:
 
 ### Stream Purge and List
 
+> 📄 **Runnable example:** [`examples/stream-purge-and-list.php`](examples/stream-purge-and-list.php)
+
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testPurgeStream`, `testPurgeStreamWithSubjectFilter`, `testListStreams`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamPurgeStreamByFilter`, `testJetStreamListStreams`); [features/jetstream-core/management.feature](features/jetstream-core/management.feature)._
 
 ```php
@@ -1316,6 +1372,8 @@ $client->disconnect()->await();
 
 ### Consumer List
 
+> 📄 **Runnable example:** [`examples/consumer-list.php`](examples/consumer-list.php)
+
 _Verified by: [JetStreamContextTest::testListConsumers](tests/Unit/JetStreamContextTest.php); [JetStreamIntegrationTest::testJetStreamListConsumers](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/management.feature](features/jetstream-core/management.feature)._
 
 ```php
@@ -1346,6 +1404,8 @@ $client->disconnect()->await();
 ```
 
 ### Stream Message Get
+
+> 📄 **Runnable example:** [`examples/stream-message-get.php`](examples/stream-message-get.php)
 
 _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`testGetStreamMessage`, `testGetStreamMessagePreservesZeroPayload`, `testGetStreamMessageDecodesHeaders`); [JetStreamIntegrationTest](tests/Integration/JetStreamIntegrationTest.php) (`testJetStreamGetStreamMessage`, `testJetStreamGetStreamMessagePreservesZeroAndHeaders`)._
 
@@ -1403,6 +1463,8 @@ $client->disconnect()->await();
 ```
 
 ### JetStream Direct Get
+
+> 📄 **Runnable example:** [`examples/jetstream-direct-get.php`](examples/jetstream-direct-get.php)
 
 `directGetStreamMessage()` and `directGetLastMessageForSubject()` use the JetStream Direct Get API
 (`$JS.API.DIRECT.GET`), which requires the stream to be created with `allow_direct: true`. Unlike
@@ -1478,6 +1540,8 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 
 ### Atomic Batch Publish
 
+> 📄 **Runnable example:** [`examples/atomic-batch-publish.php`](examples/atomic-batch-publish.php)
+
 _Verified by: [BatchPublisherTest](tests/Unit/BatchPublisherTest.php) (`testCommitSendsBatchHeadersAndParsesAck`, `testCommitRejectedAtStart`, `testCommitAbortSurfacesError`, `testCommitEmptyBatchThrows`, `testBatchRejectsOversizedId`, `testAddAfterCommitThrows`, `testCountReturnsNumberOfStagedMessages`, `testBatchIdReturnsConstructedId`); [JetStreamIntegrationTest::testJetStreamAtomicBatchPublish](tests/Integration/JetStreamIntegrationTest.php)._
 
 `$js->batch()` opens an atomic (all-or-nothing) JetStream publish batch (ADR-50). Messages are staged
@@ -1529,6 +1593,8 @@ $client->disconnect()->await();
 
 ### Credentials File Authentication
 
+> 📄 **Runnable example:** [`examples/auth-credentials-file.php`](examples/auth-credentials-file.php)
+
 _Verified by: [CredentialsParserTest](tests/Unit/CredentialsParserTest.php) (`testParseAcceptsCanonicalNscMarkersWithSixDashEnd`, `testFromFileParsesRealNscFixtureWhenPresent`), [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php); [features/auth/jwt_and_nkey_auth.feature](features/auth/jwt_and_nkey_auth.feature)._
 
 ```php
@@ -1554,6 +1620,8 @@ $client = new NatsClient(new NatsOptions(
 ```
 
 ### Typed Stream Configuration
+
+> 📄 **Runnable example:** [`examples/typed-stream-configuration.php`](examples/typed-stream-configuration.php)
 
 _Verified by: the [JetStream enums](src/JetStream/Enum/) are exercised end-to-end (all six via `->value`) in [features/jetstream-core/management.feature](features/jetstream-core/management.feature) and [JetStreamContextTest](tests/Unit/JetStreamContextTest.php)._
 
@@ -1607,6 +1675,8 @@ $client->disconnect()->await();
 
 ### Pull Consumer Batching/Iteration
 
+> 📄 **Runnable example:** [`examples/pull-consumer-batching-iteration.php`](examples/pull-consumer-batching-iteration.php)
+
 _Verified by: [PullConsumerIteratorTest](tests/Unit/PullConsumerIteratorTest.php); [JetStreamIntegrationTest::testJetStreamPullIteratorBatching](tests/Integration/JetStreamIntegrationTest.php); [features/jetstream-core/consumer_helpers.feature](features/jetstream-core/consumer_helpers.feature)._
 
 The fluent `PullConsumerIterator` wraps `fetchBatch()` with configurable batch size, iterations, and a handler callback:
@@ -1642,6 +1712,8 @@ $client->disconnect()->await();
 ```
 
 ### Pull Consumer Priority Groups
+
+> 📄 **Runnable example:** [`examples/pull-consumer-priority-groups.php`](examples/pull-consumer-priority-groups.php)
 
 _Verified by: [PullConsumerIteratorTest::testHandleRePinsOnStalePin](tests/Unit/PullConsumerIteratorTest.php); [PullConsumerIteratorTest::testBuildPullIncludesAllOptionalFields](tests/Unit/PullConsumerIteratorTest.php); [JetStreamContextTest::testCreateConsumerWithPriorityGroups](tests/Unit/JetStreamContextTest.php); [JetStreamContextTest::testUnpinConsumer](tests/Unit/JetStreamContextTest.php); [JetStreamContextTest::testPinIdOf](tests/Unit/JetStreamContextTest.php)._
 
@@ -1695,6 +1767,8 @@ $client->disconnect()->await();
 
 ### Stream Mirroring and Sourcing
 
+> 📄 **Runnable example:** [`examples/stream-mirroring-and-sourcing.php`](examples/stream-mirroring-and-sourcing.php)
+
 _Verified by: [StreamSourceTest](tests/Unit/StreamSourceTest.php); [features/jetstream-core/config_helpers.feature](features/jetstream-core/config_helpers.feature) (live source filtering + mirror replication)._
 
 Use `StreamSource` to build mirror/source configuration arrays:
@@ -1730,6 +1804,8 @@ $client->disconnect()->await();
 Use those arrays in `createStream()` or `updateStream()` options. Source configurations work with the current high-level API and are covered against the live fixture stack. Mirror-only stream configs also work through `createStream()` when you pass an empty `subjects` list together with the `mirror` configuration.
 
 ### Republish and Subject Transform
+
+> 📄 **Runnable example:** [`examples/republish-and-subject-transform.php`](examples/republish-and-subject-transform.php)
 
 _Verified by: [RepublishAndTransformTest](tests/Unit/RepublishAndTransformTest.php); [features/jetstream-core/config_helpers.feature](features/jetstream-core/config_helpers.feature) (live republish + subject transform)._
 

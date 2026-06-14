@@ -1,5 +1,14 @@
 <?php
 
+/**
+ * Object Store Bucket — store and retrieve whole objects.
+ *
+ * Demonstrates put / info / get (digest-verified) / list / delete on an Object Store
+ * bucket, reading the returned ObjectInfo (name, SHA-256 digest, ...).
+ *
+ * Mirrors the README "Object Store Bucket" example. Run: php examples/object-store-bucket.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';

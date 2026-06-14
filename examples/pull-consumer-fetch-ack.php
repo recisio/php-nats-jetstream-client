@@ -1,5 +1,15 @@
 <?php
 
+/**
+ * JetStream Pull Consumer (Fetch + ACK) — pull one, acknowledge it.
+ *
+ * Uses fetchNext() to pull a single message and ack() it, then demonstrates ackSync()
+ * (double-ack): it sends the ACK as a request and waits for the server to confirm
+ * durable acknowledgement.
+ *
+ * Mirrors the README "JetStream Pull Consumer (Fetch + ACK)" example. Run: php examples/pull-consumer-fetch-ack.php
+ */
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
