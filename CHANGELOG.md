@@ -17,6 +17,13 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+### Added
+
+- `[feature]` Protocol parser now recognizes operation verbs case-insensitively and accepts any whitespace
+  (space or tab) between a verb and its arguments, aligning with the NATS wire spec. Real servers always
+  send upper-case verbs, so this only adds leniency; argument/payload bytes are preserved verbatim. Resolves
+  the long-standing README TODO (which has been removed).
+
 ### Fixed
 
 - `[bugfix]` Connection: a malformed async `INFO` frame is no longer allowed to throw out of the core

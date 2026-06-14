@@ -27,7 +27,6 @@ Source repository: https://github.com/ideaconnect/php-nats-jetstream-client
 - [Installation](#installation)
 - [Features](#features)
 - [NATS Server Version Requirements](#nats-server-version-requirements)
-- [TODO](#todo)
 - [Usage](#usage)
 - [Authentication Options](#authentication-options)
 - [WebSocket Transport](#websocket-transport)
@@ -152,10 +151,6 @@ try {
 ```
 
 You can also query the requirement programmatically: `IDCT\NATS\JetStream\FeatureSupport::requiredVersion('allow_atomic')` returns `"2.12"`.
-
-## TODO
-
-- Align `ProtocolParser` operation detection more closely with the NATS wire spec by accepting case-insensitive operation names (verbs are currently matched case-sensitively and must be followed by a space). Field separators within a recognized control line already accept any whitespace, including tabs.
 
 ## 🚀 This project looks for funding. Love my work? Support it! 💖
 
