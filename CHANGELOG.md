@@ -45,6 +45,12 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 - `[docs]` Added `TESTS.md` — a catalogue of every unit, integration, and Behat test with a one-line
   description of what it verifies — linked from the README's test baseline section.
+- `[docs]` Added an `examples/` directory: one runnable, self-contained script per README example (42
+  files), plus `scripts/run-examples.sh` which runs them all against dockerized NATS and reports
+  pass/skip/fail — a gate that keeps the README examples honest. Linked from the README Usage section.
+- `[docs]` Distributed Counter example now creates its backing stream with `allow_direct: true` (required
+  because `counterValue()` reads via Direct Get); without it the documented example threw "no responders
+  for $JS.API.DIRECT.GET". Prose updated accordingly.
 
 ## [2.3.0] - 2026-06-13
 

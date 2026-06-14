@@ -168,6 +168,8 @@ You can also query the requirement programmatically: `IDCT\NATS\JetStream\Featur
 
 ## Usage
 
+> Every example below also ships as a runnable, self-contained script under [`examples/`](examples/) (one file per example, verified against dockerized NATS via [`scripts/run-examples.sh`](scripts/run-examples.sh)). See [examples/README.md](examples/README.md).
+
 ### Authentication Options
 
 _Verified by: [NkeySeedSignerTest](tests/Unit/NkeySeedSignerTest.php), [NatsConnectionTest::testConnectIncludesJwtSignatureFromInfoNonce](tests/Unit/NatsConnectionTest.php); [NatsClientIntegrationTest](tests/Integration/NatsClientIntegrationTest.php) (`testTokenAuthSuccessAndFailure`, `testUserPasswordAuthSuccessAndFailure`, `testJwtNonceAuthenticationFlow`, `testStandaloneNkeyAuthenticationFlow`, `testTlsHandshakeFirstConnection`); [features/auth/](features/auth/)._
@@ -755,7 +757,7 @@ _Verified by: [JetStreamContextTest](tests/Unit/JetStreamContextTest.php) (`test
 
 Distributed counters are an atomic, conflict-free (CRDT) increment subject backed by a JetStream stream. `incrementCounter()` applies a signed delta and returns the new total; `counterValue()` reads the current total via Direct Get (returning `"0"` when nothing is stored yet).
 
-Requires NATS server 2.12+, and the backing stream must be created with `allow_msg_counter: true`. On a pre-2.12 server, `createStream()` with that flag fails fast with an `UnsupportedFeatureException` (the server rejects the unknown config field). A stream created without the flag causes the increment request to be rejected, surfaced as a `JetStreamException`.
+Requires NATS server 2.12+, and the backing stream must be created with `allow_msg_counter: true` (and `allow_direct: true`, since `counterValue()` reads via Direct Get). On a pre-2.12 server, `createStream()` with the counter flag fails fast with an `UnsupportedFeatureException` (the server rejects the unknown config field). A stream created without the flag causes the increment request to be rejected, surfaced as a `JetStreamException`.
 
 The delta is passed as an integer **string** (e.g. `"+5"`, `"-3"`, `"10"`); a malformed delta is rejected before dispatch. Counter totals are likewise returned as **strings** so values beyond `PHP_INT_MAX` are preserved exactly rather than truncated to a float.
 
@@ -772,9 +774,11 @@ $client->connect()->await();
 
 $js = $client->jetStream();
 
-// The backing stream must enable allow_msg_counter (NATS 2.12+).
+// The backing stream must enable allow_msg_counter (NATS 2.12+). allow_direct is required because
+// counterValue() reads the current total via Direct Get.
 $js->createStream('COUNTERS', ['counters.>'], [
 	'allow_msg_counter' => true,
+	'allow_direct' => true,
 ])->await();
 
 // Atomically increment; the new total is returned as a string.
