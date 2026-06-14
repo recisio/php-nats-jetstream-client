@@ -17,6 +17,8 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-06-14
+
 ### Added
 
 - `[feature]` Protocol parser now recognizes operation verbs case-insensitively and accepts any whitespace
