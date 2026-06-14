@@ -72,15 +72,21 @@ final class WebSocketFrameCodec
     public static function decode(string &$buffer): array
     {
         $frames = [];
+        $total = strlen($buffer);
+        // Advance a single cursor instead of re-slicing the whole remaining buffer per frame, so a read
+        // carrying K coalesced frames costs O(N) total rather than O(K*N). The buffer is trimmed once at
+        // the end (an incomplete trailing frame is left for the next read).
+        $consumed = 0;
 
         while (true) {
-            $available = strlen($buffer);
+            $base = $consumed;
+            $available = $total - $base;
             if ($available < 2) {
                 break;
             }
 
-            $byte1 = ord($buffer[0]);
-            $byte2 = ord($buffer[1]);
+            $byte1 = ord($buffer[$base]);
+            $byte2 = ord($buffer[$base + 1]);
             $fin = ($byte1 & 0x80) !== 0;
             $rsv1 = ($byte1 & 0x40) !== 0;
             $opcode = $byte1 & 0x0F;
@@ -93,7 +99,7 @@ final class WebSocketFrameCodec
                     break;
                 }
                 /** @var array{1:int} $unpacked */
-                $unpacked = unpack('n', substr($buffer, $offset, 2));
+                $unpacked = unpack('n', substr($buffer, $base + $offset, 2));
                 $length = $unpacked[1];
                 $offset += 2;
             } elseif ($length === 127) {
@@ -101,7 +107,7 @@ final class WebSocketFrameCodec
                     break;
                 }
                 /** @var array{1:int} $unpacked */
-                $unpacked = unpack('J', substr($buffer, $offset, 8));
+                $unpacked = unpack('J', substr($buffer, $base + $offset, 8));
                 $length = $unpacked[1];
                 $offset += 8;
             }
@@ -115,7 +121,7 @@ final class WebSocketFrameCodec
                 if ($available < $offset + 4) {
                     break;
                 }
-                $maskKey = substr($buffer, $offset, 4);
+                $maskKey = substr($buffer, $base + $offset, 4);
                 $offset += 4;
             }
 
@@ -124,13 +130,17 @@ final class WebSocketFrameCodec
                 break;
             }
 
-            $payload = $length > 0 ? substr($buffer, $offset, $length) : '';
+            $payload = $length > 0 ? substr($buffer, $base + $offset, $length) : '';
             if ($masked && $payload !== '') {
                 $payload = (string) self::applyMask($payload, $maskKey);
             }
 
-            $buffer = substr($buffer, $offset + $length);
+            $consumed = $base + $offset + $length;
             $frames[] = ['opcode' => $opcode, 'payload' => $payload, 'fin' => $fin, 'rsv1' => $rsv1];
+        }
+
+        if ($consumed > 0) {
+            $buffer = substr($buffer, $consumed);
         }
 
         return $frames;

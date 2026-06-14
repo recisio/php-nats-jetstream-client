@@ -1020,10 +1020,19 @@ final class FeatureContext implements Context
             return $messages >= 1;
         }, 4.0);
 
-        delay(0.5);
+        // Confirm the replicated count settles at exactly one across consecutive polls instead of a single
+        // fixed wait: a stray/late second replication resets the stability counter (and fails the strict
+        // check below) rather than slipping past a 500ms window (#70 fixed-delay-before-assert smell).
+        $messageCount = 0;
+        $stableReads = 0;
+        $deadline = (hrtime(true) / 1e9) + 4.0;
+        while ($stableReads < 3 && (hrtime(true) / 1e9) < $deadline) {
+            $streamInfo = $js->getStream($stream)->await();
+            $messageCount = max(0, (int) (($streamInfo->raw['state'] ?? [])['messages'] ?? 0));
+            $stableReads = $messageCount === 1 ? $stableReads + 1 : 0;
+            delay(0.1);
+        }
 
-        $streamInfo = $js->getStream($stream)->await();
-        $messageCount = max(0, (int) (($streamInfo->raw['state'] ?? [])['messages'] ?? 0));
         if ($messageCount !== 1) {
             throw new RuntimeException(sprintf('Expected sourced stream to contain exactly one replicated message, got %d.', $messageCount));
         }
@@ -1177,9 +1186,26 @@ final class FeatureContext implements Context
 
         $first = $js->fetchNext($stream, $consumer, 4000)->await();
         $js->nakWithDelay($first, 1200)->await();
-        delay(1.5);
 
-        $second = $js->fetchNext($stream, $consumer, 4000)->await();
+        // The redelivery is due ~1.2s after the NAK. Poll for it instead of a single fixed wait,
+        // tolerating the benign 408 "no message yet" until it arrives or a generous deadline elapses
+        // (mirrors the integration twin; avoids the #70 fixed-delay-before-assert flake).
+        $second = null;
+        $deadline = (hrtime(true) / 1e9) + 15.0;
+        while ($second === null && (hrtime(true) / 1e9) < $deadline) {
+            try {
+                $second = $js->fetchNext($stream, $consumer, 1000)->await();
+            } catch (JetStreamException $e) {
+                if ($e->getCode() !== 408) {
+                    throw $e;
+                }
+            }
+        }
+
+        if ($second === null) {
+            throw new RuntimeException('Redelivered message did not arrive within the deadline.');
+        }
+
         $this->state->lastReplyPayload = $second->payload;
         $js->ack($second)->await();
     }

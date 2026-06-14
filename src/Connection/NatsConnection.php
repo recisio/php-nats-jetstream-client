@@ -1522,7 +1522,18 @@ final class NatsConnection
         }
 
         if ($frame->type === ProtocolFrameType::Info && $frame->infoPayload !== null) {
-            $this->serverInfo = $this->decodeServerInfoPayload($frame->infoPayload);
+            try {
+                $this->serverInfo = $this->decodeServerInfoPayload($frame->infoPayload);
+            } catch (\JsonException $e) {
+                // A malformed async INFO (corruption in flight, or a non-conformant server push) must not
+                // throw out of the shared read loop and abort delivery of the MSG frames parsed from the
+                // same chunk — mirrors the #97 dispatch-containment principle. Skip the bad update and keep
+                // the last known serverInfo; surface it to the error listener. (Handshake INFO is decoded
+                // separately in awaitServerInfo() and still fails the connect on bad JSON.)
+                $this->emitError(new NatsException('Discarding malformed async INFO frame: ' . $e->getMessage()));
+
+                return;
+            }
             $this->handleServerInfoUpdate();
 
             return;
