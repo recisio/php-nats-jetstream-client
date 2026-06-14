@@ -37,6 +37,46 @@ final class ProtocolParserTest extends TestCase
     }
 
     /**
+     * Operation verbs are matched case-insensitively and may be separated from their arguments by any
+     * whitespace (space or tab), aligning with the NATS wire spec. Real servers send upper-case verbs,
+     * so this only adds leniency; case/whitespace of arguments and payloads is preserved.
+     */
+    public function testParsesVerbsCaseInsensitivelyAndWithTabSeparators(): void
+    {
+        $parser = new ProtocolParser();
+
+        // Lower/mixed-case control verbs.
+        $control = $parser->push("ping\r\nPong\r\n+ok\r\n-err Boom\r\ninfo {\"server_id\":\"S1\"}\r\n");
+        self::assertSame(ProtocolFrameType::Ping, $control[0]->type);
+        self::assertSame(ProtocolFrameType::Pong, $control[1]->type);
+        self::assertSame(ProtocolFrameType::Ok, $control[2]->type);
+        self::assertSame(ProtocolFrameType::Err, $control[3]->type);
+        self::assertSame('Boom', $control[3]->error);
+        self::assertSame(ProtocolFrameType::Info, $control[4]->type);
+        self::assertSame('{"server_id":"S1"}', $control[4]->infoPayload);
+
+        // Lower-case MSG verb.
+        $msg = $parser->push("msg updates 1 5\r\nhello\r\n");
+        self::assertSame(ProtocolFrameType::Msg, $msg[0]->type);
+        self::assertSame('updates', $msg[0]->subject);
+        self::assertSame('hello', $msg[0]->payload);
+
+        // Tab-separated MSG fields with a mixed-case verb.
+        $tabbed = $parser->push("Msg\tupdates\t2\t5\r\nworld\r\n");
+        self::assertSame(ProtocolFrameType::Msg, $tabbed[0]->type);
+        self::assertSame('updates', $tabbed[0]->subject);
+        self::assertSame(2, $tabbed[0]->sid);
+        self::assertSame('world', $tabbed[0]->payload);
+
+        // Lower-case HMSG verb.
+        $headers = "NATS/1.0\r\nX-A: 1\r\n\r\n";
+        $hmsg = $parser->push(sprintf("hmsg orders 3 %d %d\r\n%shi\r\n", strlen($headers), strlen($headers) + 2, $headers));
+        self::assertSame(ProtocolFrameType::HMsg, $hmsg[0]->type);
+        self::assertSame('orders', $hmsg[0]->subject);
+        self::assertSame($headers . 'hi', $hmsg[0]->payload);
+    }
+
+    /**
      * Verifies parser reassembles MSG payload from fragmented chunks.
      */
     public function testParsesFragmentedMsgFrame(): void

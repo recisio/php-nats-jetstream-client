@@ -108,18 +108,24 @@ final class ProtocolParser
                 $line = substr($this->buffer, $offset, $lineEndPos - $offset);
                 $nextOffset = $lineEndPos + 2;
 
-                if (str_starts_with($line, 'MSG ') || str_starts_with($line, 'HMSG ')) {
+                // Operation verbs are matched case-insensitively and separated from their arguments by any
+                // whitespace (space or tab), matching the NATS wire spec; argument separators within the
+                // line are already whitespace-tolerant (preg_split('/\s+/')). Real servers always send
+                // upper-case verbs, so this only adds leniency.
+                $verb = strtoupper(substr($line, 0, strcspn($line, " \t")));
+
+                if ($verb === 'MSG' || $verb === 'HMSG') {
                     // Consume the control line first so a malformed header resyncs past it on throw.
                     // The next loop iteration (or a later push) completes the payload.
                     $offset = $nextOffset;
-                    $this->pending = $this->parseDataFrameHeader($line, $nextOffset);
+                    $this->pending = $this->parseDataFrameHeader($verb, $line, $nextOffset);
 
                     continue;
                 }
 
                 // Consume the control line first so an unsupported/invalid line resyncs past it.
                 $offset = $nextOffset;
-                $frames[] = $this->parseControlFrame($line);
+                $frames[] = $this->parseControlFrame($verb, $line);
             }
         } finally {
             if ($offset > 0) {
@@ -136,34 +142,39 @@ final class ProtocolParser
     }
 
     /**
-     * Parses line-based control frames that do not carry trailing payload bytes.
+     * Parses line-based control frames that do not carry trailing payload bytes. $verb is the
+     * upper-cased leading operation token; the payload (INFO/-ERR) is read from the original $line so its
+     * case is preserved.
      */
-    private function parseControlFrame(string $line): ProtocolFrame
+    private function parseControlFrame(string $verb, string $line): ProtocolFrame
     {
-        if (str_starts_with($line, 'INFO ')) {
+        if ($verb === 'INFO') {
+            // substr past the 4-char "INFO" verb, then drop the single separating whitespace.
             return new ProtocolFrame(
                 type: ProtocolFrameType::Info,
-                infoPayload: substr($line, 5),
+                infoPayload: ltrim(substr($line, 4)),
             );
         }
 
-        if ($line === 'PING') {
-            return new ProtocolFrame(type: ProtocolFrameType::Ping);
-        }
-
-        if ($line === 'PONG') {
-            return new ProtocolFrame(type: ProtocolFrameType::Pong);
-        }
-
-        if ($line === '+OK') {
-            return new ProtocolFrame(type: ProtocolFrameType::Ok);
-        }
-
-        if (str_starts_with($line, '-ERR')) {
+        if ($verb === '-ERR') {
             return new ProtocolFrame(
                 type: ProtocolFrameType::Err,
                 error: trim(substr($line, 4)),
             );
+        }
+
+        // PING/PONG/+OK carry no arguments — require the whole (case-insensitive) line to be the verb.
+        $normalized = strtoupper($line);
+        if ($normalized === 'PING') {
+            return new ProtocolFrame(type: ProtocolFrameType::Ping);
+        }
+
+        if ($normalized === 'PONG') {
+            return new ProtocolFrame(type: ProtocolFrameType::Pong);
+        }
+
+        if ($normalized === '+OK') {
+            return new ProtocolFrame(type: ProtocolFrameType::Ok);
         }
 
         throw new ProtocolException('Unsupported control frame: ' . $line);
@@ -175,9 +186,9 @@ final class ProtocolParser
      * @param int $payloadOffset Absolute offset into the current buffer where payload bytes begin.
      * @return array{type: ProtocolFrameType, subject: string, sid: int, replyTo: ?string, headerBytes: ?int, totalBytes: int, payloadOffset: int}
      */
-    private function parseDataFrameHeader(string $line, int $payloadOffset): array
+    private function parseDataFrameHeader(string $verb, string $line, int $payloadOffset): array
     {
-        if (str_starts_with($line, 'HMSG ')) {
+        if ($verb === 'HMSG') {
             return $this->parseHMsgHeader($line, $payloadOffset);
         }
 

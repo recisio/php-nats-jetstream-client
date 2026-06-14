@@ -17,8 +17,19 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+### Added
+
+- `[feature]` Protocol parser now recognizes operation verbs case-insensitively and accepts any whitespace
+  (space or tab) between a verb and its arguments, aligning with the NATS wire spec. Real servers always
+  send upper-case verbs, so this only adds leniency; argument/payload bytes are preserved verbatim. Resolves
+  the long-standing README TODO (which has been removed).
+
 ### Fixed
 
+- `[bugfix]` JetStream: `createStream()` no longer rejects an empty `subjects` list when a non-empty
+  `sources` configuration is provided. A pure aggregate/sourcing stream legitimately has no subjects of its
+  own (the server allows it); the client previously only exempted `mirror`, so creating a sources-only
+  aggregate stream failed with "Stream subjects must not be empty…".
 - `[bugfix]` Connection: a malformed async `INFO` frame is no longer allowed to throw out of the core
   `processIncoming()` read loop. Previously a non-JSON async INFO (corruption in flight, or a non-conformant
   server push) raised an uncaught `JsonException` that aborted the read cycle and skipped delivery of the
@@ -34,6 +45,12 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 - `[docs]` Added `TESTS.md` — a catalogue of every unit, integration, and Behat test with a one-line
   description of what it verifies — linked from the README's test baseline section.
+- `[docs]` Added an `examples/` directory: one runnable, self-contained script per README example (42
+  files), plus `scripts/run-examples.sh` which runs them all against dockerized NATS and reports
+  pass/skip/fail — a gate that keeps the README examples honest. Linked from the README Usage section.
+- `[docs]` Distributed Counter example now creates its backing stream with `allow_direct: true` (required
+  because `counterValue()` reads via Direct Get); without it the documented example threw "no responders
+  for $JS.API.DIRECT.GET". Prose updated accordingly.
 
 ## [2.3.0] - 2026-06-13
 
