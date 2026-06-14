@@ -2137,6 +2137,7 @@ Many thanks for all the contributions:
 - Integration tests also cover local token auth, username/password auth, TLS handshake-first auth including strict peer-validation, hostname mismatch, and missing-client-cert failures, resolver-backed JWT auth, and standalone NKey auth.
 - Static analysis runs with PHPStan level 8.
 - Combined unit + integration line coverage is ~98%, enforced at a 97% floor in CI (the build fails below it).
+- Every test is catalogued with a one-line description in [TESTS.md](TESTS.md).
 
 ## License
 

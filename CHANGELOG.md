@@ -30,6 +30,11 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
   O(frames × bytes) by advancing a cursor and trimming once, improving throughput under bursty high-fanout
   traffic. Behavior (including the "leave an incomplete trailing frame buffered" contract) is unchanged.
 
+### Documentation
+
+- `[docs]` Added `TESTS.md` — a catalogue of every unit, integration, and Behat test with a one-line
+  description of what it verifies — linked from the README's test baseline section.
+
 ## [2.3.0] - 2026-06-13
 
 ### Security
