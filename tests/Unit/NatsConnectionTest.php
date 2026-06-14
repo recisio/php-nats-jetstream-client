@@ -310,6 +310,36 @@ final class NatsConnectionTest extends TestCase
         self::assertSame('work', $receivedMessage->payload);
     }
 
+    public function testMalformedAsyncInfoDoesNotTearDownTheReadLoop(): void
+    {
+        // A malformed async INFO frame must not throw out of processIncoming() and abort delivery of the
+        // MSG frames parsed from the same chunk (mirrors the #97 dispatch-containment principle). The bad
+        // INFO is skipped; the co-chunked MSG is still delivered and the connection stays open.
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+            // One read carrying a malformed async INFO followed by a valid MSG on a subscribed subject.
+            "INFO {not-json\r\nMSG updates 1 5\r\nhello\r\n",
+        ]);
+
+        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection->connect()->await();
+
+        $received = null;
+        $connection->subscribe('updates', static function (NatsMessage $message) use (&$received): void {
+            $received = $message;
+        })->await();
+
+        // Must not throw despite the malformed INFO.
+        $connection->processIncoming()->await();
+
+        self::assertInstanceOf(NatsMessage::class, $received);
+        /** @var NatsMessage $receivedMessage */
+        $receivedMessage = $received;
+        self::assertSame('hello', $receivedMessage->payload);
+        self::assertSame(ConnectionState::Open, $connection->state());
+    }
+
     public function testLargeInboundMessageReceivedWhenServerAdvertisesLargeMaxPayload(): void
     {
         // #94: the server advertises a 16 MiB max_payload, so a 9 MiB inbound message (larger than the

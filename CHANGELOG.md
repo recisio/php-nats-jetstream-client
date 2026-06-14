@@ -17,6 +17,24 @@ Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 
 ## [Unreleased]
 
+### Fixed
+
+- `[bugfix]` Connection: a malformed async `INFO` frame is no longer allowed to throw out of the core
+  `processIncoming()` read loop. Previously a non-JSON async INFO (corruption in flight, or a non-conformant
+  server push) raised an uncaught `JsonException` that aborted the read cycle and skipped delivery of the
+  `MSG` frames parsed from the same chunk. The runtime INFO decode is now contained (the bad update is
+  skipped and surfaced via the error listener), mirroring the dispatch-containment principle from #97.
+  Handshake INFO is still validated strictly and fails the connect on bad JSON.
+- `[bugfix]` WebSocket transport: the frame decoder no longer re-slices the entire remaining receive buffer
+  once per frame. A single read carrying many coalesced frames is now decoded in O(total bytes) instead of
+  O(frames × bytes) by advancing a cursor and trimming once, improving throughput under bursty high-fanout
+  traffic. Behavior (including the "leave an incomplete trailing frame buffered" contract) is unchanged.
+
+### Documentation
+
+- `[docs]` Added `TESTS.md` — a catalogue of every unit, integration, and Behat test with a one-line
+  description of what it verifies — linked from the README's test baseline section.
+
 ## [2.3.0] - 2026-06-13
 
 ### Security
