@@ -512,7 +512,7 @@ final class TwoPhaseReconnectTransport implements TransportInterface
 
     public function upgradeTls(): Future
     {
-        return async(static fn(): null => null);
+        return async(static fn(): mixed => null);
     }
 
     public function write(string $bytes): Future
@@ -546,7 +546,7 @@ final class TwoPhaseReconnectTransport implements TransportInterface
 
     public function close(): Future
     {
-        return async(static fn(): null => null);
+        return async(static fn(): mixed => null);
     }
 }
 

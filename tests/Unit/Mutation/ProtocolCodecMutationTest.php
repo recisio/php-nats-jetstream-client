@@ -112,7 +112,7 @@ final class ProtocolCodecMutationTest extends \PHPUnit\Framework\TestCase
             class_exists(InstalledVersions::class),
             'These mutants are only killable when Composer runtime metadata is present.',
         );
-        $installed = InstalledVersions::getPrettyVersion('idct/php-nats-jetstream-client');
+        $installed = InstalledVersions::getPrettyVersion('recisio/php-nats-jetstream-client');
         self::assertNotNull($installed);
         self::assertNotSame('', $installed);
         // Guard against an accidental coincidence where the installed version equals the fallback.

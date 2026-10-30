@@ -128,7 +128,7 @@ final class SubscriptionLimitServer implements TransportInterface
 
     public function upgradeTls(): Future
     {
-        return async(static fn(): null => null);
+        return async(static fn(): mixed => null);
     }
 
     public function write(string $bytes): Future

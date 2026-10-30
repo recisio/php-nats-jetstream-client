@@ -269,7 +269,7 @@ final class ReconnectingTransport implements CancellableDialTransportInterface
 
     public function upgradeTls(): Future
     {
-        return async(static fn(): null => null);
+        return async(static fn(): mixed => null);
     }
 
     public function write(string $bytes): Future

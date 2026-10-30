@@ -188,8 +188,8 @@ final class MultiConsumerIntegrationTest extends TestCase
 
             $cancel = new DeferredCancellation();
             $pumps = [
-                async(static fn(): null => self::pump($clientA, $cancel)),
-                async(static fn(): null => self::pump($clientB, $cancel)),
+                async(static fn(): mixed => self::pump($clientA, $cancel)),
+                async(static fn(): mixed => self::pump($clientB, $cancel)),
             ];
 
             $deadline = $this->monotonic() + 10.0;
@@ -308,7 +308,7 @@ final class MultiConsumerIntegrationTest extends TestCase
         }
     }
 
-    private static function pump(NatsClient $client, DeferredCancellation $cancel): null
+    private static function pump(NatsClient $client, DeferredCancellation $cancel): mixed
     {
         $cancellation = $cancel->getCancellation();
         while (!$cancellation->isRequested()) {

@@ -3417,7 +3417,7 @@ final class NatsConnection
         if ($existing !== null && $existing['generation'] === $generation) {
             return $existing['future'];
         }
-        $write = async(function () use ($sid, $generation, $duringDrainDelivery): null {
+        $write = async(function () use ($sid, $generation, $duringDrainDelivery): mixed {
             try {
                 if ($this->connectionGeneration === $generation && $this->isUsableForOperations($duringDrainDelivery)) {
                     $this->transport->write($this->codec->encodeUnsubscribe($sid))->await();
