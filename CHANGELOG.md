@@ -15,6 +15,2156 @@ Each entry is tagged so the version impact is clear:
 Note on flags: a `[bc-break]` that only corrects an evident bug is treated as a
 `[bugfix]`, not a real break, even though observable behavior changes.
 
+## [2.27.2] - 2026-10-17
+
+### Fixed
+
+- `[bugfix]` A pull status read in the same chunk as a frame that ends the connection reaches `onError` (#214). Since
+  2.23.0 (#210) an infinite run goes on past a fatal `-ERR` (`Stale Connection`, say) or a `PONG` the socket would
+  not take once the reconnect has reopened the connection, handing what its pulls held to the handler. The read that
+  meets the frame routes what its chunk brought before it throws, so a status from that chunk is on its pull by then,
+  and the pulls used to leave the run with it unread: a terminal `409 Consumer Deleted`, which nats-server sends every
+  waiting pull as the consumer goes and which a process blocked long enough to draw `Stale Connection` finds in the
+  socket next to the `-ERR`, never reached `onError`, and the run pulled on, on a deleted consumer meeting the
+  no-responders path (a 503, routine, reported once) and never ending. The same status read on its own, before an
+  EOF, ended the run. Now, once every pull's messages have gone to the handler, each pull that brought no message is
+  classified in issue order as the retire phase classifies an empty retire: a terminal status ends the run as it ends
+  it there (the inbox closed first, #211, then `onError` once, what the overflow holds handed over, the count
+  returned, no pull on the new connection), a `423` drops the pin the request sent (#208), the group acquiring its pin
+  serially again, and a routine status, or none, changes nothing. A pull that brought messages keeps its status
+  unclassified, as in the retire phase. Both paths share the classification (`isRoutineEmptyRetireOfAnInfiniteRun()`,
+  `dropsThePinA423Rejected()`) and the end on a terminal status (`reportTerminalStatus()`), so that they keep in step.
+  Found by the review of #210 (2.23.0).
+
+### Testing & CI
+
+- `[docs]` New `PullConsumerStatusInTheChunkOfAConnectionEndingFrameTest` (13 cases, #214) over `ReconnectingTransport`
+  seen through `WatchedTransport`: a 409 in the chunk of a fatal `-ERR`, with the reconnect done within the read and
+  outlasting its wait, reaches `onError` once and ends the run with no pull on the new connection; what the pulls held
+  goes to the handler before the status goes to `onError`, and what the overflow took during the hand-over after it; a
+  rejection of the inbox while the run closes it, or during that overflow's hand-over, ends the run with the
+  rejection; a 423 there makes the next pull go out without the pin and the group acquire its pin serially again; and,
+  as guards, a routine status (404, 408, `409 Leadership Change`, 503) leaves the run going, a pull that brought a
+  message keeps its 409 unclassified, and a `stop()` during the hand-over keeps its precedence. 7 fail on 2.27.1.
+
+## [2.27.1] - 2026-10-17
+
+### Upgrade notes
+
+A plain publish whose write is the first to notice a lost connection no longer waits for the reconnect (#244). This
+covers `publish()`, `publishWithHeaders()`, a JetStream `ack()`, `nak()`, `term()` and `inProgress()`, `respond()`, a
+service's replies, flow-control replies and the intermediate messages of an atomic batch. Read these before upgrading:
+
+- **It resolves early.** The publish resolves once its frame is in the reconnect buffer, as a publish made during a
+  reconnect always did, not once the frame is written. It used to resolve only after the reconnect and the retry
+  write, and to fail with `Reconnect attempts exhausted` when the reconnect gave up.
+- **Losses are reported out of band.** A reconnect that gives up, or fails authentication, discards the frame with
+  the rest of the buffer. You learn of it from the `errorListener` (`Reconnect exhausted: N bytes of buffered
+  publishes were discarded`) and the `Closed` event, not from the publish. A resolved `ack()` never meant the server
+  recorded the ack: use `ackSync()` for that, or a JetStream publish for a PubAck.
+- **The buffer's limits apply.** A frame that does not fit fails the publish at once with `Connection is not open`,
+  the write's error as its previous one: buffering disabled (`reconnectBufferSize: 0`), or the buffer full. The
+  reconnect still goes on. A producer that relied on the inline wait to slow down now meets that limit. To wait for
+  the frame to go out, call `flush()`, which waits for the reconnect within `requestTimeoutMs` when
+  `waitForReconnect` is on.
+- **`disconnect()` stays lossy.** A `disconnect()` during the reconnect discards the accepted frame without a report,
+  as it discards every buffered publish. The frame is never sent on a later connection. Such a publish used to fail.
+  The same holds for a write that fails after you closed and reopened the connection: the publish now fails with its
+  write's error and nothing is sent on the new connection, where the frame used to be written to it.
+- **The order across publishers changes.** The frame is flushed in the order frames were accepted. It can now go out
+  ahead of frames other fibers buffered after it, where it used to come after every frame buffered during the outage.
+  A single publisher's frames keep their order.
+- **A frame that always fails can exhaust the reconnect.** Like any buffered frame, it now fails every flush. With the
+  built-in transports a write error belongs to the socket, not to the frame, so this only affects custom transports
+  or test doubles that reject one frame for good. A flush write that fails is retried on the next attempt, so a frame
+  may arrive twice, as any buffered frame may.
+- **Two waits remain.** The original write itself can still take a while. A publish that finds the reconnect's flush
+  sealed under sustained publishing (#165) still waits for the reconnect to end.
+- **Code that counted on the wait must wait itself.** A handler whose `ack()` met the dead socket used to return only
+  after the reconnect. Code that relied on that, in tests too, calls `flush()` after the publish.
+
+`publishGuarded()`, the pull consumer engine's internal publish, keeps the inline recovery and retry: its guard must
+run again after the subscription replay. With reconnect off, a failed write still fails the publish with `Reconnect
+is disabled`. Requests, `ackSync()` and JetStream publishes keep their bounded request path.
+
+### Fixed
+
+- `[bugfix]` A fire-and-forget publish whose write failed on a connection still reported Open ran the whole reconnect
+  loop inline (#244). `writePublishFrame()` called `recoverConnection()` in the caller's fiber, with no budget or
+  cancellation, and wrote the frame again once the loop was over. With the defaults (10 attempts, 100 ms doubling to
+  10 s) that is about 100 s for a server that does not come back, and a second publisher whose write failed meanwhile
+  joined the same wait. The same frame published a moment later, once the heartbeat had noticed the loss, was
+  buffered at once. Measured through `idct/symfony-nats-messenger` (ideaconnect/symfony-nats-messenger#81): an `ack()`
+  that met the outage returned after 103 s, one issued during the reconnect in under a millisecond.
+
+  The failed frame now goes to the reconnect buffer, and the recovery runs in a fiber of its own. The frame is
+  accepted, or refused, inside the recovery's claim: right after the recovery owns the connection and has left Open,
+  before it calls a listener or the logger, closes the socket or dials. Decided in the publisher instead, the decision
+  came after the `Disconnected` listener, which could fill the buffer first or close the connection. A write that
+  fails while another recovery runs puts its frame into that recovery's buffer without waiting for it. The other states
+  are routed explicitly. Closed, being closed, or closed and reopened since the write began: the publish fails with
+  its write's error, a raw stream error wrapped in a `TransportClosedException`. Draining: the frame goes to the socket
+  the drain holds, within its budget. Open on a newer connection: one direct retry. A connect() of your own dialling:
+  the frame is refused. A drain that waits for the reconnect now finds the frame sent, where a slow `Reconnected`
+  listener used to let the drain close the connection before the retry.
+
+### Testing & CI
+
+- `[docs]` New `FailedPublishWriteTest` (41 cases, #244) over `ReconnectingTransport`, with the recovery's dial held
+  where the publish must be done first. It covers the publish, an HPUB, a JetStream `ack()` and a header block
+  segment, each with and without waiting for a reconnect, resolving while the dial is held, then sent once after
+  `CONNECT` and the replay. The other cases: a second failed write, and one failing while another fiber's recovery
+  runs, joining that recovery's buffer; a `Disconnected` listener that publishes or closes; the buffer disabled, an
+  exact fit, one byte short, full, and a segment larger than the buffer; persistent and partial flush failures and an
+  ambiguous one; authentication failure; slow and throwing listeners and loggers; a close before the recovery claims
+  the connection; what the recovery's fiber finds when it runs; the one tick a frame buffered that way yields; a sealed
+  flush; a drain waiting for the reconnect and one already under way; an atomic batch committed behind its buffered
+  intermediates, or failed when they do not fit. The close and claim cases use the new
+  `tests/Support/HeldFailingWriteTransport.php`, which holds a write back and fails it when the test says.
+- `[docs]` New live test `JetStreamIntegrationTest::testAPlainAckWhoseWriteMeetsTheDeadSocketReachesTheRestoredServer`:
+  a plain `ack()` whose write meets a severed socket resolves while dials are refused, and the consumer has nothing
+  waiting for an ack once a flush returns after the reconnect.
+- `[docs]` Restaged for the new contract: the `NatsConnectionTest` failed-publish cases (ordering now by admission;
+  the #144 handler test fails its write once; the others wait for Open), `CloseIntentTest` (a disconnect discards the
+  accepted frame; a late write after a reopen fails; new: a write failing during a disconnect is wrapped),
+  `OperationReadReconnectTest` and `PullConsumerReconnectTest` (a handler or `onError` that publishes on the dead
+  connection waits for the reconnect with `flush()`). The `ReconnectedListenerTest` cases that pin the retry after the
+  reconnect now use `publishGuarded()`, which keeps it.
+
+## [2.27.0] - 2026-10-14
+
+### Upgrade notes
+
+- A subscription-limit failure is now a `SubscriptionLimitException`. It extends `ConnectionException`, so every
+  `catch (ConnectionException)` and `catch (NatsThrowable)` still catches it, and its message is unchanged. Only code
+  that compares the exact class name, such as `$e::class === ConnectionException::class`, sees the difference.
+
+### Added
+
+- `[feature]` New `IDCT\NATS\Exception\SubscriptionLimitException`, a final subclass of `ConnectionException`, for the
+  connection's subscription limit (#242). A caller could recognise the server's `-ERR 'maximum subscriptions exceeded'`
+  only by matching exception text, since the one classifier, `NatsClient::isSubscriptionLimitError()`, is internal and
+  takes the bare `-ERR`. The client now builds the typed error wherever it built a plain `ConnectionException` for the
+  limit: the read that meets the `-ERR` (`Server sent error frame: ...`, thrown, or handed to the error listener by the
+  heartbeat, a reconnect's replay and the other reading loops that report it); a request whose shared reply inbox was
+  dropped for it; a pull fetch or batched Direct Get whose reply inbox was dropped for it; and a guarded subscribe
+  whose replayed `SUB` the new server rejected for it. The type tells the reason, not the connection's state: the
+  server sends the same `-ERR` when it refuses a `SUB` beyond the limit, keeping the connection open, and when an
+  account's limit is lowered below what the connection holds, closing the connection about 20 ms later. And since the
+  `-ERR` names no subscription, an error about a reply inbox still says the server may have rejected it. A pull
+  consumer run keeps failing with a `JetStreamException`; when the subscribe itself reported the rejection, the typed
+  error is its previous one. Other server errors keep the plain class. Asked for by
+  ideaconnect/symfony-nats-messenger#76, which turns the limit into Symfony's `TransportException` for its pulls.
+
+### Testing & CI
+
+- `[docs]` New `SubscriptionLimitExceptionTest` (6 cases, #242) over `SubscriptionLimitServer`: the operation whose read
+  meets the limit `-ERR` fails with the typed error, the heartbeat's read hands the listener the same type, the `-ERR`
+  of a server that closes the connection behind it is typed the same while the EOF still ends the connection, and three
+  other server errors keep the plain class (guards). `JetStreamInboxRejectionTest` and `MuxInboxRejectionTest` now
+  assert the type of every limit error they produce, the typed previous error of a fetch and a pull consumer run whose
+  replayed inbox was rejected, and the plain class of a permissions violation and a fatal `-ERR`;
+  `ExceptionHierarchyTest` asserts the new class is a `ConnectionException` and a `NatsThrowable`.
+
+## [2.26.8] - 2026-10-13
+
+### Fixed
+
+- `[bugfix]` The `UNSUB` a dropped shared reply inbox owes is written only on the connection it was dropped on (#193).
+  A mux dropped for a `maximum subscriptions exceeded` `-ERR` is queued for release, since the `-ERR` may have been
+  another subscription's and the server may still hold it, and the next request's install (or a drain, #213) writes
+  its `UNSUB` ahead of the new `SUB`. The queue outlived a reconnect: a mux dropped on a connection then lost was
+  released again on the new one, which never held it, and a replayed mux the new server rejected got a second `UNSUB`
+  after the one the replay writes. `connectOnce()` now forgets the old connection's mux releases, as it does the
+  guarded inboxes' (#175), and `finishReplayWindow()` takes the sid whose `UNSUB` it writes off the mux list. The
+  release on the same connection is unchanged. The server ignores an `UNSUB` for a sid it does not hold, so this only
+  removes wasted bytes. Found by the review of #175 (2.19.0).
+
+### Testing & CI
+
+- `[docs]` New `MuxReleaseAcrossReconnectTest` (11 cases, #193) over `SubscriptionLimitServer`: a mux dropped and its
+  connection lost, a replayed mux the new server rejects, the same after the first `SUB`'s write fails (each through
+  `request()` and `requestMany()`), a drain after each, and the same-connection release kept for the next install and
+  for a drain (guards). 8 fail on 2.26.5.
+
+## [2.26.7] - 2026-10-13
+
+### Fixed
+
+- `[bugfix]` A chunk a custom transport hands over after the connection its read started on was replaced, or closed,
+  is parsed with that connection's parser and dispatched as that connection's (#205). The read used to push it into
+  the parser that was current when it returned, the new connection's, and dispatch it as the new connection's: the old
+  server's `PING` was answered there, its `PONG` or a late reply could confirm the new connection's reply inbox, its
+  `INFO` replaced the new server's info, and a partial frame left the new parser expecting payload, so the new server's
+  own `PING` was taken as payload and never answered. `readChunk()` and the heartbeat's read now capture the parser,
+  the connection generation and the terminal-close count before they read, and `dispatchFrames()` takes that origin, so
+  the #182 rule for the old server's frames covers the whole chunk: its messages go to the subscriptions the reconnect
+  replayed, its control frames are not applied, its `-ERR` is reported as the old server's. A corrupt late chunk still
+  reports its parse failure and delivers the messages ahead of it, but starts or joins no recovery of the new
+  connection, and a heartbeat tick whose connection was replaced while its `PING` was written does not read the new
+  socket. The built-in transports cannot complete a read that late (their `close()` ends it); the
+  `TransportInterface::readLine()` docblock now says a read belongs to the connection it started on. Found by the
+  review of #191.
+
+### Testing & CI
+
+- `[docs]` New `LateTransportReadTest` (35 cases, #205), over a transport that holds a read's chunk across a
+  reconnect: through your read, an operation's and the heartbeat's (with and without its tick's generation), a late
+  `PING` and half `MSG`, a late chunk finishing the old parser's message, a late `PONG` or reply not confirming the new
+  inbox, a late `INFO` and `-ERR`, a late corrupt chunk, a terminal close alone, an unchanged connection (guard), a
+  corrupt late chunk not joining the new connection's recovery, and an obsolete heartbeat tick. 31 fail on 2.26.5.
+
+## [2.26.6] - 2026-10-13
+
+### Fixed
+
+- `[bugfix]` A lame-duck failover whose reconnect is refused authentication reports the refusal once through the
+  error listener and the asynchronous error log, also when it joins another fiber's recovery (#201). `performRecovery()`
+  reports a refusal before it rethrows it, and both failover catches - inline for your own read, and in the failover's
+  own fiber for an operation's read (#191, 2.21.0) - reported it again, so metrics or alerting built on the listener
+  counted it twice. They now go through one helper that leaves an `AuthenticationException` alone and reports
+  everything else, so "Reconnect attempts exhausted", which recovery does not report itself, is still reported once.
+  The `Closed` event, its error and the fail-fast stop after a refusal are unchanged. Found by the review of #191.
+
+### Testing & CI
+
+- `[docs]` New `LameDuckAuthenticationReportingTest` (16 cases, #201): the inline and own-fiber failover refused,
+  with normal, throwing-listener and throwing-logger reporting; both paths joining a heartbeat recovery whose dial is
+  held; exhaustion still reported once; a refusal outside lame duck still reported once and thrown; two separate
+  refusals with identical messages each reported. 12 fail on 2.26.5.
+
+## [2.26.5] - 2026-10-13
+
+### Fixed
+
+- `[bugfix]` Your own read already waiting - `processIncoming()` or `readIncoming()` on the socket, or for the read
+  slot - is woken when another fiber's read stops a subscription at a handler failure, and returns zero frames (#199).
+  Since 2.20.0 (#186) your read continues such a subscription before it reads, but only once, at its start: one
+  already waiting stayed waiting, so the rest of that subscription waited for the server's next bytes (on an idle
+  connection its next `PING`, two minutes away by default) or for the read's own cancellation. It takes two of your
+  reads at once, or an operation under `handlerErrorsFailOperations: true` whose read is held up in a handler that
+  awaits while your read loop waits. A stop now fires a one-shot, connection-level wake-up that only your reads'
+  slot wait and socket read take, right before they wait: a woken read returns `IncomingChunkResult(0, false)` (0 from
+  `processIncoming()`), its transport read cancelled with nothing consumed, and your next call continues the stopped
+  subscription before it reads, throwing its next handler failure if there is one. Keep reading after both an
+  exception and a zero-frame result. Your cancellation still wins when both fire, with its own reason; operations'
+  reads, recovery and failover are unchanged, and a fired wake-up is never reused, so an idle loop does not spin. This
+  was a documented boundary of #186 (`readIncoming()`'s docblock), now removed. Found by the interleavings review of
+  #186 (2.20.0).
+
+### Testing & CI
+
+- `[docs]` New `StoppedSubscriptionReadWakeupTest` (19 cases, #199): your read on the socket or waiting for the slot
+  woken by a stop from your own held-up read or a poll, by a handler failure or an escaped overflow, through both read
+  APIs; an unrelated operation keeping the socket; both of your waiters woken by one stop; no reuse of a fired wake-up;
+  your cancellation's reason winning in either firing order; the default reporting mode not waking your read. 12 fail
+  on 2.26.3. `HandlerFailureInYourOwnReadTest::testAMarkSetWhileYourOtherReadWaitsOnTheSocketWaitsForTheServersNextBytes`,
+  which pinned the old boundary, becomes `testAMarkSetWhileYourOtherReadWaitsOnTheSocketWakesItBeforeTheServersNextBytes`.
+
+## [2.26.4] - 2026-10-13
+
+### Fixed
+
+- `[bugfix]` An operation a `DiscoveredServers` or `LameDuck` listener started and did not await failed at once or read
+  the leaving socket, depending on which read brought the lame-duck `INFO` (#203). When your own read brought it, the
+  failover ran inline in the listener's fiber, which became the recovery fiber, and every operation called from that
+  fiber was taken for one issued inside the recovery, which the #145 guard refuses: a `request()`, a
+  `processIncoming()`, `connect()`, `drain()` and the rest failed with `Connection is not open` although nothing
+  inside the recovery awaited them (a queued `drain()` hit the same false self-join rejection). Each operation now records
+  when it is called whether it is issued inside the recovery, and only then is refused; one issued before waits for
+  the failover within its own timeout and runs on the new server. When an operation's read brought the `INFO`, the
+  failover started in a fiber of its own after the listener returned, and a `processIncoming()` the listener started
+  read the leaving socket first: the client's own close of it was reported as `Socket closed by peer (EOF)`. A read
+  made while such a failover is leaving the connection now waits for the failover's completion (#202's boundary,
+  not the `Reconnected` listener) within its cancellation and wake-up, and returns 0 without reading either socket;
+  `waitForReconnect: false` refuses it at once, a mark for an older connection does not hold up the new one, and a
+  drain's flush still reads the connection it drains. Timeouts, cancellations, event order and exception messages are
+  unchanged. Not changed: the failover still starts once these listeners return, so an operation a listener awaits
+  runs on the leaving server; and a listener inside a recovery that awaits a future kept from before it, whose
+  operation waits for that recovery, still waits with it (a `request()` until its timeout). Found by the review of
+  #191 (2.21.0).
+
+### Testing & CI
+
+- `[docs]` New `ListenerOperationFailoverTest` (53 cases, #203): side operations started from both listeners on both
+  failover paths, directly and wrapped in `async()`; the ten other entry points, `connect()` and `drain()` included;
+  waiting disabled; a side request's and a side read's own cancellation and deadline while the failover's dial is held;
+  a side read returning while the `Reconnected` listener is held. 37 of them fail on 2.26.3.
+  `NatsConnectionInternalsTest::testAwaitOpenConnectionWaitsAgainWhenAnotherReconnectFollows` passes `false` for the
+  operation's provenance, the new second argument of `awaitOpenConnection()`.
+
+## [2.26.3] - 2026-10-13
+
+### Upgrade notes
+
+- A pull consumer run (`pullConsumer()->handle()`, finite or infinite) no longer ends when its read meets an `-ERR` the
+  server keeps the connection open for (`maximum subscriptions exceeded`, `Invalid Publish Subject`, a `Permissions
+  Violation` such as `... for Publish with Reply of ...`): it reports it to the `errorListener` and the logger and
+  goes on (#209). Code that restarted a run after `handle()` threw `ConnectionException: Server sent error frame: ...`
+  for such an `-ERR` will no longer see it there; watch the error listener instead. The run's own reply inbox rejected
+  still fails `handle()`, now always with the `JetStreamException` naming the inbox.
+
+### Fixed
+
+- `[bugfix]` A pull consumer run ended when its read met an `-ERR` the server keeps the connection open for, such as
+  `maximum subscriptions exceeded` for an application's `subscribe()` beyond the subscription limit, a Key/Value
+  watch or the shared reply inbox of a first `request()` (#209). The run's only `SUB` is its guarded reply inbox,
+  whose rejection is tied to it in the dispatch whichever read meets it, and a denied `PUB` of the run draws a
+  recoverable `-ERR`, so such an `-ERR` was never the run's: it ended the run, an infinite one too, with an error
+  naming neither the consumer nor the `SUB` it answered, after handing over what the pulls held. The engine's read
+  now reports it to the `errorListener` and the logger (`NATS connection error: Server sent error frame: ...`) and
+  the run goes on, its partial batch kept, in finite and infinite mode alike, as a service's `run()` does. The
+  report is queued where the `-ERR` is classified and sent once the chunk is dispatched, so another subscription's
+  handler failure under `handlerErrorsFailOperations` or an overflow under `slowConsumerErrorsFailOperations` in
+  the same chunk still ends the run, also from the parsed prefix of a chunk that fails to parse, and a fatal `-ERR`
+  keeps its rules. When the run's own read met the limit `-ERR` that rejected its own inbox, `handle()` used to
+  fail with that bare `ConnectionException`; it now fails with the `JetStreamException` naming the inbox, as README
+  said. Requests, fetches, batched Direct Get, queue polls and your own reads keep failing on such an `-ERR`. An
+  internal `reportServerErrors` flag on `readIncomingForOperation()` carries this; `alwaysReport` would also have
+  reported handler failures and overflows regardless of the options and delivered other subscriptions' leftovers.
+  Found by the review of #197 (2.22.0).
+
+### Testing & CI
+
+- `[docs]` New `PullConsumerServerErrorTest` (27 cases, #209) and `OperationServerErrorReportingTest` (17 cases): an
+  unrelated nonfatal `-ERR` reported while the run's partial batch is kept, finite and infinite; an application's
+  `subscribe()` beyond the limit next to a running consumer; the run's own inbox rejection with the
+  `JetStreamException`; a configured handler or overflow failure, or a fatal `-ERR`, in the same chunk still ending
+  the run; the flag's opt-in, policy, ordering, observer and fatal-precedence rules.
+  `PullConsumerConnectionEndingFrameTest::testAnErrKeepingTheConnectionOpenStillEndsTheRun`, the guard of the old
+  behaviour, is replaced by `testAnErrKeepingTheConnectionOpenIsReportedAndTheRunContinues`;
+  `ServerErrorKeepingConnectionTest::testAnOperationsReadLeavesTheRemainderToYourNextRead` gains a row for a read
+  with the new flag, which, unlike a serving loop's, delivers no other subscription's leftovers.
+
+## [2.26.2] - 2026-10-12
+
+### Fixed
+
+- `[bugfix]` A request or `requestMany()` waiting for a replacement reply inbox to be confirmed now checks the inbox
+  before each confirmation read, not only after one (#204). After a read that returned without reading, the wait
+  pauses for 1 ms; when another fiber's read dropped the inbox in that pause (the server's renewed `maximum
+  subscriptions exceeded`, or a permissions violation naming it), the next read was made with the forgotten
+  confirmation fence: no wake-up, so on an idle connection the request waited out its timeout (`Request timed out
+  for subject ... while waiting for the reply inbox to be set up`) instead of failing with the dropped-inbox error
+  at once, and a lame-duck `INFO` that read took was failed over inline, past the request's timeout. Now the request
+  fails at once with the dropped-inbox or the permissions error, without another read and without being sent, as
+  README Request/Reply describes; a later request still installs a fresh inbox. Needs a connection at its
+  subscription limit and another fiber's read meeting the rejection in a 1 ms window, hence rare. Found by the
+  review of #191 (2.21.0).
+
+### Testing & CI
+
+- `[docs]` New `MuxConfirmationPauseTest` (16 cases, #204): `request()` and `requestMany()` whose replacement inbox is
+  rejected during the confirmation pause (limit, limit then a queued lame-duck `INFO`, permissions) fail before
+  another socket read and are not sent; a replacement inbox installed by another request during the pause, left
+  unconfirmed or confirmed, does not adopt the original request; guards for a rejection in the read the request
+  waits behind (failing without another pause), a confirmation during the pause and a terminal close. The tests hold
+  the real 1 ms pause timer instead of relying on timing.
+
+## [2.26.1] - 2026-10-12
+
+### Fixed
+
+- `[bugfix]` An operation whose read got a chunk that fails to parse ran the reconnect inline and waited for all of it
+  (#195): past its own deadline, past its wake-up (a reply delivered from the frames ahead of the bad bytes came back
+  only once the reconnect was over), and also with `waitForReconnect: false`. Since #178 (2.14.0) and #191 (2.21.0)
+  such an operation - a `request()`, `requestMany()`, a `SubscriptionQueue` poll, a fetch, a pull consumer, Key/Value
+  `keys()` and `history()`, a flush waiting for its `PONG` - recovers a lost socket and a lame-duck failover in a fiber
+  of its own and waits only within its own wait, but the parse-error path still called the recovery inline, so a
+  `request()` with a 300 ms timeout came back only after the outage. A chunk fails to parse on an unknown control
+  line, a malformed `MSG`/`HMSG` line, a frame over the bound derived from the server's `max_payload`, or a payload
+  not ended by CRLF: a server or proxy bug, hence rare. The read still delivers the frames ahead of the bad bytes and
+  reports the `ProtocolException` first, then recovers through the same helper as a failed read: the operation times
+  out at its deadline with the recovery carrying on, returns at once what those frames brought it, or with waiting
+  disabled fails at once with `Connection is not open`, the `ProtocolException` its previous. A lame-duck `INFO`
+  among those frames now fails over in a fiber of its own too, as from a chunk that parses, and the recovery joins
+  it, which removes the exception README item 9 documented. Your own `processIncoming()`/`readIncoming()`, a serving
+  loop's read and the heartbeat still recover inline and wait for all of it. Found by the review of #191 (2.21.0).
+
+### Testing & CI
+
+- `[docs]` New `CorruptChunkOperationReadTest` (9 cases, #195): a request whose reply is a corrupt chunk times out at
+  its deadline, or fails at once with waiting disabled; a reply, or a poll's message, ahead of the bad bytes returned
+  at once; a poll with nothing for it returning at its deadline; a lame-duck `INFO` ahead of the bad bytes failing over
+  in a fiber of its own; your own read still waiting for the whole recovery. Each holds the recovery's dial until the
+  operation has returned.
+
+## [2.26.0] - 2026-10-12
+
+### Upgrade notes
+
+- One of the library's operations whose read started a reconnect, or brought a lame-duck `INFO` that started a
+  failover, is now let go when the reconnect is over, as an operation that joined it is, instead of when the
+  `Reconnected` listener and the delivery of what the reconnect read have finished (#202). That listener and that
+  delivery go on in the reconnect's fiber, so the operation can return while they still run; a listener must not
+  count on such an operation having waited for it. Your own `processIncoming()` and `readIncoming()`, a serving
+  loop's read, the heartbeat and an operation whose write started the reconnect still wait for all of it.
+
+### Changed
+
+- `[feature]` An operation whose read starts the recovery no longer loses its result to a slow `Reconnected` listener
+  or a slow handler in the delivery after the reconnect (#202). When the read of a `request()`, `requestMany()`, a
+  `SubscriptionQueue` poll, a fetch, a pull consumer or a `flush()` meets a lost connection (#178), or brings a
+  lame-duck `INFO` (#191), it starts the recovery in a fiber of its own and waits for it within its own timeout. It
+  used to wait for that fiber to end: past the reconnect itself, through the announcement of the new connection,
+  which runs the `Reconnected` listener, and the delivery of what the reconnect read, which runs the handlers in sid
+  order. A listener, or a handler of a lower sid, that took longer than what was left of the operation's timeout
+  made it time out although its message was queued or its reply was on the new socket; a `request()`'s reply was
+  then lost, and a fetch's messages came back only after `ack_wait`. Operations that joined the reconnect were
+  already let go when it was over. The read now waits for a completion of its own, settled at the same point as the
+  joiners' (after the handshake, the subscription replay, the reply inbox's confirmation and the flush of buffered
+  publishes), or when its recovery returns having done nothing (a close, a recovery already done by another fiber),
+  or with the recovery's error. It then looks again: a poll takes what the reconnect read for its subscription, and
+  a request reads its reply on the new socket. Failed recoveries keep their errors, a deadline or a wake-up still ends
+  only the wait, and the recovery carries on. A request's reply already queued on the shared request inbox behind a
+  slow handler of a lower sid still waits for that handler. Found by the review of #191 (2.21.0).
+
+### Testing & CI
+
+- `[docs]` New `OperationRecoveryCompletionTest` (13 cases, #202): a poll or a request whose read started the recovery
+  or the failover returns while the tail is held, joiners as guards, an application read that still waits, a listener
+  that recovers again after the initiating poll returned, and a skipped recovery of a replaced connection.
+  `OperationReadReconnectLifecycleTest::testAPollThatWaitsForAllOfTheReconnectReturnsAfterTheReconnectedListener` is
+  replaced by `testAPollReturnsWhileTheReconnectedListenerStillWaits`, and
+  `testAPollFromAReconnectedListenerWhoseOwnReadFindsTheNewConnectionGoneReconnectsItAgain` starts the first reconnect
+  with an application read, since an outer poll of the same queue could now take the one message itself.
+
+## [2.25.10] - 2026-10-12
+
+### Upgrade notes
+
+- A `pinned_client` pull consumer's iterator now remembers the group's pin as soon as a message carrying it arrives
+  (#208), so a later `handle()` on the same iterator resends it however the earlier run ended. A 423 clears only the
+  pin its own pull sent. A grouped run still pulls one request at a time until the first batch under its pin has
+  been delivered, also after receiving the pin.
+
+### Fixed
+
+- [bugfix] A `pinned_client` pull consumer run that ended while its first pull (or the first after a 423) still held
+  messages left the iterator without the pin, so `handle()` again on the same iterator pulled without it, and the
+  server held that pull, and every other client of the group, until the pin's `priority_timeout` (two minutes by
+  default) had passed (#208). The pin was taken only from a batch the run retired or handed over to the handler, never
+  when the run ended first: a failure (a fatal `-ERR`, the connection lost with `waitForReconnect: false`, another
+  subscription's handler under `handlerErrorsFailOperations`, a rejected inbox), `stop()`, `disconnect()` or the
+  client's `drain()`. The pull-inbox router now remembers a grouped run's pin as each data message arrives, before it
+  routes the message, so every way a run ends keeps it, also a `stop()` followed by `handle()` while the old pull's
+  write is still completing. Delivery no longer takes a pin from what a pull buffered, so an old message cannot
+  restore a pin a 423 rejected after it arrived. A run still pulls serially until the first batch under its pin
+  retires (a pin received on the first message no longer lets it fan out early), and pipelines at once with a pin
+  inherited from an earlier run. Each pull records the pin it sent, and a 423 clears the live pin only when it is
+  that one, restarting serial acquisition: a 423 delayed past a newer pin, received by the same run or another run of
+  the iterator, leaves the newer pin alone. Against nats-server 2.12 the report measured the restart's message 7.5 s
+  late with `priority_timeout` 8 s; the new live test (`priority_timeout` 30 s) gets it at once, where the unchanged
+  code was still waiting at the test's 10 s bound. Found by the review of #197 (2.22.0).
+
+### Testing & CI
+
+- [docs] New `PullConsumerPinRetentionTest` (20 cases, #208): the restart's first pull keeps the pin of an unretired
+  first pull across seven endings, with the old pull's write still completing, after a 423, against a delayed 423 of
+  an older run and when another run loses an inherited pin; serial re-acquisition after a 423; an old buffer not
+  restoring a rejected pin; frames that must not change the pin; a pinless group fanning out; an ungrouped run taking
+  no pin. New live `JetStreamIntegrationTest::testJetStreamPinnedGroupKeepsItsPinWhenARunEndsBeforeItsFirstPullRetires`
+  (stop, and another handler failing the run) against a `pinned_client` consumer.
+
+## [2.25.9] - 2026-10-11
+
+### Upgrade notes
+
+- A pull consumer run's set-up of its inbox (`_INBOX.JS.PULL.<nuid>.*`, before its first pull) now has one
+  `requestTimeoutMs` for the whole set-up: the wait for a reconnect in flight, the `SUB` write and the recovery of a
+  failed write together (#198). It used to have up to two fresh `requestTimeoutMs` waits for a reconnect, and a `SUB`
+  write without a bound. When that budget runs out without a `stop()` or `drain()`, `handle()` still fails with a
+  `TimeoutException`, now worded `Subscribe to "_INBOX.JS.PULL.<nuid>.*" timed out within the operation budget` (it
+  was `... timed out waiting for the connection to be re-established`), or with the detailed `JetStreamException` of
+  an inbox rejection the server sent meanwhile. Public `subscribe()` is unchanged.
+- A run whose `stop()` or `drain()` came before its engine started no longer subscribes an inbox only to release it at
+  once: it returns 0 without a `SUB`.
+
+### Fixed
+
+- [bugfix] A pull consumer's `stop()` or `drain()` during its inbox set-up was seen only once the set-up ended (#198).
+  The case: a worker whose `handle()` starts while the connection reconnects (a run restarted during an outage, or
+  `handle()` with `setIterations()` in a loop) and is told to shut down meanwhile, a SIGTERM during a rolling restart of
+  the NATS cluster, say. #181 (2.17.0) made the iterator's `stop()` and `drain()` from another fiber end the engine's
+  pump read and idle backoff at once, but not the run's first wait, the subscribe of its pull inbox, which can wait for
+  a reconnect, the `SUB` write, and the recovery of a failed write. The run went on waiting: when the reconnect came
+  back, it subscribed the inbox on the new connection only to release it at once, and when it did not within
+  `requestTimeoutMs` (10 s by default), `handle()` failed with the subscribe's `TimeoutException` although the run had
+  been told to stop; a `SUB` write that met a dead socket after the reconnect could add a second `requestTimeoutMs`.
+  The set-up now waits with the run's stop and drain wake-ups next to its budget: either signal ends it at once, and
+  the run returns 0 with no pull issued, so nothing is delivered or lost. A cancelled subscribe releases what it
+  registered: a `SUB` not written yet is never written, one waiting for the recovery is not replayed on the new
+  connection, and one already written or replayed is followed by its `UNSUB`, on that session. The shared reconnect
+  goes on for the other operations. A signal latched before the engine starts skips the subscribe. Without a signal
+  the set-up still waits for the reconnect within its budget and then pulls. A rejection of the inbox the server sent
+  while the set-up waited (permissions, or the connection's subscription limit) still fails the run with its detailed
+  `JetStreamException` when the budget runs out, the timeout as its cause, rather than a bare timeout; with a signal
+  the run returns 0. A connection failure stays a failure even when a signal lands after it. This is the iterator's
+  `drain()`; draining the client is unchanged. Found by the implementation brief of #188 (2.19.0).
+
+### Testing & CI
+
+- [docs] New `PullConsumerSubscribeWakeUpTest` (28 cases, #198): a signal while the set-up joins a recovery or recovers
+  a failed `SUB`, latched before the engine starts, outside a run, during a held `Reconnected` listener and during a
+  `SUB` write held before or after acceptance; recovery and a genuine timeout without a signal; a restart during the
+  set-up; a recorded rejection with a timeout, stop or drain; and a signal after the connection failed.
+  `PullConsumerWakeUpTest::testAStopThenHandleAgainBeforeTheFirstRunStartedEndsItBeforeItPulls` now expects one `SUB`
+  (the second run's) and no `UNSUB`.
+
+## [2.25.8] - 2026-10-11
+
+### Testing & CI
+
+- `[docs]` Two wall-clock tests no longer flake on slow runners (#185). Both now decide by the order of events.
+  - `OperationReadReconnectLifecycleTest::testAClosedListenerThatSuspendsWhileTheReconnectGivesUp` suspended its
+    Closed listener 0.3 s or 0.8 s against poll deadlines of 3 s and 0.3 s. It checked Closed the moment the timed-out
+    poll returned, but on a slow runner the three refused reconnect attempts were not over by then (Connecting). The
+    listener is now held on a gate the test opens. In the exhaustion case, with a 30 s deadline, the poll must still
+    wait once the listener has been entered and the queued work has run; let go, the poll gets the exhaustion error.
+    In the timeout case the listener stays held until the 0.3 s poll has returned nothing, and Connecting is allowed
+    at that point. Both still end Closed with the same events and dials.
+  - `OperationReadWakeupTest::testOperationGetsWhatADispatchWaitingOnAPongWriteBrings` required its result within
+    1.5 s. A runner under coverage took 2.58 s, with the hold-up ended as designed. The result now has to win a race
+    against a referenced timer of the operation's 3 s deadline, armed before the operation starts, which the broken
+    reads could not win.
+
+  Both still fail on the regressions they guard against. No production code changed.
+
+## [2.25.7] - 2026-10-11
+
+### Testing & CI
+
+- `[docs]` The no-spin tests see a timer loop inside the connection's read again (#184).
+  `ReadWakeupLifecycleTest::testTwoPollsOfOneQueueWithOneMessage` and
+  `OperationReadReconnectLifecycleTest::testAnOperationParkedOnTheReconnectItStartedDoesNotSpin` counted what returns to
+  the operation (its looks at its result) and what reaches the socket (its reads). A wait that polls on a timer inside
+  the connection does neither: polling the read slot while the application's read holds it, or polling the recovery
+  while a reconnect backs off. It registers hundreds of timers and was invisible to both counts. The process-wide count
+  of event-loop registrations that used to catch it was dropped in 2.18.0, because clients earlier tests left
+  reconnecting landed their handshake bursts in the wait.
+
+  Both tests now run each data case in a process of its own (`#[RunInSeparateProcess]`,
+  `#[PreserveGlobalState(false)]`). Each installs `tests/Support/LoopRegistrationCounter.php` first: a transparent
+  driver around the loop's, `tests/Support/RegistrationCountingDriver.php`, which counts every registration. Each test
+  bounds the registrations over its wait to fewer than 50, next to the existing counts: six and four on the current
+  code. A 1 ms loop in place of either wait registers some 900 to 1,800, and tens of thousands with no delay, also when
+  it runs in a detached fiber. All six such loops pass the old assertions and fail the new bound.
+
+  `LoopRegistrationCounterTest` (10 cases) covers the driver's forwarding and counting, the windows, and the isolation:
+  a fresh process and loop per case, and install() refusing a loop that has callbacks or has run. No production code
+  changed.
+
+## [2.25.6] - 2026-10-11
+
+### Testing & CI
+
+- `[docs]` `RetirePullInboxTest::testADrainThatNeverAsksForTheHandOverEndsItReleasedAtTheRequestTimeout` no longer
+  fails when the drain is slow to ask its participant. The release ends at the request timeout, at whichever comes
+  first of two deadlines: its own budget, or the seal of the drain's delivery, which ends the requests in flight at the
+  drain's budget. The drain's deadline starts first, but the test measured its 0.15 s lower bound from the release's
+  call. In the coverage run Infection starts with, the drain took about 55 ms to ask, and the release ended 0.145 s
+  after the call. That failed the post-merge mutation jobs of 2.25.5 before any mutant ran. The bound is now measured
+  from the drain's start. The test still fails when the release does not wait for the drain (0.002 s).
+
+## [2.25.5] - 2026-10-11
+
+### Testing & CI
+
+- `[docs]` The scripted reconnect server keeps the order of writes (#192). `tests/Support/ReconnectingTransport.php`
+  ran each write on its own and held up only the one matching a stall, so a write made during a stall reached the
+  session before the stalled one, which no socket does: bytes reach a server in the order they were written, and the
+  built-in transports hand them over in the caller's fiber. Since the connection ties PONGs to PINGs by order (2.19.0),
+  a heartbeat PING overtaking a held-up SUB + PING had its PONG taken for the held-up one's and confirmed a guarded
+  inbox whose SUB the server had not received. Each write now waits until the one before it on its session has been
+  accepted, and only then meets its stall or failure: a stalled write holds the later ones, and they fail when their
+  session ends - also one made just before the end with nothing ahead of it, which used to be recorded on the dead
+  session - without waiting for a head that outlives its session; a dial that succeeds ends the session it replaces, so
+  a new session's writes never wait for an old one's. `afterWrite` runs once the next write has been let through, and
+  the new `holdCompletionOfNextWriteContaining()` holds a writer whose bytes the session already has, without holding
+  any other write: a delay after acceptance, distinct from backpressure. The three tests that relied on a write
+  overtaking a stalled one are restaged on that distinction, with their assertions kept: the heartbeat-shape inbox
+  rejection test of #175 now runs with PINGs answered over `SubscriptionLimitServer`, which rejects the SUB in wire
+  order, holding the fetch's writer through the new `tests/Support/CompletionHoldingTransport.php`; the mux wait test
+  of #180 (four data sets) and the drain hand-over order test of #207 hold a writer's completion instead of its bytes.
+  New `ReconnectingTransportWriteOrderTest` (15 cases) covers the order, sessions ending and being replaced, and the
+  connection-level consequence with the heartbeat answered. No production code changed.
+
+## [2.25.4] - 2026-10-10
+
+### Testing & CI
+
+- `[docs]` Unit tests no longer leave clients running into the tests after them (#183). A test that ended with its
+  client Open, reconnecting, or with an operation still waiting kept that client's heartbeat, its reconnect attempts
+  (ten over about 43 s with the defaults, each a burst of up to 500 handshake polls on a double that answers at once)
+  and its operations' 1 ms loops running through the rest of the suite: CPU taken from unrelated tests, and bursts that
+  flaked a test counting process-wide event-loop registrations (d551d6b). The issue's review counted, in `ServiceTest`
+  alone, 66 connections still Open when their test finished, 61 with a referenced heartbeat timer. A new test-resource
+  scope (`tests/Support/TestResourceScope.php`, through the `OwnsTestResources` trait) owns what a test starts: every
+  client and connection, registered as it is constructed (weakly, so the lifetime tests still see what they drop
+  collected, and through the connection inside a client, which outlives the client a test drops when its method
+  returns), the background operations with what ends each, the fixture gates (a held dial, a stalled write, a held
+  handler) and the test's loop callbacks. Its shutdown, from `tearDown()`, runs under one deadline on a referenced
+  timer: it stops what starts new work, starts every disconnect at once, releases the gates only once each close
+  intent has run, joins each close and each owned operation, and fails the test, naming the resource, when a
+  connection is not Closed, an operation is still pending, a fixture is not idle or a cleanup step threw; a test that
+  already failed keeps its own failure and gets the cleanup report on stderr. All 97 unit classes that construct a
+  client or connection now register them (`ReconnectScenarios` delegates its `$opened` cleanup to the scope, which
+  joins the closes instead of swallowing whatever a one-second wait threw and sleeping 50 ms). The seven classes that
+  cancelled every event-loop callback before or after each test (`JetStreamContextTest`, `KeyValueBucketTest`,
+  `ObjectStoreBucketTest` and four mutation classes), which hid the clients they left Open, now close their clients and
+  cancel only the heartbeat watchdogs their own tests armed, by the ids recorded since `setUp()`; their timer-counting
+  assertions count only the test's own timers. Tests that inject a failing transport close, or a listener that
+  reconnects on Closed, reset it for the shutdown. `TestResourceScopeTest` covers the scope itself. No production code
+  changed.
+
+## [2.25.3] - 2026-10-10
+
+### Upgrade notes
+
+- An infinite pull consumer run that ends on a terminal status (such as `409 Consumer Deleted`) now closes its inbox
+  before it calls `onError` (#211): `onError` and `handle()`'s result come up to one round trip later (at most
+  `requestTimeoutMs`), the handler gets what the server sent the pulls behind the status before the inbox's `UNSUB`,
+  and that counts in `handle()`'s result. An error listener may get a `TimeoutException` ("Releasing the pull consumer
+  inbox ...") as a warning when the server does not answer the release's `PING` in time. A rejection of the inbox, a
+  `stop()` or the client's `drain()` that comes during that round trip ends the run as it does elsewhere, `onError` not
+  called.
+
+### Fixed
+
+- [bugfix] An infinite pull consumer run that ended on its head pull's terminal status dropped what the server sent the
+  pulls behind it after that status (#211). The case: a consumer deleted and recreated under the same name (to change a
+  field the server does not let you update, say) while the handler works on a batch. The waiting pull's `409 Consumer
+  Deleted` waits unread on the socket; when the handler returns the run refills, and the refill reaches the recreated
+  consumer, which serves it at once. The engine then reads the 409 and ends the run. Since 2.24.3 it hands over what the
+  pulls behind the status hold (#187), which covered the refill's messages when they came in the same read as the 409;
+  when they came a read later, the likelier timing, they were read after the run's `UNSUB` and dropped: gone on a
+  consumer with `ack_policy: none` or `max_deliver: 1`, delivered again after `ack_wait` otherwise. Before it reports
+  the status to `onError`, the run now closes its inbox to new deliveries through the release a failing run uses since
+  2.25.2 (`NatsClient::retirePullInbox()`, #212): `UNSUB` and a `PING` in one write, what the server sent before the
+  `UNSUB` read into the pulls (or the overflow) until the `PONG`, within one `requestTimeoutMs` budget, whatever the
+  pulls' expiry and also with nothing behind the status, the routing then sealed. The run's rejection observer outlives
+  the routing until the run's final `unsubscribe()`, so that a permissions violation naming the inbox, read by
+  `onError` or during the hand-over, still ends the run with the rejection, as it does since 2.25.1 (#206). After the
+  release the run's lifecycle rules apply in their order: a `stop()` or a close that discards returns the count
+  delivered so far, without `onError` and without the tail; the client's `drain()` asking for the hand-over, or a
+  rejection of the inbox, ends the run as they do elsewhere, `onError` not called; otherwise `onError` gets the status
+  once, and the pulls behind it and the overflow are handed over and counted. The run never pulls again on that path,
+  also when the connection ended during the release. A finite run, 423 pin recovery and the routine statuses (404, 408,
+  503, non-terminal 409) are unchanged. Measured against nats-server 2.12 with the worker reading one frame at a time:
+  the handler used to get m-1 only, and now gets m-1 and m-2. Found by the review of #197 (2.22.0).
+
+## [2.25.2] - 2026-10-10
+
+### Upgrade notes
+
+- A pull consumer run that ends with a failure of its own now releases its inbox before it hands what its pulls hold to
+  the handler (#212): `handle()` throws its failure up to one round trip later (at most `requestTimeoutMs`), and the
+  handler no longer gets messages the server delivers during that hand-over: they stay in the stream for the next pull.
+  An error listener may now get a `TimeoutException` ("Releasing the pull consumer inbox ...") as a warning when the
+  server does not answer the release's `PING` in time.
+
+### Fixed
+
+- [bugfix] A pull consumer run that ended with a failure of its own kept its pulls alive on the server while it handed
+  their messages to the handler, and dropped what they received meanwhile (#212). Since 2.22.0 such a run (its pump
+  read failing, a pull's write failing, or the server rejecting its inbox) hands its buffers over first (#197), and it
+  released its inbox only in its finally, after that hand-over. The server knows nothing of the failure: for as long as
+  the hand-over lasted it went on serving the run's pulls, each waiting for the rest of its batch, with what was
+  published meanwhile, and the run dropped it unacked, read after the run's UNSUB, or as a straggler once no pull was
+  left open; a reconnect completed during the hand-over even subscribed the run's inbox again. On a consumer with
+  `ack_policy: none` or `max_deliver: 1` that message was lost, otherwise it came again after `ack_wait`. Measured on
+  nats-server 2.12 with `ack_policy: none`: a message published while the handler held the first of two buffered
+  messages left the consumer at `delivered 3` and was never handled. The run now closes its inbox to new deliveries
+  before the hand-over, through a new connection-owned operation, `NatsClient::retirePullInbox()` (`@internal`): on an
+  open connection it writes `UNSUB` and a `PING` in one write and reads what the server sent before the `UNSUB` into the
+  pulls (and an infinite run's overflow) until that PING's PONG, waiting for the PONG itself rather than for the read,
+  within one `requestTimeoutMs` budget on a referenced timer; while the client's `drain()` is under way the drain's own
+  `UNSUB` and flush stand in for it, the run waiting for the drain to ask for its hand-over; while a reconnect is under
+  way, or on a closed connection, the inbox only leaves the replay. It then routes what the inbox's queue holds into the
+  pulls, unless a `stop()` or a close that discards came, and removes the inbox's local state, so nothing more reaches
+  the run; a guarded inbox already treated as rejected gets its owed `UNSUB` within the same budget. The server stops
+  serving the run's pulls, and what is published during the hand-over stays in the stream for the next pull. The
+  release costs the failing run one round trip; one that runs out of its budget (an unanswered `PING`, a stalled
+  write) or whose read fails is reported to the error listener as a warning, never in place of the run's own failure,
+  and a `stop()` ends it at once. The normal retire path, the infinite run that goes on past a frame that ended the
+  connection (#210), and finite batch and iteration limits are unchanged. The fence is best effort: a `UNSUB` whose
+  write timed out can still leave interest on the server until it lands. Found by the review of #197 (2.22.0).
+
+## [2.25.1] - 2026-10-10
+
+### Upgrade notes
+
+- A pull consumer run whose reply inbox the server rejects while its handler or `onError` runs, or while one of its
+  pulls is being written, now ends with that rejection as soon as that code returns (#206). A finite run
+  (`setIterations()`) that has delivered its last batch throws the `JetStreamException` instead of returning its count,
+  and so does a run that a later pull's terminal status, such as `409 Consumer Deleted`, would have ended, whose status
+  then never reaches `onError`. A `stop()` made by then still makes `handle()` return its count, and a handler or
+  `onError` that throws still ends the run with its own exception.
+
+### Fixed
+
+- [bugfix] A pull consumer run whose reply inbox the server rejected while the engine was not reading for it pulled
+  again on the dead inbox, and failed only at that pull's deadline, `setExpiresMs()` plus a second later (#206).
+  nats-server rejects the inbox mid-run when a configuration reload withdraws the subscribe permission (`Permissions
+  Violation for Subscription to "_INBOX.JS.PULL.<nuid>.*"`, the connection staying open), and rejects a reconnect's
+  replay of it when the new server is at the account's subscription limit. Whichever fiber's read met the `-ERR`
+  recorded the rejection, the handler's own `processIncoming()`, an application's read loop while the handler or
+  `onError` waited, or a failed write's recovery, and the engine looked at it at the top of its loop only. That pass
+  went on to refill the pipeline, one pull for each one retired, and to read until the new pulls' deadline; a finite
+  run with no pull left returned its count without the error, a later pull's terminal status ended the run as if
+  nothing had happened, the idle backoff (up to 500 ms) was not woken, and a pull whose write failed was retried on the
+  new connection after its recovery's replay had been rejected. Such pulls are not harmless: nats-server serves a
+  waiting pull only when its reply subject has interest, except that with leaf nodes or gateways enabled it serves one
+  younger than 2 s anyway, so the batch went to an inbox nobody held, lost on a consumer with `ack_policy: none` or
+  `max_deliver: 1`, delivered again after `ack_wait` otherwise. Measured on nats-server 2.12.15 with `leafnodes { port:
+  7422 }` and no leaf node connected, a pull for 3 messages whose reply subject had no subscriber left the consumer at
+  `num_pending 0`, `delivered.stream_seq 3`. The run now looks at the rejection again after every wait that can let
+  another fiber run: before each pull it retires, after a terminal status's `onError` and after its hand-over, and after
+  the issue phase. The rejection fires a wake-up of its own, which ends the pump read and the idle backoff at once, and
+  each pull goes out through a guarded publish whose guard refuses it before the first write, before the retry after a
+  failed write's recovery, once a sealed reconnect flush lets it go on, and in the writer of a publish made while the
+  connection drains (`NatsClient::publishGuarded()`, `@internal`). No new pull and no retry goes out once the run knows
+  its inbox was rejected; a pull the socket has already taken, or one already in the reconnect buffer, still does. The
+  run hands what its pulls hold to the handler first, as before any failure of the run (#197), a handler that fails
+  there being reported, and then throws the rejection. Found by the review of #197 (2.22.0).
+
+## [2.25.0] - 2026-10-10
+
+### Upgrade notes
+
+- `PullConsumerIterator::stop()` and `drain()` now act on every run active on the iterator when they are called, and
+  `handle()` no longer resets them for a run already going (#189). Code that called `handle()` again before the
+  previous run's future had resolved, which the README asked to avoid, no longer finds that run still going: after
+  `stop()` and `handle()` the previous run ends on its stop, its future resolving with its count, and after `drain()`
+  and `handle()` it delivers its pulls in flight to its own handler, next to the new run, and ends without pulling
+  again. The previous run's handler may still be finishing its message when the new run starts: await the previous
+  future first where two handlers must never run at once. Runs started on one iterator without a `stop()` in between
+  still all go on, and one `stop()` still ends them all, now each at once, where an older run used to see it only at
+  its pull's deadline; a `stop()` or `drain()` that an older run's handler makes once a newer run is going reaches the
+  newer run too. Code that awaits each run before starting the next sees no change.
+
+### Changed
+
+- `[feature]` A pull consumer can be restarted with `stop()` (or `drain()`) and `handle()` in one tick, without awaiting
+  the run under way, as a supervisor that changes the consumer's settings on a signal does (#189). Every run of one
+  `PullConsumerIterator` used to read the iterator's two flags: `handle()` cleared them and replaced the wake-ups of
+  #181 before the earlier run's engine resumed, so that run lost the `stop()` or `drain()` meant for it and went on
+  next to the new one, on the same consumer with its old handler and settings, one more run, inbox and set of pulls on
+  the server with each restart, until a later `stop()` reached it at its pull's deadline (its expiry plus a second),
+  or the connection closed. A restart from the handler, or from another fiber while the handler waited, also handed
+  the rest of what the run held to the old handler, against the documented "a `stop()` leaves the rest undelivered":
+  in the retire phase, and in the hand-overs of a run that fails (#197), that goes on past a frame that ended the
+  connection (#210, then also pulling on the new connection), that the client's `drain()` asks (#207), and of a
+  run's overflow and a terminal status (#187). Each run now has its own flags and wake-ups (`PullRunLifecycle`,
+  `@internal`), which live as long as the run: the iterator signals every run active when `stop()` or `drain()` is
+  called, and forgets a run once its future has resolved. Measured on nats-server 2.12.15 with a durable consumer and
+  explicit acks, a run of batch 1, depth 1 and a 30 s expiry waiting on the empty stream, then `stop()` and `handle()`
+  in one tick and four messages published: in 2.24.6 the first run's future was still pending 3 s later, the old
+  handler got m-1 and m-3 and the new one m-2 and m-4, and after a final `stop()` the first run's pull still waited on
+  the server; now the first run returns 0 at once, its request dropped with the interest in its inbox, and the new
+  handler gets all four. The 2.17.0 advice to await a run's future before calling `handle()` again is withdrawn. Found
+  by the review of #181 (2.17.0).
+
+## [2.24.6] - 2026-10-10
+
+### Upgrade notes
+
+- A `requestMany()`, `fetchBatch()` or `fetchNext()` whose read meets a fatal server `-ERR` after it has received
+  something now returns what it received, also when the reconnect has reopened the connection by then (#196). It no
+  longer throws the server's error then; the connection events (`Disconnected`, `Reconnected`) announce the reconnect.
+  With nothing received it still throws the error.
+
+### Fixed
+
+- [bugfix] A `requestMany()`, `fetchBatch()` or `fetchNext()` whose read met a fatal server `-ERR` (`Stale Connection`,
+  `User Authentication Expired`, ...) threw it and lost what it had received whenever the reconnect had already reopened
+  the connection, as a quick one does (#196). The read recovers the connection within the collection's wait before it
+  throws the server's error (#171), and the collection judged whether the connection was going by its state, by then
+  the new connection's: Open. The replies a scatter-gather had collected never reached it, and the messages a fetch had
+  received, which the server counted as delivered, came again only after the consumer's `ack_wait`, or never on a
+  consumer without acks or with `max_deliver: 1`. A complete result whose chunk also brought the `-ERR` was lost the
+  same way. The collection now asks whether that failure ended the connection, as the pull consumer engine does
+  (#210), and returns what it received, as it does when its read fails with the connection going any other way. A
+  failure that leaves the connection open (an `-ERR` the server keeps the connection open for, a handler's exception
+  with `handlerErrorsFailOperations`) still fails the collection, and the collection never sends its request or pull
+  again on the new connection.
+
+## [2.24.5] - 2026-10-10
+
+### Upgrade notes
+
+- The library now requires `amphp/amp ^3.1.3`, up from `^3.1` (#200). 3.1.3 is a patch release with the same
+  requirements as 3.1.2 (`php >=8.1`, `revolt/event-loop ^1 || ^0.2`). An application whose lock holds amp 3.1.0 to
+  3.1.2 gets this release and amp 3.1.3 with `composer update`, or with
+  `composer update idct/php-nats-jetstream-client --with-all-dependencies` (`-W`). Without `-W`, updating this package
+  alone keeps the locked amp, and Composer stays on 2.24.4 without an error.
+
+### Fixed
+
+- [bugfix] Under `amphp/amp` 3.1.0 to 3.1.2, which `composer.json` still allowed, a request with waiting for a reconnect
+  disabled lost a reply that came in the same read as a server's lame-duck `INFO` (#200). Before 3.1.3,
+  `CompositeCancellation::isRequested()` and `throwIfRequested()` reported a part that had fired only one event-loop tick
+  later. With `waitForReconnect: false` the read that met the lame-duck `INFO` asks such a composite whether the
+  request's wake-up has fired - that is, whether its reply came in the chunk - and the request then returns the reply.
+  Under 3.1.2 it was told no, so the request failed with `Connection is not open`, its reply delivered and dropped,
+  every time the reply came behind the `INFO` (reconnect on, a cluster to fail over to). `requestMany()` and
+  `fetchBatch()` returned what they had received, and a `SubscriptionQueue` poll kept its message for the next poll.
+  amp 3.1.3 asks the composite's parts directly, and the library now requires it. Two existing tests, which CI ran under
+  the newest amp only, pin this and fail under 3.1.2:
+  `OperationReadLameDuckFailoverTest::testWithWaitingDisabledAnOperationWhoseReadBringsTheLameDuckInfoFailsAtOnce`
+  (the reply case) and `OperationReadReconnectLifecycleTest::testAnOperationParkedOnTheReconnectItStartedDoesNotSpin`,
+  whose look counter a 3.1.2 composite never asked.
+
+## [2.24.4] - 2026-10-10
+
+### Upgrade notes
+
+- Requests now work while the client's `drain()` delivers (#213), which withdraws the 2.24.0 advice to ack with `ack()`
+  in a handler that may run during a drain: `ackSync()`, a JetStream publish, a Key/Value read or write, `request()`
+  and `requestMany()` made by a handler the drain runs - a pull consumer run's in its hand-over, or a core
+  subscription's with a message the drain delivers - now get their replies, also when the client has made no request
+  before. The drain keeps the shared reply inbox subscribed until its delivery phase is over, subscribes it for a
+  first request, and unsubscribes it at the end, so its `UNSUB` now follows the requests on the wire instead of
+  coming first. The round trips count against the drain's one budget (`requestTimeoutMs`).
+- The delivery phase ends once everything is delivered, or at the drain's deadline, and every request still waiting
+  then fails with `Connection is not open`, whichever fiber made it: a request of another fiber is taken while the
+  drain delivers, but the drain does not wait for its reply, which can come too late although the server has acted on
+  it; give a JetStream publish made there a `msgId`. A request made after that phase, after a `disconnect()` that
+  interrupts the drain, or from the listener of the drain's deadline report is still refused, unsent. Subscriptions,
+  and what needs one of its own (`fetchBatch()`, `fetchNext()`, a pull consumer's new pulls, batched Direct Get,
+  Key/Value `keys()` and `history()`, an Object Store download of more than one chunk), stay refused while Draining.
+- A drain with a connection now hands nothing more over once its deadline has passed: no handler gets another message,
+  also not the first of a new delivery pass, which a final backlog pass used to hand over past the deadline to a
+  handler whose request-based ack would then have been refused; the "drain deadline exceeded" report counts that
+  message as well. A drain that found no connection to drain keeps its final backlog pass as before.
+- `disconnect()` now ends the requests in flight as it begins, wherever they wait, with `Connection is not open`,
+  rather than once the close of the transport fails their reads; a request made while the close is under way is not
+  sent.
+- The request that subscribes the reply inbox does so within its own timeout and cancellation (#194): a request whose
+  inbox's `SUB` meets a dead socket and a reconnect that outlasts its timeout now fails with `Request timed out for
+  subject <subject> while waiting for the reply inbox to be set up`, where it used to wait up to another
+  `requestTimeoutMs` and fail with `Subscribe to "_INBOX.<inbox>.*" timed out waiting for the connection to be
+  re-established`.
+
+### Fixed
+
+- [bugfix] A request made while the client's `drain()` delivered failed at once with `Connection is not open`, so a
+  pull consumer handler that acked with `ackSync()` processed every message the drain handed over twice (#213). Since
+  2.24.0 the drain hands the messages a pull consumer run holds to its handler, but it unsubscribed the shared reply
+  inbox before delivering anything, and the connection refused every request while Draining: the handler processed
+  the message, its `ackSync()` failed, nothing reached the server, and the server delivered the message again after
+  `ack_wait`, to be processed a second time. Measured on nats-server 2.12.15 with the iterator's defaults, a producer at
+  20 messages a second and the worker drained 4.5 s in: 29 of 87 messages were processed twice. A handler that made a
+  request as part of its work (a JetStream publish, a Key/Value write) failed on its first message instead, and a core
+  subscription's handler whose message the drain's flush delivered could not make a request either. The drain now
+  keeps the reply inbox through its delivery phase and releases it afterwards, lets a request subscribe it when the
+  client has none, and takes requests through the bounded request writers while it delivers. One request lifetime per
+  connection, ended by the application's close, bounds every wait of every request: the end of the delivery phase -
+  everything delivered, or the deadline, which a timer enforces wherever the drain is - seals delivery, counts what is
+  left for the deadline report, and only then ends the requests still waiting, so that a run whose handler a woken
+  request lets go on cannot hide what it held, and the drain still closes within its budget. A write that fails while
+  the drain holds the connection is neither retried nor followed by a reconnect.
+- [bugfix] The request that subscribed the shared reply inbox did so without a budget, so a `SUB` held up by
+  backpressure, or the reconnect its failed write started, could keep the request waiting past its own timeout and
+  its caller's cancellation (#194). The set-up now runs within the request's budget, through the bounded writer of the
+  guarded inboxes; a request that joined the set-up is no longer failed with the other request's timeout when that
+  request stops waiting: the abandoned `SUB` is followed by an `UNSUB` once it is out, and the joiner subscribes the
+  inbox itself within its own budget. The `UNSUB`s owed for muxes dropped before are taken in the step that writes
+  them, so a set-up that never writes leaves them owed for the next one.
+
+## [2.24.3] - 2026-10-10
+
+### Upgrade notes
+
+- An infinite `PullConsumerIterator::handle()` run (no `setIterations()`) now hands its handler every message the
+  server sends it, also more than its pulls in flight asked for (#187). After a reconnect the server can hold more of
+  the run's pull requests than the run counts: a server that outlived the connection serves the requests the run
+  issued before the reconnect once the reconnect has subscribed the run's inbox again, and a pull written during the
+  outage goes out from the reconnect buffer afterwards. Those messages used to be dropped; they now reach the handler
+  in arrival order, behind what the run's pulls hold, and count in the result of `handle()`, so that across a
+  reconnect a handler can get more messages than `setBatching()` times `setDepth()`. The run issues no new pull while
+  it holds such messages. A terminal pull status (`409 Consumer Deleted`, say) now also hands over what the pulls
+  behind the one it ended hold before `handle()` resolves, where those messages used to be left unacked. `stop()`,
+  `disconnect()` and a `drain()` whose budget runs out still leave the rest undelivered, and a finite run keeps its
+  exact count and still drops a message past its last pull's batch.
+
+### Fixed
+
+- [bugfix] An infinite pull consumer run dropped messages it had received when the connection reconnected (#187).
+  The engine behind `PullConsumerIterator::handle()` ends its pulls in flight once the connection's reconnect count
+  moves, so that it pulls again on the new connection at once (#120), and it dropped them with what they held: a
+  message the reconnect's own delivery gave a pull while a lower subscription's handler held the engine's read up,
+  and the answer to a pull the engine had issued on the new connection before it saw a reconnect that the handler's
+  own `ack()` ran. It also dropped as a straggler every message none of its pulls in flight had room for, which a
+  server that outlived the connection sends for the requests the run issued before the reconnect, or wrote from the
+  reconnect buffer during it. The handler never got such a message; the server delivered it again only after
+  `ack_wait`, or never on a consumer with `ack_policy: none` or `max_deliver: 1`. Measured on nats-server 2.12.15 with
+  the worker's socket closed while the server stayed up, an infinite run of batch 1 and depth 1 on a consumer with
+  `ack_policy: none`: after the reconnect the consumer held two waiting requests, the worker received m-1 and m-2, and
+  the handler got only m-1, the consumer's `ack_floor` at 2. The run now ends its pulls instead of dropping them: what
+  they received goes to the handler in issue order before any pull goes out, a pull that received nothing leaves
+  without its status being classified, and what no pull has room for is held for the handler in arrival order, behind
+  the pulls, wherever the run goes on or ends (the iterator's and the client's `drain()`, a failure, a terminal
+  status, a frame that ended the connection), and counted in the drain's deadline report. The run checks the
+  reconnect count again after every wait, the handler's included, so that a status the old connection brought a pull
+  still to be retired neither ends the run through `onError` nor drops a group's pin, and a pull issued after a
+  reconnect the handler ran is not ended with the old ones; it never does while the client's `drain()` is under way,
+  which still gets what the pulls held. The iterator's `drain()` across a reconnect now delivers what the pulls in
+  flight had received. Found by the review of #178 (2.14.0), and of #210 (2.23.0).
+
+## [2.24.2] - 2026-10-09
+
+### Upgrade notes
+
+- Batch fetch setup now draws on `expiresMs + 1000` ms, including inbox SUB, failed-write
+  recovery, PUB and collection. An empty fetch whose own budget expires reports the usual
+  `JetStreamException('No messages received within timeout', 408)` instead of a global subscribe
+  timeout. A longer fetch may wait past `requestTimeoutMs`. Direct Get includes setup in its
+  initial no-progress interval and renews that interval when replies arrive, even during a pending
+  PUB; the multi-subject helper keeps a separate interval for each chunk (#188).
+- A delayed pull is shortened to fit the remaining local budget with a 100 ms response margin.
+  If its requested heartbeat no longer fits half that expiry, that attempt omits the heartbeat
+  and its local heartbeat-miss check. Already-started transport writes remain uncancellable.
+
+### Fixed
+
+- [bugfix] Bound `fetchBatch()`, `fetchNext()`, `directGetBatch()` and `directGetLastForSubjects()`
+  setup and failed PUB recovery by their own budgets, including inline write backpressure.
+  Batch requests do not enter the reconnect buffer; a retry checks its inbox and remaining budget.
+  Completed replies wake a pending publication, and late failed writes recover without resending (#188).
+- [bugfix] Release timed-out or rejected batch inboxes locally before waiting for wire cleanup.
+  An abandoned SUB that completes late is followed by UNSUB on its own connection; cleanup of a
+  replayed inbox during a slow Reconnected listener also releases the server subscription. An
+  UNSUB stalled by backpressure cannot hold the batch result beyond its budget (#188).
+
+## [2.24.1] - 2026-10-09
+
+### Upgrade notes
+
+- A request whose PUB/HPUB write discovers a lost connection now honors its existing timeout,
+  caller cancellation and `waitForReconnect: false` while the connection recovers (#215).
+  `requestMany()` throws `TimeoutException` when its budget expires before the send completes;
+  after a successful send, its collection timeout still returns the replies collected, possibly none.
+  A transport write already in progress can finish after cancellation or timeout; neither guarantees
+  that the server did not act on the request.
+
+### Fixed
+
+- [bugfix] Keep `request()`, `requestWithHeaders()` and `requestMany()` PUB/HPUB writes and their
+  single recover-and-retry within the request's original budget, including inline socket backpressure.
+  Recovery continues independently after the request ends; expired requests are neither buffered
+  nor retried later. Each attempt rechecks the budget, connection state and shared reply inbox before
+  writing, so an inbox rejected or dropped during recovery cannot receive a retry (#215).
+
+## [2.24.0] - 2026-10-09
+
+### Upgrade notes
+
+- A JetStream pull consumer run, `PullConsumerIterator::handle()`, now follows the connection's own rule when the
+  application closes the connection (#207): the client's `drain()` hands over what the run's pulls hold, and
+  `disconnect()` discards it, wherever the run is. Once its flush is done, `drain()` asks each run to hand every pull in
+  flight to the handler, in order, while the connection is Draining, so that the handler's acks still go out, and waits
+  for that, the handler included, within its budget (`requestTimeoutMs`); the run then ends and `handle()` resolves with
+  its count, as after the iterator's `drain()`, where it used to fail with `Connection is not open`, the handler having
+  got none of those messages. A `drain()` can therefore take as long as such a handler, up to its budget, before it
+  closes the connection; when the budget runs out first, the rest is discarded and counted in its
+  `drain deadline exceeded` report, and `handle()` still resolves with what was handed over, unless the run was writing
+  a pull as the drain closed the connection, which fails it with that write's error. Only the acks the handler publishes
+  go out during that hand-over (`ack()`, `nak()`, `term()`, `inProgress()`): the connection refuses requests while it is
+  Draining, so `ackSync()`, a JetStream publish or a Key/Value write fails there at once with `Connection is not open`;
+  a handler that may run during a drain acks with `ack()`. A handler, an `onError` or an `errorListener` that awaits the
+  client's `drain()` while the run calls it holds that drain for its whole budget, as a core subscription's handler that
+  awaits it does, since the drain waits for the very run that waits for it, and the rest of the pull is then discarded:
+  stop or drain the iterator there and drain the client once `handle()` has resolved, or call the client's `drain()`
+  from another fiber or without awaiting it. While the client drains, a run issues no new pull. A `disconnect()`, from
+  the handler or from another fiber, now also ends the hand-over of a pull the run retires, before the next message,
+  where the rest of the pull used to reach the handler after the close had returned, every ack failing: on a consumer
+  with acks that rest is delivered again after `ack_wait` and processed once, rather than twice, and on a consumer
+  without acks (`ack_policy: none`) or with `max_deliver: 1` it is lost, as the hand-over before a run fails loses it
+  since 2.22.0. `handle()` still fails after a `disconnect()`, with `Connection is not open` or the error of the read or
+  write that met the close, except where the client's `drain()` had already asked the run for its hand-over, or where a
+  finite run has no pull left to issue: it then resolves with its count. A worker that drains the iterator and awaits
+  `handle()` before it closes the connection sees no change.
+
+### Changed
+
+- `[bugfix]` `disconnect()` discards what a pull consumer run's pulls hold also while the run hands over a pull it
+  retires (#207), as it discards it in the hand-over before a run fails since 2.22.0 and as it discards what the
+  connection itself has received and not delivered (nats.go `Close()` parity): the handler gets no message after the
+  close, whether the handler or another fiber called `disconnect()`, and the rest of the pull stays unacked. The retire
+  phase used to hand a full pull over whole, the handler running on the Closed connection after `disconnect()` had
+  returned, every ack failing, so that with explicit acks those messages were processed and then delivered again. Every
+  delivery of a run now checks the same signal before each message, the connection's own
+  (`NatsConnection::isDiscardingUndelivered()`, `@internal`): a `disconnect()` under way or done, or a `drain()` once
+  its budget has run out (from its `drain deadline exceeded` report on, also while it closes the connection), discards;
+  a `drain()` within its budget hands over. A pull whose messages the close discards still counts as one that brought
+  messages, so that the run goes on to meet the close and `handle()` fails as before, rather than end as if the stream
+  were exhausted. Measured on nats-server 2.12.15 with `ack_wait` 3 s and a run of batch 2 and depth 1 whose pull holds
+  m-1 and m-2, the handler awaiting `disconnect()` on m-1: in 2.23.0 m-2 reached the handler on the Closed connection,
+  its ack failing, and with explicit acks the server delivered it again after `ack_wait` (`num_delivered` 2); with
+  `ack_policy: none` it was processed after `disconnect()` had returned. Now m-2 is not handed over: with explicit acks
+  it is delivered again after `ack_wait`, once, and with `ack_policy: none` it is lost (`ack_floor` 2).
+
+### Fixed
+
+- `[bugfix]` The client's `drain()` dropped what a pull consumer run's pulls held, and did not wait for a handler that
+  was handing a pull over (#207). The engine behind `PullConsumerIterator::handle()` hands a pull's messages to the
+  handler only when the pull completes (its batch full, a status from the server, or its deadline), and the drain
+  delivered only the connection's own queues: it unsubscribed the run's inbox, read until the `PONG` of its flush and
+  closed the connection under the run, whose read then failed and handed nothing over, since the drain had set the close
+  intent (#197), and `handle()` threw `Connection is not open`. A worker that drained its client on `SIGTERM`, without
+  draining the iterator first, so lost those messages on a consumer without acks and got them again after `ack_wait`
+  otherwise; a pull that a message filled during the drain's flush was handed over while the drain closed the
+  connection, the later messages reaching the handler on the Closed connection with their acks failing; and a run that
+  went on while the drain flushed wrote its next pull onto the inbox the drain had unsubscribed. The run is now a drain
+  participant (`DrainParticipant`, `@internal`), registered once its inbox is subscribed: once its flush is done, the
+  drain asks each run to hand every pull in flight over, in issue order, while the connection is Draining, the request
+  waking a run that waits in its pump read or its idle backoff, and waits for those hand-overs within its single budget,
+  the `drain deadline exceeded` report counting what a run still holds when the budget runs out, which the run then
+  discards, also while the drain closes the connection, rather than hand it over. The run then ends with its count, and
+  it issues no pull while the connection is Draining. A drain without a connection to drain, or whose flush a
+  `disconnect()` cut short, asks no run, whose read then fails and discards what it holds, as before; a drain that first
+  waited for a reconnect still gets what the pulls held before the connection dropped. Measured on nats-server 2.12.15
+  with `ack_wait` 3 s, the stream holding m-1 and m-2, and the client's `drain()` called 1 s into an infinite run of
+  batch 3 and depth 1: in 2.23.0 the handler got nothing and `handle()` threw `Connection is not open`; with
+  `ack_policy: none` the consumer then had both as delivered and acknowledged (`ack_floor` 2), the messages gone, and
+  with explicit acks both came again after `ack_wait` (`num_delivered` 2). The handler now gets m-1 and m-2 while the
+  connection is Draining, `drain()` returns once that is done, and `handle()` returns 2; with explicit acks both acks
+  reach the server (`ack_floor` 2, `num_ack_pending` 0) and nothing comes again.
+
+## [2.23.0] - 2026-10-09
+
+### Upgrade notes
+
+- An infinite JetStream pull consumer run, `PullConsumerIterator::handle()` without `setIterations()`, with reconnect on
+  and `waitForReconnect` enabled (the defaults), now goes on after a fatal `-ERR` (`Stale Connection`,
+  `User Authentication Expired`, ...) or a server `PING` whose `PONG` the socket would not take, once the reconnect has
+  reopened the connection, as it goes on after a lost connection (#210). The frame's error goes to the error listener
+  and the logger, and `handle()` no longer throws it: a worker that restarted its consumer when `handle()` failed with
+  `Server sent error frame: 'Stale Connection'` finds the run still going. What the pulls held when the connection ended
+  reaches the handler as part of the run and counts in the result of `handle()`, and a handler that throws there ends
+  the run with its own exception, where 2.22.0 reported it and threw the frame's error. A finite run still ends with the
+  frame's error, and so does an infinite one with reconnect off or `waitForReconnect: false`, whose connection the
+  application is closing, or whose reconnect gave up, or whose new server refused the credentials, while the read that
+  met the frame was still waiting for it. A reconnect that gives up only after that read stopped waiting, as one against
+  a server that stays down does with the default options (ten attempts whose backoffs alone add up to about 43 s, where
+  that read waits at most the run's expiry plus one second), ends the run as after a lost connection: the frame's error
+  goes to the error listener first, and `handle()` then throws `Reconnect attempts exhausted`.
+
+### Fixed
+
+- `[bugfix]` An infinite pull consumer run ended on a fatal `-ERR` or a `PONG` the socket would not take even when the
+  reconnect had reopened the connection, where it goes on after an EOF (#210). The pump read that met such a frame
+  recovered the connection and threw the frame's error once the reconnect was done (#171), and the engine took that as
+  the end of the run: it handed over what its pulls held (#197) and `handle()` failed with
+  `Server sent error frame: 'Stale Connection'` while the connection was Open on the new socket, so a worker stopped
+  consuming until something started it again. A server sends `Stale Connection` to a client that left its `PING`s
+  unanswered for a few intervals (a handler that blocks the event loop with synchronous work, a paused process), and
+  `User Authentication Expired` when a user JWT expires, which `jwtProvider` renews on every reconnect, so every expiry
+  ended such a consumer. Such a run now goes on, as after a lost connection: the frame's error goes to the error
+  listener and the logger, since nothing else says why the server closed the connection; what the pulls held goes to the
+  handler in issue order as a delivery of the run, counted in its total, with `stop()` and a close of the application's
+  ending it and a pinned group's pin captured from it; and the run pulls again on the new connection, once the reconnect
+  is done, or, when the read's own wait ended first, once its next read has waited for the reconnect. A finite run,
+  reconnect off, `waitForReconnect: false`, a reconnect that gave up while the read was still waiting for it and a close
+  of the application's still end the run with the frame's error, and so does any failure that leaves the connection
+  open; a reconnect that gives up later ends the run as after an EOF, with `Reconnect attempts exhausted`. Measured on
+  nats-server 2.12 with `ping_interval: "1s"` and `ping_max: 1`: an infinite run of batch 1 and depth 1 whose handler
+  blocked the process for 3.5 s on m-1 (`usleep()`), the client's own heartbeat off. The server logged
+  `Stale Client Connection - Closing`; in 2.22.0, `handle()` threw `Server sent error frame: 'Stale Connection'` right
+  after the `Reconnected` event, 3.5 s into the run, with `ack_policy` explicit and none alike, and m-2 and m-3,
+  published once the client had reconnected, were never consumed (`num_pending` 2). The run now reports that error to
+  the error listener, gets m-2 and m-3 on the new connection, and `handle()` returns 3 when the handler stops it on m-3
+  (`num_pending` 0, `num_ack_pending` 0 with explicit acks). With the process blocked by a timer while the run's pull
+  (batch 3) held m-1, 2.22.0 handed m-1 over before it threw; the run now hands it over as part of the run and goes on
+  to m-2 and m-3. A handler that acks m-1 only after blocking still loses that ack to the closed socket, as before: the
+  server redelivers m-1 after `ack_wait`.
+
+## [2.22.0] - 2026-10-08
+
+### Upgrade notes
+
+- A JetStream pull consumer run, `PullConsumerIterator::handle()`, that ends with an error now runs the handler for the
+  messages its pulls had received before it throws (#197): when its read fails because the connection is going (lost
+  with `waitForReconnect: false`, a reconnect that gave up, reconnect off, a fatal `-ERR` whether or not the reconnect
+  reopened the connection), when a pull's write fails, when the server rejects its reply inbox, or when its read fails
+  for a reason `handlerErrorsFailOperations` or `slowConsumerErrorsFailOperations` makes the read's own. `handle()`
+  still throws the same error, once the handler has run. On a closed connection the handler's ack fails; a handler that
+  throws during that delivery, as one that lets its failed ack out does, ends it, and its exception goes to the error
+  listener and the logger instead of out of `handle()`. A `stop()` still leaves those messages unhandled, and so does
+  closing the connection yourself, with `disconnect()` or the client's `drain()`, which discards them as before: drain
+  the iterator and await `handle()` before you close the connection. A handler that throws at any other time still ends
+  the run at once with its own exception.
+
+### Fixed
+
+- `[bugfix]` A pull consumer run that ended with a failure of its own read or of a pull's write dropped the messages its
+  pulls in flight had received (#197). The engine behind `PullConsumerIterator::handle()` hands a pull's messages to the
+  handler only when it retires the pull (its batch full, a status from the server, or its deadline), so a pull holds
+  messages the server counted as delivered and the handler has not seen, with `setBatching(10)` on a stream that
+  trickles most of the time. A run whose read failed with the connection going, which it does with
+  `waitForReconnect: false` once the connection is lost (#178) or failed over from a server in lame duck mode (#191),
+  when the reconnect gives up, with reconnect off and on a fatal `-ERR`, ended with that error and dropped them, finite
+  and infinite runs alike, and so did a run whose pull's write failed while an earlier pull held messages
+  (depth above 1), whose reply inbox the server rejected, or whose read failed for a reason
+  `handlerErrorsFailOperations` or `slowConsumerErrorsFailOperations` makes its own: the server redelivered those
+  messages only after `ack_wait`, and never under `ack_policy: none` or `max_deliver: 1`. Such a run now hands the
+  handler what its pulls received, in issue order, with `stop()` checked before each message as when it retires a pull,
+  and then throws that error unchanged, as `fetchBatch()` returns its partial batch since 2.21.0. A run the application
+  ends by closing the connection, with `disconnect()` or the client's `drain()`, still hands nothing over: the close
+  discards those messages, as `disconnect()` discards what the connection received and has not delivered, rather than
+  run the handler after the close has returned, with every ack failing, and a close made during that delivery ends it as
+  a `stop()` does. That covers only the hand-over before the run fails: a pull the run retires normally is still handed
+  over whole, as before, also when the handler or another fiber closes the connection meanwhile, since the connection's
+  `drain()` lets acks out while it is Draining. A handler that throws during that delivery ends it and is reported to
+  the error listener and the logger, the run's own failure being the one thrown, and a message read while the handler
+  runs goes to a pull still to be handed over, when one is left open, rather than being dropped with the buffer being
+  handed over; with none left it is dropped, unacked, and comes again only after `ack_wait`, or never under
+  `ack_policy: none` or `max_deliver: 1`. Measured on nats-server 2.12 with reconnect off: a run of batch 3 and depth 1
+  whose pull had received the stream's two messages, the client's TCP connection then cut through a proxy while the
+  server stayed up. On a consumer with `ack_policy: none` the handler never saw them, and the server had them as
+  delivered and acknowledged (`ack_floor` 2, nothing pending): they were gone. With explicit acks they came back only as
+  redeliveries after `ack_wait` (`num_delivered` 2). The handler now gets both before `handle()` throws
+  `Reconnect is disabled`. With explicit acks its acks fail on the closed connection and the server redelivers both
+  after `ack_wait`: a handler that catches the failed ack gets both, and one that lets it out, as a bare
+  `$js->ack($msg)->await()` does, gets the first, the failure going to the error listener. A `disconnect()` or `drain()`
+  of the connection while the pull held them handed nothing over, in 2.21.0 and now alike, the messages then lost or
+  redelivered as above. A graceful server shutdown was not affected: the server answers the waiting pull with
+  `409 Server Shutdown` before it closes the connection, which retires the pull. Over the unit suite's scripted server
+  the same holds with waiting disabled, a reconnect that gave up, a lame-duck failover with waiting disabled, and a
+  fatal `-ERR` whose reconnect reopened the connection. An infinite run that goes on through a reconnect still discards
+  what its pulls held at the reconnect (#187).
+
+## [2.21.0] - 2026-10-08
+
+### Upgrade notes
+
+- One of the library's operations whose own read brings a server's lame-duck `INFO` (a `request()` or
+  `requestMany()`, a `SubscriptionQueue` poll, a JetStream fetch or pull consumer, Key/Value `keys()` or `history()`,
+  a `flush()` or `rtt()` waiting for its `PONG`) no longer waits for the whole failover: it waits within its own
+  timeout, and with `waitForReconnect: false` fails at once with `Connection is not open` while the failover runs on,
+  unless what it waits for came in the same read (#191). Your own `processIncoming()` and `readIncoming()`, a serving
+  loop's read and the heartbeat still run the failover inline. The messages read with the `INFO`, those ahead of it
+  included, are now delivered by the operation's read, with its rules for a handler that throws or a full queue,
+  before the failover leaves the connection: unless a handler, or the error listener a report of that read goes to,
+  awaits, ahead of the failover's `Disconnected` event. What such a handler starts runs once the failover has begun,
+  since a publish and an operation each run in a fiber of their own: a publish is buffered and goes to the new server
+  once the subscriptions are replayed, and an operation waits for the failover within its timeout, or with
+  `waitForReconnect: false` fails at once with `Connection is not open`. Both used to run on the new server directly,
+  the failover having run first.
+- A `requestMany()` or a JetStream `fetchBatch()` whose read fails because the connection is going (lost or being failed
+  over with `waitForReconnect: false`, a reconnect that gave up, or reconnect off) now returns what it has received
+  instead of throwing; it throws only when it has received nothing. Code that took that exception to mean that nothing
+  was delivered now gets the partial result.
+
+### Fixed
+
+- `[bugfix]` A `requestMany()` or a JetStream `fetchBatch()` whose read fails because the connection is going returns
+  the replies or the partial batch it has received, as `requestMany()` does when the connection closes and
+  `fetchBatch()` when the heartbeats stop, rather than throw and lose them: a fetched message the server counted as
+  delivered was redelivered only after the ack wait, or never on a consumer without acks. Such a read fails with
+  `waitForReconnect: false` once the connection is lost (#178) or is being failed over from a server in lame duck mode
+  (#191), with any setting when the reconnect gives up, and with reconnect off when the connection drops, the
+  configuration of symfony-nats-messenger, whose `get()` fetches. With nothing received, or for a failure that leaves
+  the connection open (a full queue, a handler's own), they still throw. Up to 2.20.0 a lame-duck failover ran inline
+  and the collection went on once it was over, though a `fetchBatch()` whose failover gave up threw at its next read all
+  the same.
+- `[bugfix]` An operation whose own read brought a lame-duck `INFO` overran its deadline by the whole failover (#191).
+  The failover (#47) ran inline in the dispatch of the `INFO`, in the read's own fiber, and nothing bounded it: the
+  dials, the handshake, the subscription replay and any backoff between attempts. The read now starts the failover in a
+  fiber of its own and waits for it only within the operation's deadline and wake-up, as a read that meets a lost
+  connection does since 2.14.0 (#178): the operation times out at its deadline, or returns what a delivery brings
+  meanwhile, and the failover carries on, reports its failure through the error listener, as the inline failover does,
+  and announces the new connection when it is over. Only a read whose chunk holds bytes behind the `INFO` that fail to
+  parse still runs the failover inline, as it recovers the corrupt stream right after. The rest of the chunk the `INFO`
+  came in is still the leaving server's (#182), now from the moment the failover is started: its `PING` and `INFO` are
+  dropped, its `-ERR` is reported, and its `PONG` still completes the leaving connection's slot, so a `flush()` whose
+  `PONG` came behind the `INFO` succeeds, with `waitForReconnect: false` as well. Verified on nats-server 2.12 with two
+  servers, the second paused so that its dial hung until `connectTimeoutMs` (1 s), and the first put into lame duck mode
+  with `SIGUSR2`: a `request()` with a 300 ms timeout whose read brought the `INFO` returned after 3.29 s, once the
+  failover had reached the second server; it now times out after 0.30 s with the failover under way, and the second
+  server's connection is announced 3.17 s after the `LameDuck` event, as before.
+- `[bugfix]` A lame-duck failover no longer fails over a connection that a reconnect opened while a `DiscoveredServers`
+  or `LameDuck` listener of the `INFO` was suspended (#191). It took the connection that was current once the listeners
+  had returned: a `LameDuck` listener that awaited a `flush()` on a connection that had just died let the flush's failed
+  write reconnect, and the failover then failed the new connection over as well, a second reconnect for nothing. It now
+  fails over only the connection the `INFO` came on, whether it runs inline (your own read, a serving loop's, the
+  heartbeat's) or in a fiber of its own (an operation's read).
+
+## [2.20.0] - 2026-10-08
+
+### Upgrade notes
+
+- Your own read, `processIncoming()` or `readIncoming()`, now first continues the subscriptions whose delivery an
+  earlier read stopped at a handler that threw, before it reads the socket (#186): their later messages are
+  delivered with nothing new on the wire, and when one of those handlers throws too, the read throws its exception
+  without reading. A `processIncoming()` that used to block on an idle socket after a handler failure now runs those
+  handlers, or throws their next failure, at once. The read then goes on as before, and its result still counts only
+  what it read from the socket. It continues what any read stopped that way, an operation's read under
+  `handlerErrorsFailOperations: true` included; the reads of the library's operations, a serving loop, the
+  heartbeat, a reconnect and a drain are unchanged.
+- A catch-and-continue loop whose connection drops now delivers that remainder, and throws its next failure, before
+  it notices the drop. Before, with reconnect off those messages were discarded when the connection closed ("parsed
+  inbound message(s) were discarded undelivered"), and with reconnect on they were delivered after the reconnect,
+  their failures reported to the error listener rather than thrown. The cancellation you pass bounds the read's
+  waits, not that delivery: a read whose cancellation has already fired still continues the remainder, then throws
+  its `CancelledException`.
+
+### Fixed
+
+- `[bugfix]` The rest of a subscription whose handler threw in your own read waited in the client's memory until the
+  server sent anything (#186). Since 2.13.0 (#177) such a read delivers the other subscriptions' messages and leaves
+  the failing subscription's later messages queued for the next pass, but your next `processIncoming()` or
+  `readIncoming()` went straight to the socket and delivered them only once a chunk arrived: on an otherwise idle
+  connection the server's next `PING`, by default two minutes away, a `disconnect()` meanwhile discarding them, and
+  the subscription's next failure reached the application just as late. Your own read now delivers that remainder
+  before it reads, in sid order, and then any that a read made in one of those handlers, or another fiber's
+  delivery, stops meanwhile, with its own rules: a handler that throws there is thrown, one failure per read, and a
+  second failing subscription is reported. Otherwise the read goes on to read as before, and its result still counts
+  what it read. Only what a handler failure stopped is continued: the later subscriptions of a delivery held up in
+  another fiber's handler still wait for that delivery, unless a handler failure had already stopped one of them,
+  which is continued whole, in order, the messages that delivery brought for it included; a subscription whose
+  delivery is under way in another fiber is left to it; and a `disconnect()` already under way when the read starts
+  still discards what is queued, while a pass already running when a `disconnect()` begins goes on to the other
+  stopped subscriptions, as any pass under way does. When a handler that runs there awaits while the connection
+  drops, the read waits for the reconnect before it touches the new socket, as a serving loop's read does. Verified
+  on nats-server 2.12 with a catch-and-continue loop and one raw write carrying `slow:s1`, `s2`, `s3` and `jobs:j1`:
+  `s2` and `s3` reached their handler 1 ms after the write, where on 2.19.0 they waited 3.0 s, until the next
+  publish.
+
+## [2.19.0] - 2026-10-07
+
+### Fixed
+
+- `[bugfix]` A JetStream pull fetch (`fetchBatch()`, `fetchNext()`), a pull consumer run (`PullConsumerIterator::handle()`)
+  or a batched Direct Get (`directGetBatch()`, `directGetLastForSubjects()`) whose reply-inbox `SUB` the server rejected
+  for the connection's subscription limit learnt of it only when its own read met the `-ERR 'maximum subscriptions
+  exceeded'` (#175). When another fiber's read took it - the heartbeat's while the `SUB` write was held up, an
+  application's `processIncoming()` loop's - the `-ERR`, which names no subject, was reported to the error listener and
+  nothing else happened: the fetch waited out its expiry plus a second and reported an empty pull (`JetStreamException`
+  408, `No messages received within timeout`), which callers treat as no messages; the Direct Get batch reported a
+  stalled batch after the same wait; the pull engine, whose rejection handler the connection called only for an `-ERR`
+  naming its subject, retired pull after pull at their deadlines. Measured through symfony-nats-messenger on 2.10.3: an
+  empty batch after 1.6 s, the connection open, the `-ERR` only on the listener. The inboxes now get the shared reply
+  inbox's rule, generalised (`NatsConnection::subscribeGuarded()`, `@internal`, exposed on `NatsClient`): a `PING` is
+  written behind the inbox's `SUB` in the same write, and the inbox counts as held by the server once that `PING`'s
+  `PONG` or a delivery on it arrives; a limit `-ERR` read before that, by whichever fiber, drops the inbox, writes its
+  `UNSUB` (the `-ERR` may have been another `SUB`'s, and the server then still holds the inbox) and tells the operation,
+  which fails at once: the fetch and the Direct Get batch with a `ConnectionException` naming the inbox and the limit
+  (`JetStream pull fetch failed: the server may have rejected its reply-inbox subscription "_INBOX.JS.FETCH.<nuid>"
+  because the connection is at its subscription limit (maximum subscriptions exceeded). A retry subscribes a new one.`),
+  the pull engine through its fail-fast latch (#167), whose `JetStreamException` now says the limit when that is the
+  cause. A reconnect replays such an inbox with a `PING` behind it again, with the same consequence, also when the
+  inbox's own `SUB` write failed and the reconnect it started replays it: the subscribe then reports the rejection,
+  not a closed connection, and the replay writes the inbox's `UNSUB`. As for the shared reply inbox, several inboxes
+  unconfirmed at once - two fetches, a fetch and the reply inbox - cannot be told apart by the `-ERR`, so each is
+  treated as rejected and each operation fails; an operation whose own read meets the `-ERR` still fails with the
+  server's error, as before; a `subscribe()` of the application's beyond the limit behaves as before. A permissions
+  violation naming a fetch's or a Direct Get's inbox now fails the call at once as well, quoting it, where the call
+  waited out its deadline. `markSubscriptionUnbounded()` and `onSubscriptionRejected()` leave a sid that is no longer
+  registered alone, so a rejection read between the `SUB` write and those calls leaves nothing behind. Callers that
+  catch only `JetStreamException` around a fetch or a Direct Get batch, treating an empty result as routine, now see a
+  `ConnectionException` at the subscription limit, on a connection that stays open.
+  Verified on nats-server 2.12 with `max_subscriptions: 3`: with an application loop reading and the `SUB` write held
+  up for 0.5 s, the fetch failed as soon as the write completed (0.50 s after it was issued) and a retry with a free
+  slot got the stored message, where it reported an empty pull after 2.50 s.
+
+## [2.18.0] - 2026-10-07
+
+### Fixed
+
+- `[bugfix]` A `PING`, `PONG`, `INFO`, `-ERR` or reply-inbox `MSG` read in the same chunk as a lame-duck `INFO`,
+  behind it, was handled on the connection the lame-duck failover had just opened (#182). The failover (#47) runs
+  inline in the dispatch of the `INFO`, and the dispatch then went on with the rest of the chunk as if nothing had
+  happened: the old server's `PING` was answered with a `PONG` written on the new connection; a stale `INFO`
+  overwrote the new server's info, and a second lame-duck `INFO` started a second failover, since the lame-duck flag
+  had been reset for the new connection; a `PONG` completed the new connection's oldest PONG slot - the fence behind
+  the replayed reply-inbox `SUB` - and so confirmed the replayed inbox before the new server had answered anything,
+  as a late reply of the old server on that inbox did; an `-ERR` was applied to the new connection (`maximum
+  subscriptions exceeded` dropped the replayed, still unconfirmed inbox, a permissions violation naming a subject
+  fired the replayed subscription's rejection handler) and failed the read with `Server sent error frame` although
+  the failover had succeeded. The dispatch now checks before each frame whether the chunk's connection is gone,
+  replaced or ended, and handles the rest of the chunk for the connection it was read on: its messages are still
+  queued for their subscriptions, which the failover replayed, though a late reply on the request inbox no longer
+  counts as the new server's confirmation of the replayed inbox; its `PING`, `PONG` and `INFO` are dropped; its
+  `-ERR` is reported through the error listener (`The server the connection left sent an error frame: ...`) and
+  neither applied nor thrown. When the connection ends instead - the failover failed, or the `LameDuck` listener
+  closed the connection itself - the chunk's `PING` is not answered on the closed transport either: the read returns
+  what it read, and the next one fails with the closed connection, instead of the read failing with the PONG write's
+  error. Nothing changes without a failover (reconnect disabled, or a pool of one): the chunk is handled as before.
+  Found by the review of the read wake-up (#174, 2.12.0).
+
+### Testing & CI
+
+- `[docs]` `OperationReadReconnectLifecycleTest::testAnOperationParkedOnTheReconnectItStartedDoesNotSpin` no longer
+  bounds the CPU time of the second an operation spends parked on the reconnect its read started, which depended on
+  the environment: under Xdebug with coverage on a busy CI runner the second's own cost (three refused dials with
+  their exceptions and listener calls, GC) reached the 0.15 s bound, while the same seeds passed elsewhere, and a 1 ms
+  poll cost less than the bound on a fast machine. It counts how often the operation looks for its result instead,
+  which a spin would do about a thousand times in that second and a parked operation not at all: the poll's buffer is
+  swapped for a new `CountingBuffer` test double, which counts how often `next()` checks it, and the request gets a
+  `CountingCancellation` as its cancellation. A process-wide count of the callbacks the event loop registers in that
+  second was tried as well and dropped: the reconnect attempts of clients that earlier tests leave behind register
+  their 500 handshake polls in a burst. The socket-read and dial counts stay. Dev-only, no library change.
+- `[docs]` `ReadWakeupLifecycleTest::testTwoPollsOfOneQueueWithOneMessage` no longer bounds the CPU time of the 2 s
+  that two polls of one queue spend on one message, the poll the delivery wakes finding nothing and waiting on to its
+  timeout, which depended on the environment the same way: in the Infection initial run for 2.17.0, under Xdebug with
+  coverage on the shared runner, the wait's own cost reached 0.82 s against the 0.5 s bound, while the four unit jobs
+  of the same run passed it. It counts how often the two polls check the queue's buffer instead, with the same
+  `CountingBuffer` in place of the buffer the polls share: six when no wait ends at once (one check each as the polls
+  start, two each when the message comes), and two per pause of a millisecond, close to a thousand or more over the
+  wait, for a woken poll whose next wait ended at once again and again, which the socket-read count does not see when
+  the read returns before it reads. The bound is 60; the other assertions stay. Dev-only, no library change.
+
+## [2.17.0] - 2026-10-07
+
+### Fixed
+
+- `[bugfix]` A `PullConsumerIterator::stop()` or `drain()` from another fiber - a signal handler's timer, a supervisor -
+  while the pull engine waited on the socket for its in-flight pulls, or in its idle backoff, was seen only when that
+  wait ended on its own (#181): at the earliest pull's deadline, its expiry plus a second (4 s with the default 3 s
+  expiry, 31 s with a 30 s one), or at the end of the backoff, up to 500 ms. A call from inside the handler was
+  unaffected. Each `handle()` run now gives the engine two one-shot wake-ups, one per flag, which `stop()` and `drain()`
+  fire right after setting their flag; the engine's pump read and idle backoff wait with each wake-up while it has not
+  fired, so the wait ends at once and the flag is seen at the top of the loop. `stop()` ends the run at once, with the
+  pull inbox released as on every exit, and a `stop()` that lands while a pull of a generation is written ends the
+  generation there: no further pull is written for a run about to end. `drain()` wakes the engine once, so it stops
+  issuing pulls at once and, with nothing in flight, returns at once; the pulls in flight still complete, or reach
+  their deadline, and their messages are delivered first, as before. A fired wake-up is never composed into a later
+  wait, whatever fired it, so nothing spins: a latched drain does not end the reads that follow it; a run started
+  again gets fresh wake-ups, so a stop in an earlier run cannot end a wait of the next; and a run still active when
+  `handle()` is called again on the same iterator, its wake-ups replaced and fired by Amp as they are destructed, goes
+  on as before #181, waiting to its pulls' deadlines until the shared flags end it. Start the next run only once the
+  previous run's future has resolved: the runs share the stop/drain flags, so a `handle()` while a run is active
+  clears a `stop()` that run has not seen yet. The internal `PullPipelineControl` carries the wake-ups as
+  `stopInterruption()` and `drainInterruption()`, optional in its constructor.
+
+## [2.16.0] - 2026-10-07
+
+### Fixed
+
+- `[bugfix]` A `request()` or `requestMany()` whose read was parked on the socket when another fiber's read brought the
+  `-ERR` that drops or rejects the shared reply inbox - `maximum subscriptions exceeded` before the server was known to
+  hold the inbox, or a permissions violation naming it - noticed the drop only with the server's next bytes or at its
+  deadline (#180). The client drops the inbox inline in the dispatch of that `-ERR`, and since 2.12.0 a request's read is
+  woken by its own reply alone, so nothing ended the read; the shape arises when the other fiber's dispatch is held up
+  ahead of the `-ERR`, as it is while it awaits the write of the PONG for a server PING in the same chunk (socket
+  backpressure): the read slot is free by then, the request's read takes it, and the `-ERR` drops the inbox under it. A
+  request that looked while another operation's read - a poll's, a flush's - held the socket, and so waited at its own
+  wait for the read slot rather than in a read, noticed the drop only once that read ended. The connection now fires
+  every waiting request's wake-up when it drops or rejects the inbox, whichever fiber's read meets the `-ERR`, and the
+  wake-up ends every wait the request makes, its read and its wait for the read slot alike: the request looks again at
+  once, failing with the dropped-inbox error or the permissions error, returning a reply delivered by then, or, for a
+  `requestMany()` with replies collected, returning them. A terminal close while a request waits for its reply ends the
+  request at its next look with `Connection is not open`, as a read still waiting fails on its own: this is the exit of a
+  request a rejection woke right before an error listener answered the `-ERR` with `disconnect()`, which resets the
+  rejection latch; such a request would otherwise have looked every millisecond until its deadline and ended with a
+  timeout. Nothing else is woken: polls, fetches, consumers and your own reads are not involved.
+
+## [2.15.0] - 2026-10-07
+
+### Upgrade notes
+
+- An operation that reads the socket while it waits for a result of its own - a `SubscriptionQueue` poll,
+  `fetchBatch()`/`fetchNext()`, `directGetBatch()`, the pull consumer, or Key/Value `keys()`/`history()` - now
+  takes what is already queued for its own subscription before it reads or waits for another fiber's read (#179).
+  This reverses the 2.12.0 note that "an operation gets its message once the in-order delivery reaches it, so a
+  handler ahead of it that outlasts the operation's deadline still makes it time out": an operation now returns at
+  once what an earlier or a concurrent read has already queued for it, even while a handler ahead of it, in another
+  fiber, is still running. In particular this is what lets a user handler poll a `SubscriptionQueue` of its own for
+  a message delivered in the same chunk: the handler's own message is ahead of the queue's in that chunk, the
+  queue's message is queued behind the handler's delivery, and the poll now takes it from inside the handler instead
+  of reading the socket and timing out. The reorder is only ever of the operation's own subscription ahead of
+  another subscription's message queued with it; order within a subscription, and between the other subscriptions,
+  is unchanged, and NATS guarantees order only within a subscription. `request()` and `requestMany()`, whose replies
+  share one inbox, are unchanged, and so are your own `processIncoming()` and `readIncoming()`.
+- The take is only ever of what is ALREADY queued when the operation looks, so two shapes are unchanged by it. A
+  poll whose own read brings the chunk (no other fiber reads) still runs any handler ahead of its message in that
+  read's own delivery pass, and returns the message once that handler returns, however long it takes: nothing is
+  queued for the poll until the pass reaches it. And while a reconnect is under way the operation still waits for it
+  first, within its own timeout, as before 2.13.0: the take sits next to the in-order delivery of what a read left
+  queued, after the wait for a reconnect, so a message already queued for the operation is taken once the connection
+  is back, not during the outage. (The take was placed there, rather than ahead of the reconnect wait, to keep the
+  reconnect path exactly as 2.13.0 shipped it; a message an operation received before the drop is delivered during
+  the outage only when another fiber's delivery of it is still under way, as 2.13.0's #174 note describes.) An
+  overflow of the operation's own subscription met by the take fails the operation, not the read that queued the
+  chunk; a poll concurrent with its own `unsubscribe()` may still return a message the connection received before
+  the `UNSUB` went out.
+
+### Fixed
+
+- `[bugfix]` A handler that polled a `SubscriptionQueue` of its own for a message delivered in the same chunk waited
+  out its whole timeout, and the message reached the queue only once the handler returned (#179). The chunk held the
+  handler's own message ahead of the queue's; the in-order delivery was suspended inside the handler, so the queued
+  message was not delivered until the handler returned, and the poll read the socket with it already queued and
+  returned `null` (or `[]`, or a fetch's expiry) at its deadline. The same shape without a handler - an operation
+  whose message was queued behind a delivery held up in another fiber's awaiting handler - got it, since 2.12.0, only
+  when that delivery reached it. An operation's read now takes what is already queued for its own subscription first,
+  before it reads or waits for another fiber's read, delivering that one subscription with the read's own rules (its
+  own overflow or failing handler still fails it) and returning so the operation looks again; the other
+  subscriptions' queued messages stay in order for the delivery under way. It is skipped while that subscription's own
+  delivery is under way further up the stack, and while a `disconnect()` is closing the connection.
+
+## [2.14.0] - 2026-10-07
+
+### Upgrade notes
+
+- One of the library's operations whose own read is the first to notice a lost connection - a `request()` or
+  `requestMany()`, a `SubscriptionQueue` poll, `fetchBatch()`, `fetchNext()` or `directGetBatch()`, a pull
+  consumer, Key/Value `keys()` or `history()`: every operation that reads for a result of its own - no longer waits
+  for the whole reconnect it starts: it waits within its own timeout, as it does for a reconnect another fiber
+  runs, and with `waitForReconnect: false` it fails at once with `Connection is not open`, the read's error as its
+  previous (#178). A `flush()`, `rtt()` or `drainSubscription()` whose own read is the first to notice fails with
+  `Connection lost before the server answered the PING` as soon as the reconnect's first attempt ends the old
+  connection's `PONG`s, or at once with `Connection is not open` when waiting is disabled, and
+  `drainSubscription()` then reports that and removes the subscription while the reconnect runs on. Code that
+  relied on such an operation returning only once the connection was back - polling in a loop and taking the next
+  successful result for the reconnect, say - now sees it time out or fail during the outage, with the reconnect
+  still under way; the connection events say when the connection is back, and with waiting enabled the next
+  operation waits for the reconnect within its own timeout, as before. A reconnect that gives up while nothing
+  waits for it any more is announced by its `Closed` event and the log: an operation that timed out before the
+  reconnect gave up does not see `Reconnect attempts exhausted`, and the exception of a `drainSubscription()` flush
+  that used to report it now reports the lost `PONG`. With `waitForReconnect: false` the reconnect such an
+  operation started advances only while something awaits on the event loop, as one the heartbeat starts always
+  did: a synchronous application that only ever issues operations failing on the spot has to keep awaiting
+  something for the connection to come back. Your own `processIncoming()` and `readIncoming()`, a serving loop's
+  read and the heartbeat still run the reconnect themselves and wait for all of it.
+
+### Fixed
+
+- `[bugfix]` An operation whose own read was the one on the socket when the connection dropped waited for the whole
+  reconnect, however long it took, before it returned (#178). `readChunk()`'s failed-read path ran the reconnect
+  inline in the operation's fiber, so neither the operation's deadline nor its wake-up (#174) could end the wait:
+  with the server down for 2 s and a 1 s deadline, `SubscriptionQueue::next()` and `request()` returned after 2 s,
+  although a delivery still under way had brought their result 50 ms into the outage, and a `fetchBatch()` or a
+  pull consumer's read did the same. On a real server, where a poll's read is often the only one on the socket, a
+  `next()` with a 1 s timeout returned only once the server was back. Such a read now starts the reconnect in a
+  fiber of its own, like a failed control write does, and waits for it within the operation's deadline and wake-up:
+  the operation returns what a delivery brings during the outage, or times out at its deadline, and the reconnect
+  carries on, announces the new connection once it is over and fails on its own terms when it gives up. With
+  `waitForReconnect: false` the operation fails at once with `Connection is not open`, the read's error as its
+  previous, as one whose control write noticed the loss does, instead of waiting for the reconnect first. A
+  reconnect another fiber already runs is still joined within the same wait, your own read still runs the reconnect
+  itself, and a listener called during the reconnect is still refused an operation that would wait on it.
+
+## [2.13.0] - 2026-10-07
+
+### Upgrade notes
+
+- Your own read, `processIncoming()` or `readIncoming()`, now delivers the messages it brought for the other
+  subscriptions before it throws a handler's exception; only the failing subscription's own later messages stay
+  queued, until the next read that receives anything (or a serving loop's read) continues with them: on an
+  otherwise idle connection that is the server's next `PING`, by default two minutes away. Under
+  `handlerErrorsFailOperations: true` an operation's read does the same before it fails the operation, and a
+  handler's `CancelledException` no longer ends the operation's wait when the operation's own result arrived in
+  the same read behind it: the result is delivered first and the operation completes with it. A second
+  subscription whose handler throws in the same read has its exception passed to the `errorListener` and logged
+  at error level, since one read throws one exception; it used to be thrown by the next read that received
+  bytes, so without an `errorListener` or a logger it is now seen nowhere. Code that relied on nothing behind a
+  throwing handler being delivered until it read again now sees those handlers run within the read that throws,
+  and a handler behind the failing one that awaits, or an `errorListener` that awaits while a second failure of
+  the same read is reported, delays the exception by as long.
+
+### Fixed
+
+- `[bugfix]` A message left queued by a handler that threw in another fiber's read waited for the next read
+  that received bytes (#177). The application's `processIncoming()` read a chunk holding a message whose handler
+  threw and, behind it, the message an operation waited for; the delivery stopped at the failing handler, and
+  nothing delivered the rest until the server sent more, so `SubscriptionQueue::next()`, `fetchAll()`,
+  `request()`, `requestMany()` and `fetchBatch()` waited out their whole deadline with their result queued the
+  whole time, and the pipelined pull consumer re-pulled at every expiry with its message queued the whole time;
+  on a real server, which pings only every two minutes, that is the whole deadline every time. A read that
+  throws a handler's exception now delivers everything else it queued first: the other subscriptions' messages,
+  in sid order, so the operation's wake-up fires as usual and it returns its result at once. The failing
+  subscription's later messages still stay queued, in order, for the next read that receives anything: your own
+  read then throws again if the next handler throws, so each failure of that subscription reaches you one read
+  at a time, and an operation's or a background read that delivers them reports the failure instead. A serving
+  loop's read, as `Service::run()` makes, still delivers what an earlier or a concurrent read has queued and not
+  reached: the later sids of a delivery that another fiber's handler holds up, awaiting, and the rest of a
+  subscription whose handler threw.
+
+## [2.12.0] - 2026-10-06
+
+### Upgrade notes
+
+- **Custom transports.** `TransportInterface::readLine()` must keep every byte it has not returned when its
+  cancellation ends it, a partial frame included: the connection cancels a read not only at a deadline but also to
+  wake an operation whose result another fiber delivered meanwhile, and then reads on (#174). The built-in transports
+  do, and the rule always held in practice, since every non-blocking poll and the heartbeat cancel their reads after
+  a short bound. A transport that lost bytes on cancellation would now corrupt the stream in normal operation.
+
+### Fixed
+
+- `[bugfix]` An operation that reads the socket while it waits for a result of its own, a `SubscriptionQueue` poll,
+  `fetchBatch()`/`fetchNext()`, `directGetBatch()`, the pull consumer or Key/Value `keys()`/`history()`, got a result
+  that another fiber's read delivered only with the server's next bytes or at its deadline when that delivery reached
+  it while the operation's read was already waiting (#174). That happened in three ways: the delivery was still under
+  way when the read started, held up in the handler of another subscription that awaits an HTTP or database call, say,
+  or in the write of the PONG a server PING ahead of the message is owed; it came in the few event-loop hops between
+  the operation's check and the start of its read; or it came with the reconnect the read waited for. On a real server
+  the first costs the whole deadline, the server pinging only every two minutes, and the third about two seconds. An
+  operation's read now ends without reading as soon as anything is delivered to the operation's subscription,
+  wherever the read waits: on the socket, whose read it cancels, behind another fiber's read, or for a reconnect; the
+  operation then looks again. Application reads, `processIncoming()` and `readIncoming()`, are unchanged, and so is
+  the order of deliveries: an operation gets its message once the in-order delivery reaches it, so a handler ahead of
+  it that outlasts the operation's deadline still makes it time out.
+- `[bugfix]` `request()` and `requestMany()` got a reply that another fiber's read delivered only with the server's
+  next bytes or at their timeout in the same three cases (#174). Their replies come on the one reply inbox every
+  request shares, so their read ends on their own reply instead, as the waiter that takes it fires: another request's
+  reply does not end it. A request cancelled right after its reply arrived throws the caller's own cancellation, with
+  its reason.
+- `[bugfix]` `flush()`, `rtt()`, the flushes of `drain()` and `drainSubscription()` and the confirmation of the reply
+  inbox end their read as soon as their PONG is in, whichever fiber's read took it, also when that read's dispatch
+  had to wait before it reached the PONG, for the write of the PONG it owed the server for a PING ahead of it, say
+  (#174). They used to wait for the server's next bytes or their deadline. A flush whose PING went out before the
+  connection dropped fails with `Connection lost before the server answered the PING` as soon as the reconnect's
+  first attempt clears the pong slots, rather than once the reconnect is over or at the flush's deadline.
+- `[bugfix]` An operation's read that waited for a reconnect looks again before it reads the new socket, whether or
+  not the reconnect delivered anything to it (#174). The pipelined pull consumer, which re-issues the pulls the old
+  server forgot once it sees the reconnect, used to read the new socket first and re-pull only at the lost pull's
+  deadline, its expiry plus a second.
+- `[bugfix]` `SubscriptionQueue::next()` with a timeout, and `fetchAll()` with a limit and a timeout, returned a
+  message that another fiber's read delivered while they paused between reads (an application's
+  `processIncoming()` loop, say) only once the timeout ran out (#174). They started another read before they
+  looked at the queue, and that read waited on the socket, with the message already there, for the server's
+  next bytes or the whole timeout. They now take what arrived before they read again. `next()` had this shape
+  since 1.0.0, `fetchAll()` since 2.0.0.
+- `[bugfix]` `SubscriptionQueue::fetchAll()` also takes what such a read delivered during its pause when that
+  does not complete the call, so its own next read has the queue's whole buffer (#174). When that delivery had
+  filled the queue, the messages the next read brought overflowed it: they or the earlier ones were dropped, or
+  under `SlowConsumerPolicy::Error` the call failed with a `SlowConsumerException`.
+- `[bugfix]` The pipelined pull engine behind `PullConsumerIterator::handle()` handed over a batch that another
+  fiber's read delivered while the engine waited for the write of a pull request (an application's
+  `processIncoming()` loop, say, with the socket under backpressure) only at that pull's deadline, its expiry
+  plus 1 s, or with the server's next bytes. It looked at its oldest pull only before it issued pulls, and
+  then read with that pull's batch already there. It now looks again before it reads. The review of #174
+  found this; the engine had the same shape since it arrived in 2.7.0.
+
+### Testing & CI
+
+- `[docs]` The E2E job runs the unit suite once instead of twice, and the Docker fixtures do less background
+  work (#176). The job no longer runs the unit suite inside `composer test:e2e`: its coverage step runs it right
+  after, together with the integration suite, and the Unit + Static jobs run it on PHP 8.2 to 8.5. The skipped
+  pass took about 3 minutes and gave the timing flakes in #176 one more place to hit. `scripts/run-tests-e2e.sh`
+  gained `SKIP_UNIT_TESTS` for this; without it the local flow is unchanged. The compose servers no longer
+  run with debug and trace logging (`-DV`), which wrote every inbound payload through Docker's log pipeline
+  and was never read, and their healthchecks probe every 30 s instead of every 2 s (nothing reads the health
+  status; readiness comes from `scripts/wait-for-nats-services.sh`). That script now also waits for the
+  WebSocket server (`nats-ws`, monitoring port 18229), which it had left out. The unused `workflow_dispatch`
+  input `integration-repeat-count` is gone: no job read it. Dev-only, no library change.
+- `[docs]` Timing-bound tests no longer depend on how fast the runner is or how late a timer fires (#176).
+  About 100 unit tests and 11 integration tests bounded elapsed time close to what they measured, or relied on
+  a timer firing in time, so a busy CI runner could fail them although the code was fine. Several did; the rest
+  were found before they could, by checking how much room each bound left. They now decide by the order
+  of events or by which of two timers fires first, measure from the event that matters (a dial is stopped by its
+  own refused attempt, through a new `StopsDialOnRefusalConnector` test double, and timed from that stop), count
+  idle sleeps instead of timing chunked reads (a new `LoopTickCountingTransport`
+  test double), or keep their bounds far from what the broken behavior takes. Each changed test still fails when
+  its bug is put back. The integration suite's recoverable client no longer gives a connection up after one late
+  PONG, which made a busy NATS container add a reconnect. Two `WaitForReconnectTest` tests that could no longer
+  fail since 2.10.0 were reworked so they can. Dev-only, no library change.
+
+## [2.11.0] - 2026-10-05
+
+### Upgrade notes
+
+- A subscription handler that throws while an operation's read delivers to it no longer fails that operation:
+  the exception is passed to the error listener and logged at error level, and the operation completes. With
+  no `errorListener` and no logger it is visible nowhere: register an `errorListener`, or set
+  `handlerErrorsFailOperations: true` to have operations fail as before. Code that caught another
+  subscription's handler exception from `request()`, `flush()`, `rtt()`, a JetStream call or a
+  `SubscriptionQueue` poll now gets the operation's result instead. `processIncoming()` and `readIncoming()`
+  still throw it.
+
+### Added
+
+- `[feature]` `NatsOptions::$handlerErrorsFailOperations` (default `false`): set `true` to have operations fail
+  as before the first change below: a subscription handler that throws fails whichever operation's read
+  delivered to it, and a handler's `CancelledException` can end an operation's wait early. `Service::run()`
+  and the background reads report it either way, and the second change below applies either way.
+
+### Changed
+
+- `[bugfix]` An operation that reads the socket while it waits for a result of its own no longer fails with
+  another subscription's handler exception (#173). It used to throw the exception of whichever handler its
+  read delivered to, even when its own result had arrived: a `request()` made inside a service endpoint failed
+  with it, so the endpoint answered its requester with a `HANDLER_ERROR` reply and kept the other handler's
+  message as its `last_error`; a JetStream publish could fail after the server had stored the message, so a
+  retry stored it twice unless it carried the same message id within the stream's duplicate window; and the
+  messages behind the failing one waited for another read. A handler that threw
+  a `CancelledException` made a `request()` take it for the end of its own wait: the request read on with its
+  reply left undelivered and timed out. Now the failure is reported through the error listener, logged at
+  error level, the rest of the read is delivered, and the operation completes. This covers `request()`,
+  `requestMany()` and what is built on them (JetStream publish, `ackSync()`, stream and consumer management,
+  Key/Value and Object Store calls), `flush()`, `rtt()`, `fetchBatch()`/`fetchNext()`, `directGetBatch()`,
+  pull consumers (`consumePipelined()`), Key/Value `keys()` and `history()`, and `SubscriptionQueue` polling,
+  as well as a request waiting for its reply inbox to be confirmed. A handler of the operation's own
+  subscription that throws still fails it; that is only ever a subscription the library makes for the
+  operation, such as a `SubscriptionQueue`'s or a fetch's. `processIncoming()` / `readIncoming()`, the reads an
+  application makes itself, still throw. An `-ERR` that fails a read but leaves the connection open, such as
+  `maximum subscriptions exceeded`, still fails the operation whose read meets it: it names no subscription,
+  and it is often the answer to what the operation itself sent. `handlerErrorsFailOperations` restores the old behavior. The README's new Handler Failures
+  section describes the whole behavior.
+- `[bugfix]` The delivery after a reconnect stopped at the first handler that threw: it reported the failure
+  and left the messages behind it queued, for every subscription. An operation whose own read ran the
+  reconnect, such as a `SubscriptionQueue` poll or a fetch, then waited for the server's next bytes for a result
+  that had already arrived: a poll returned nothing once its timeout ended, and a fetch discarded what was
+  queued for it when it unsubscribed. The delivery now delivers the rest as well, reporting any other handler
+  that throws, whatever `handlerErrorsFailOperations` says (#173).
+
+## [2.10.3] - 2026-10-05
+
+### Upgrade notes
+
+- An `-ERR` the server keeps the connection open for no longer ends the connection: `maximum subscriptions
+  exceeded`, `Invalid Publish Subject` and any `Permissions Violation` other than `... for Publish to ...` and
+  `... for Subscription to ...`, which the client still only reports. The read that brought it fails with it
+  at once, as in 2.10.0, and no `Disconnected`, `Reconnected` or `Closed` follows, so the 2.10.1 note now
+  holds only for an `-ERR` the server closes the connection after (`Stale Connection`, `Authorization
+  Violation`, ...). The heartbeat, a reconnect's replay, a service's `run()` and the flushes of `drain()`,
+  `drainSubscription()` and a service's `drain()` report it to the error listener instead and carry on:
+  watch that listener, not `Closed`, for these errors.
+- After such an `-ERR` the flushes of `drain()` and `drainSubscription()` read on to their `PONG`, so a
+  server that then goes silent makes `drain()` wait out its budget, where it used to end at the `-ERR`. When
+  the server closes the connection after it instead, `drainSubscription()`'s flush runs the reconnect itself,
+  and with reconnect on the call returns only once that reconnect ends, past `requestTimeoutMs` if need be;
+  2.10.1 and 2.10.2 waited for the reconnect only within that budget.
+- Once the server rejects the shared reply inbox of `request()` and `requestMany()` for the subscription
+  limit, requests fail fast until a slot is free, and the connection stays open: one already sent whose own
+  read meets the `-ERR` fails with it, any other with a `ConnectionException` saying `request/reply failed:
+  the server may have rejected the shared reply-inbox subscription ...`. Each request subscribes the inbox
+  again and is sent only once the server has taken it, so every attempt costs a round trip and nothing
+  throttles them: a caller that retries should pause between attempts.
+- The write that subscribes the reply inbox now ends with a PING (`SUB _INBOX.<inbox>.* <sid>\r\nPING\r\n`).
+  A transport double that answers only a write that is exactly `PING\r\n`, as one scripted for `flush()`
+  often does, leaves it unanswered, so the `PONG` it sends for the next `flush()`, `rtt()` or `drain()`
+  answers that PING instead, and the call times out. Such a double should answer every PING.
+- A reconnect announces the new connection (`Reconnected`, or `Connected` when it completed a failed first
+  `connect()`) once it is over. Operations that waited for it, a joined `connect()` and a `drain()`
+  included, go on without waiting for the listener, and `disconnect()` and `drain()` no longer wait for one
+  still running: once they have closed the connection, what it calls fails with `Connection is not open`. An
+  operation the listener calls that finds the new connection gone reconnects again: the listener hears
+  `Disconnected` and `Reconnected` (or `Closed`) while that call is still running, the `Reconnected`
+  delivered from the event loop, so handlers can get the new connection's messages first. Do not hold a lock
+  across an await on the same connection in a listener: a call nested in it may need that lock.
+- A `drain()` that waited for a reconnect can therefore close the connection before a `publish()` whose
+  failed write ran that reconnect is retried, while the listener, or a logger that suspends as it records
+  the `Reconnected`, is still busy. That publish then fails with the error of its write and is not sent,
+  where the retry used to come first; a built-in transport's raw stream error is wrapped in a
+  `TransportClosedException`.
+- The listener hears of a connection only while it is still the open one, so a `Reconnected` call always
+  finds the connection Open. One closed, being closed, replaced or lost before the listener was told it
+  opened is not announced, and when it was lost, neither is its loss, though a `Closed` still is. The logger
+  still records every transition.
+- With reconnect off, the `Closed` event of a lost connection now carries the error that ended it and is
+  logged at warning level instead of info, so a failed read is logged twice: as the read's error and with
+  the `Closed` event.
+- A service's `run()` now reports what its reads used to swallow, to the error listener and at error level:
+  another subscription's handler that throws, once per failure (a handler failing on every message is logged
+  for every message), and an `-ERR` the server keeps the connection open for. A handler's
+  `CancelledException` no longer stops the service: only `run()`'s own timeout or cancellation does, or a
+  connection closed for good. A handler awaiting the cancellation passed to `run()` reports its
+  `CancelledException` when that cancellation stops the service.
+- `NatsHeaders::fromWireBlock()` and `fromWireBlockMulti()` declare their keys as `int|string`, since a header
+  name that is a decimal integer, such as `1`, comes back as an int key. Static analysis now reports code
+  that hands such a key to a function taking a string, and code that passes the whole map where string keys
+  are declared, such as Symfony Messenger's `SerializerInterface::decode()`: cast such keys to string there.
+  `NatsHeaders::get()` takes the map as it is.
+- A first `INFO` that is valid JSON but not an object (`INFO 1`, `INFO [1]`) fails the connect as broken JSON
+  does, saying `INFO payload is not a JSON object`.
+
+### Fixed
+
+- `[bugfix]` Since 2.10.1 an `-ERR` the server keeps the connection open for ended the connection, unless the
+  client only reports it, as it does `Invalid Subject`, `Permissions Violation for Publish to ...` and `...
+  for Subscription to ...`. So `maximum subscriptions exceeded`, `Invalid Publish Subject` and any other
+  `Permissions Violation`, such as `... for Publish with Reply of ...`, closed a healthy connection, or with
+  reconnect on reconnected it; after a rejected SUB, every reconnect attempt replayed that SUB and failed
+  again, until the reconnect gave up and closed the connection. Such an `-ERR` fails the read that brought
+  it, as before 2.10.1, and leaves the connection open (when an account's subscription limit is lowered
+  below what a client holds, the server closes the connection after `maximum subscriptions exceeded` anyway,
+  and the EOF ends it). Only an `-ERR` the server closes the connection after (`Stale Connection`,
+  `Authorization Violation`, `Maximum Payload Violation`, ...) and a `PONG` the socket would not take end the
+  connection, and nothing else a frame raises does. Such a failure also outranks any other met in the same
+  read, so a fatal `-ERR` read together with a rejected SUB's still ends the connection.
+- `[bugfix]` A reconnect whose replayed SUB the server rejected for exceeding the maximum subscriptions
+  failed, and so did every attempt after it, until the reconnect gave up and closed the connection. Any
+  failure of the replay that does not end the connection is now reported to the error listener instead, and
+  the reconnect completes; one that ends it still fails the attempt. A rejection read ahead of a line that
+  does not parse is reported as well, though that attempt fails on the parse error. A rejection that arrives
+  after the replay's short poll fails the read that brings it instead, and the connection stays open.
+- `[bugfix]` The flushes of `drain()` and `drainSubscription()` ended at an `-ERR` the server keeps the
+  connection open for, and the messages the server sent behind it, up to the `PONG`, were lost without a
+  count: `drain()` closed the socket with them unread and reported only the `-ERR`, and `drainSubscription()`
+  removed the subscription, so a later read dropped them as an unknown sid's. A long-standing bug, in 2.10.0
+  as well; on 2.10.1 and 2.10.2 `drainSubscription()` also ended the connection, since such an `-ERR` did
+  there. Both flushes now report such an `-ERR` to the error listener and read on to their `PONG` within the
+  same budget, also when a line that does not parse follows the `-ERR` in the same read. A fatal `-ERR` and a
+  `PONG` the socket would not take still end the flush at once, and `flush()` and `rtt()` still fail with
+  such an `-ERR`.
+- `[bugfix]` A `drain()` waited out its whole budget (`requestTimeoutMs`, 10 s by default) against a healthy
+  server while another fiber read the connection, such as an application's `processIncoming()` loop or a
+  service's `run()`: that fiber's read took the `PONG` of the drain's flush before the flush first read, and
+  the flush then waited for that fiber's next read, on a socket with nothing more to come. Every flush - that
+  of `drain()`, `flush()`, `rtt()`, `drainSubscription()` or a service's `drain()` - also had a narrower
+  window: another fiber's read could take the `PONG` just before the flush's own read started, which then
+  waited on the idle socket until the budget ran out, and the call returned only then, `rtt()` reporting that
+  wait as the round trip. A `drain()` issued right after a `request()`, in the same tick, met it against a
+  server that answered at once. A flush now looks for its `PONG` before every read, and its read looks again
+  before it takes the socket.
+- `[bugfix]` The shared reply inbox of `request()` and `requestMany()` was recorded only once the write of
+  its SUB had returned. When that write found the socket dead, the reconnect it started replayed the SUB,
+  and a permissions rejection read during that replay missed the latch of 2.7.1 (#167): the request and
+  every later one waited out their timeouts instead of failing at once with the permissions error. And when
+  a terminal close came while the write was under way and the write completed all the same (a narrow race,
+  since the shipped transports fail such a write when the socket closes), the closed connection's inbox
+  stayed recorded: after a new `connect()` every request was sent with a reply subject nobody held there
+  and timed out. The inbox is now recorded before its SUB is written, so whichever read meets the server's
+  answer finds it. A request joins a set-up still under way instead of trusting the recorded inbox, and a
+  set-up whose write fails without the connection coming back in time is rolled back. A terminal close
+  during the set-up fails the request without sending it (with `Connection was closed while the reply inbox
+  was being set up` when the write completed anyway), and a request after a new `connect()` neither waits
+  for a set-up left from the closed connection nor reuses its inbox.
+- `[bugfix]` The shared reply inbox of `request()` and `requestMany()` stayed dead once the server rejected
+  its SUB with `maximum subscriptions exceeded`, an `-ERR` that names no subject and leaves the connection
+  open. In 2.10.0 the request that met the rejection failed with it, and every later one was sent with a
+  reply subject nobody held and waited out its whole timeout (`requestMany()` returned nothing), even after
+  a slot freed up, until the connection closed for good. 2.10.1 and 2.10.2 ended the connection on that
+  `-ERR` instead, and with reconnect on every attempt replayed the inbox's SUB into the same limit until the
+  reconnect gave up. The SUB now goes out with a PING right behind it, and the inbox counts as confirmed
+  once that PING's PONG arrives, which the server sends only after its answer to the SUB, or once a reply
+  arrives on it. That `-ERR` arriving before then drops the inbox: the requests waiting on it fail at once,
+  a `requestMany()` that has collected replies returns them, and the next request subscribes a new inbox,
+  in the same write as an UNSUB of the dropped one. Until a new inbox is confirmed, a request waits for that
+  before it is sent, so while the limit holds requests fail fast without reaching the responder, and once a
+  slot is free they work again, with no reconnect. A reconnect whose replay of the inbox is rejected works
+  the same way, and a confirmed inbox stays in place when another subscription is rejected: the requests in
+  flight on it are not failed with the dropped-inbox error, though one whose own read brings that `-ERR`
+  fails with it, as any read does. Another subscription's `-ERR` that arrives while the inbox's SUB still
+  waits behind earlier writes, or before its PONG, drops an inbox the server takes after all; the next
+  request's UNSUB gives its slot back.
+- `[bugfix]` A request whose reply inbox was still being subscribed when a `drain()` began was sent all the
+  same, after the drain's UNSUB of that inbox: the responder ran it, though no reply could come back, and the
+  request failed with `Connection is not open` once the drain closed the connection. A `drain()` that begins
+  while a request subscribes the inbox, or waits for the server to take it, now fails the request with
+  `Connection is not open` without sending it, as one issued during the drain does.
+- `[bugfix]` An async `INFO` whose payload is valid JSON but not an object was not treated as malformed.
+  `INFO 1` failed the read with a `TypeError`, which 2.10.1 and 2.10.2 also took for a connection failure
+  and ended the connection with, and `INFO [1]` replaced the server info with defaults (no server id, no
+  headers support), after which every publish with headers was refused. Such an `INFO` is now reported to
+  the error listener as malformed, as broken JSON is, and the last server info is kept. A first `INFO` like
+  that fails the connect as broken JSON does, saying `INFO payload is not a JSON object`, where a number
+  failed it with a `ConnectionException` wrapping a `TypeError` and an array connected with the default info.
+- `[bugfix]` An operation called from a `Reconnected` listener - or from the `Connected` listener of a failed
+  initial connect that a reconnect completed - that found the new connection gone already joined the
+  reconnect that had announced it, which was still waiting for the listener to return. A read meeting EOF or
+  a fatal `-ERR`, a `flush()` or a `subscribe()` waited out its timeout; a `publish()`, a `request()`, a
+  lame-duck failover and a read without a cancellation never returned. The connection then stayed Open on the
+  dead socket, and a failure another fiber or the heartbeat noticed while the listener ran was lost the same
+  way, the heartbeat stopping for good. The new connection is now announced once the reconnect is over, as a
+  direct connect already was: such an operation reconnects again, as it would anywhere else, and an
+  announcement made while another `Connected` or `Reconnected` listener call runs is delivered from the
+  event loop, so that the calls do not nest one level deeper with every connection a server drops. A
+  `publish()` whose failed write ran the reconnect is retried by the state it then finds: buffered behind a
+  reconnect or lame-duck failover the listener left in flight (it used to fail, its frame lost, or go to the
+  connection the server was about to close); written to the connection a `drain()` is still flushing; or,
+  when the connection was closed meanwhile, failing with the error of its write, a built-in transport's raw
+  stream error wrapped in a `TransportClosedException` ("Transport is not connected").
+- `[bugfix]` A `drain()` that waited for a reconnect also waited for a slow `Reconnected` listener, past its
+  budget. A supervisor that reconnects on the `Closed` of a `drain()` called from that listener was refused
+  with `Recovery was aborted before the connection opened`, the reconnect still waiting for the listener; it
+  now opens a new connection, as documented. And a close the listener makes takes over what the reconnect
+  read, even while the close is still under way as the listener returns: `drain()` delivers it and
+  `disconnect()` discards it, where it used to be delivered during the close. A read that receives anything
+  during the close still delivers it with what it received, as any read does.
+- `[bugfix]` A `connect()` that joined a failed first dial waited for the `Connected` listener of the
+  reconnect that completed the dial, so a listener waiting for that `connect()` waited out its own timeout;
+  it now resumes when the listener starts, as on a direct connect. When that listener lets the new
+  connection die and returns with the next reconnect in flight, the `connect()` that dialled now fails with
+  `Connect was aborted before the connection opened` while those that joined it succeed, as on a direct
+  connect, where both used to report success on the dead socket.
+- `[bugfix]` With reconnect off, a connection the heartbeat gave up on (unanswered PINGs, a failed PING
+  write, the socket closing or breaking during its read) closed without saying why: `Reconnect is disabled`
+  and its cause (#172) reached only an operation that joined the recovery. The `Closed` event now carries
+  the cause, so that the connection listener and the log learn it. The reason for unanswered PINGs reads
+  "the last PING" when `maxPingsOut` is 1, and says that the heartbeat allows no unanswered PING when it is 0.
+- `[bugfix]` A service's `run()` swallowed the exception of a handler that threw while its loop read, another
+  subscription's on the same connection: nothing reported it, the loop backed off 20 ms, and the messages that
+  read brought behind the failing one, for any subscription, stayed queued until the server sent something
+  else. A request read behind it waited up to the heartbeat interval, and was lost when the service stopped
+  first, and a subscription failing on two or more messages per read starved the service's endpoints for
+  good. A handler that threw a `CancelledException` stopped the service, silently. Such a failure is now
+  reported to the error listener, the rest of the read is delivered, and the loop reads on without backing
+  off, as `drain()` treats a throwing handler. An `-ERR` the server keeps the connection open for is reported
+  the same way, also one read ahead of a line that does not parse; the loop used to swallow it too. The
+  loop's read also delivers what another read left queued - another fiber's that stopped at a throwing
+  handler, or the delivery after a reconnect - instead of leaving it for the server's next bytes, except
+  while a `disconnect()` is closing the connection, which discards it. A read that receives anything during
+  the close, the loop's or any other, still delivers it with what it received. A known limitation remains:
+  the read of an operation, such as a `request()` an endpoint handler makes, still fails with another
+  subscription's handler exception, and the endpoint then answers its requester with a `HANDLER_ERROR` reply.
+- `[bugfix]` A service's `drain()` swallowed what its flush met, such as another subscription's handler that
+  threw, and returned before the `PONG` that confirms the server has processed the `UNSUB`s. The flush now
+  reports it to the error listener and reads on to that `PONG`.
+- `[bugfix]` A service endpoint's request validator that threw escaped the endpoint into the read that
+  delivered the request: the requester got no reply, the endpoint counted no error, and the read failed with
+  the exception, which a service's `run()` swallowed. Such a validator is now answered like a handler that
+  throws: a `HANDLER_ERROR` reply without the exception's text, an error counted with the text as
+  `last_error`, and `request_error` and `request_end` for the observers. A `ServiceError` it throws is sent as
+  chosen, as a handler's is.
+- `[bugfix]` A request header whose name is a decimal integer, such as `1`, which any requester can send,
+  made a service endpoint throw a `TypeError` into the read that delivered the request, and the request went
+  unanswered, whenever the endpoint had an observer or its handler threw: `NatsHeaders::fromWireBlock()`
+  returns such a name as an int key, as PHP stores such array keys, and the endpoint lowercased it under
+  strict types. The endpoint now answers such a request like any other. `fromWireBlock()` and
+  `fromWireBlockMulti()` now declare their keys as `int|string`, so static analysis reports such a call in
+  your code too.
+
+## [2.10.2] - 2026-10-04
+
+### Upgrade notes
+
+- With reconnect off, `Reconnect is disabled` now carries the error that ended the connection as its
+  previous exception (`getPrevious()`). Its message and code are unchanged.
+
+### Fixed
+
+- `[bugfix]` With reconnect off, `Reconnect is disabled` did not say why the connection ended (#172), so
+  the operator saw what reads like a configuration problem and had nothing to go on. The error that ended
+  the connection is now chained as its previous exception (`getPrevious()`): the socket error of a failed
+  read or write, the `ProtocolException` of a stream that could not be parsed, a server `-ERR` such as
+  `Stale Connection`, or why the heartbeat gave up (`The server did not answer the last 2 PINGs`, its PING
+  write failing, or the socket closing or breaking during its read). That holds for the operation that
+  failed and for any operation that joined the recovery. The message is unchanged, so code that matches it
+  keeps working.
+
+## [2.10.1] - 2026-10-03
+
+### Upgrade notes
+
+- After a fatal `-ERR` from the server, the connection is no longer left Open: with reconnect off it is
+  Closed by the time the read that met the `-ERR` throws, and with reconnect on that read first waits for
+  the reconnect within its own timeout (a `processIncoming()` without a cancellation waits for the whole
+  reconnect, as it already did after a failed read). The read still throws the same
+  `ConnectionException` (`Server sent error frame: ...`). The same holds for a server PING whose PONG the
+  socket would not take; that read still throws the socket's own error.
+
+### Fixed
+
+- `[bugfix]` A fatal `-ERR` from the server - the error it sends right before it closes the connection,
+  such as `Stale Connection` for a client that stopped answering its pings - failed the operation that
+  read it but left the connection Open (#171). The next operation then wrote into the socket the server had
+  closed and failed as well: with reconnect off with `Reconnect is disabled`, with reconnect on only after
+  waiting out its whole timeout, since its request had gone to the dead socket. A synchronous application
+  that sat idle for a few minutes - between requests in a worker-mode runtime, say - met this on its next
+  two calls. Such a frame, and a PONG the socket would not take, now ends the connection like a failed
+  read: it reconnects, or with reconnect off closes for good, and the read that met it fails with the
+  server's error once the connection is Closed or, with reconnect on, once the reconnect is done or the
+  read's own timeout runs out (not waiting at all with `waitForReconnect: false`). The heartbeat's read
+  does the same. A full subscription queue still does not end the connection.
+
+## [2.10.0] - 2026-09-30
+
+### Upgrade notes
+
+- A `subscribe()`, `flush()` or `rtt()` whose write finds the socket dead no longer throws the socket's own
+  error (for example `Amp\ByteStream\StreamException`): it starts the reconnect and waits for it within
+  its own timeout, as it waits for a reconnect already in flight. `subscribe()` then returns; `flush()`
+  and `rtt()` throw a `ConnectionException` (`Connection lost before the server answered the PING`). A wait
+  that runs out throws a `TimeoutException`, and with reconnect off they throw a `ConnectionException`
+  (`Reconnect is disabled`). Code that caught the transport's exception there should catch those instead.
+- `unsubscribe()` no longer throws when its write finds the socket dead.
+- `disconnect()` and `drain()` now return only once the reconnect or `connect()` they stopped has ended.
+  With the built-in transports that is at once; a custom transport that implements only
+  `TransportInterface` can hold them up to `connectTimeoutMs`. Implement `CancellableDialTransportInterface`
+  to let a close stop its dial.
+
+### Added
+
+- `[feature]` `CancellableDialTransportInterface`, a transport whose dial can be stopped: its `connect()`
+  takes a cancellation that fires when the application closes the connection while a connect or a
+  reconnect is dialling. Both built-in transports implement it. A custom transport that implements only
+  `TransportInterface` works as before, and a close waits for its dial to end, up to `connectTimeoutMs`.
+
+### Fixed
+
+- `[bugfix]` A `subscribe()`, `flush()` or `rtt()` whose write found the socket dead failed with the
+  socket's own error (for example `Amp\ByteStream\StreamException` "Broken pipe") and left the connection
+  Open on that socket, so every operation that wrote a control frame failed the same way until the
+  heartbeat noticed. A JetStream fetch subscribes its inbox first: after a server restart the application
+  had not seen yet, a fetch threw "Broken pipe", and a consumer built on it exited. Such a write is now a
+  connection failure, as a failed publish write already was. The connection reconnects, and the operation
+  waits for it within its own timeout, the way it waits for a reconnect already in flight; a
+  `subscribe()` then runs on the new connection, while a `flush()` or `rtt()` fails anyway, with
+  `Connection lost before the server answered the PING`, since what it was to confirm went to the dead
+  connection. With reconnect off the connection closes for good and the operation fails with
+  `Reconnect is disabled`; with `waitForReconnect: false` it fails at once with `Connection is not open`.
+  `unsubscribe()` no longer throws on a dead socket either - the server dropped the subscription with the
+  connection - as it already did not on a connection that is not open, and the next operation that needs
+  the socket reconnects.
+
+- `[bugfix]` `disconnect()` or `drain()` during a reconnect that was dialling left that reconnect running
+  after they returned: they cut its backoff short but not its dial, which with Amp's retry pauses takes
+  some 6 s against a refused port. A `connect()` issued after the close met the stopped reconnect still
+  winding down and failed with `Recovery was aborted before the connection opened`. In a synchronous
+  application the reconnect never got the event-loop time to end, so every later `connect()` failed that
+  way and the connection could not be reopened until the process restarted (found while reviewing
+  symfony-nats-messenger PR #45, where a transport's `close()` then broke every later dispatch). A close
+  now stops the dial - Amp's retry pauses included, for a transport that implements
+  `CancellableDialTransportInterface` - and waits, bounded by `connectTimeoutMs`, for the reconnect or
+  `connect()` it stopped to end before it returns, so a `connect()` issued after it dials afresh. A
+  `connect()` racing the close still fails at once. A reconnect attempt that finds a close came while it
+  was closing the previous socket no longer dials.
+- `[bugfix]` A reconnect that a close stopped delivered the messages queued on the connection on its way
+  out: after `disconnect()`, which discards them, or beside `drain()`'s own delivery and past the rules it
+  keeps. It now leaves them to the close.
+
+## [2.9.0] - 2026-09-30
+
+### Upgrade notes
+
+- An operation whose wait for a reconnect runs out (see `waitForReconnect` below) fails with a
+  `TimeoutException`, for example `Subscribe to "orders" timed out waiting for the connection to be
+  re-established`, where it used to fail at once with `Connection is not open`. `TimeoutException` is not
+  a `ConnectionException`, so a `catch (ConnectionException)` around `subscribe()`, `flush()`, `rtt()`,
+  `request()`, `requestWithHeaders()` or `requestMany()` no longer catches that case.
+- `processIncoming()` and `readIncoming()` without a `Cancellation` now wait for a reconnect in flight to
+  end, and for another fiber's socket read to end, instead of returning or failing at once. Pass a
+  `Cancellation` to bound them.
+- `SubscriptionQueue::fetch()`, and `next()` without a timeout, return `null` during a reconnect instead of
+  throwing `Connection is not open`; `next()` and `fetchAll()` with a timeout wait for the reconnect within
+  it. A reconnect that gives up still throws its error.
+- `drain()` now emits `ConnectionEvent::Closed`, so a listener that reconnects on every `Closed` now also
+  reconnects after a graceful `drain()`.
+- Under `SlowConsumerPolicy::Error`, an overflow that an operation's read runs into is reported through
+  the error listener, logged at error level, instead of failing that operation. With no `errorListener`
+  and no logger it is visible nowhere: register an `errorListener`, or set
+  `slowConsumerErrorsFailOperations: true` to have operations fail as before.
+
+### Added
+
+- `[feature]` `NatsOptions::$waitForReconnect` (default `true`). While a reconnect is in flight,
+  `request()`, `requestWithHeaders()`, `requestMany()`, `subscribe()`, `flush()`, `rtt()`, `drain()`,
+  `drainSubscription()` and the reads - `processIncoming()` / `readIncoming()` and `SubscriptionQueue`
+  polling - wait for it instead of failing at once with `Connection is not open`, then run on the new
+  connection. An operation waits within its own timeout; a read within the `Cancellation` passed to it,
+  and without one until the reconnect ends. A reconnect that gives up surfaces its own error (e.g.
+  `Reconnect attempts exhausted`). Operations still fail at once when no reconnect is in flight, and
+  when called from a connection/error listener while the reconnect is in flight (it runs inside the
+  reconnect, which waits for it). Set `false` to fail
+  fast again, except that `drain()` then closes the connection and throws, and `drainSubscription()`
+  delivers what already arrived and removes the subscription.
+- `[feature]` `SlowConsumerException`, thrown under `SlowConsumerPolicy::Error` when a message arrives
+  for a subscription whose queue is full, carries the subscription's `sid`. It extends
+  `ConnectionException`, which the overflow was thrown as before, with the same message, so existing
+  handlers still catch it; a caller can now tell a subscriber that fell behind from a failed connection.
+- `[feature]` `NatsOptions::$slowConsumerErrorsFailOperations` (default `false`): set `true` to keep the
+  behavior from before the change below, where under `SlowConsumerPolicy::Error` an overflow of any
+  subscription fails whichever operation's read ran into it. An overflow of a `SubscriptionQueue`'s
+  polling buffer that is thrown is then also reported, as it was before. `Service::run()` reports
+  overflows either way.
+
+### Changed
+
+- `[bugfix]` Under `SlowConsumerPolicy::Error`, an operation that reads the socket while it waits for a
+  result of its own no longer fails with another subscription's overflow. It used to throw the overflow
+  (a `ConnectionException`) of whichever subscription's queue its read happened to overflow: a `request()`
+  failed although its reply had arrived (a retry could repeat the work, a JetStream publish could be
+  stored twice), a fetch discarded the messages it had collected (redelivered late, or lost with
+  `max_deliver=1`), and which operation failed was down to chance. Now the overflow is reported through
+  the error listener and the operation completes. This covers `request()`, `requestMany()` and what is
+  built on them (JetStream publish, `ackSync()`, stream and consumer management, Key/Value and Object
+  Store calls), `flush()`, `rtt()`, `fetchBatch()`/`fetchNext()`, `directGetBatch()`, pull consumers
+  (`consumePipelined()`), Key/Value `keys()` and `history()`, and `SubscriptionQueue` polling;
+  `Service::run()`, which used to swallow the overflow without reporting it, now reports it. An overflow
+  of the operation's own subscription (a `SubscriptionQueue`'s) still fails it, once the rest of the read
+  is delivered, and `processIncoming()` / `readIncoming()`, the reads an application makes itself, still
+  throw. `slowConsumerErrorsFailOperations` restores the old behavior. A reported overflow is logged at
+  error level. The README's new Slow Consumers section describes the whole behavior.
+- `[bugfix]` The same now holds for a `SubscriptionQueue`'s own polling buffer, which fills when the
+  application does not poll the queue: under `SlowConsumerPolicy::Error` its overflow is a
+  `SlowConsumerException` naming the queue's subscription - it was a plain `NatsException`, so a
+  `catch (ConnectionException)` now catches it too - thrown to the application's own read and reported
+  when another operation or a background read runs into it. It used to be thrown from whichever read
+  delivered the message, so a `request()` failed although its reply had arrived, and it cut that
+  delivery short: the messages behind it, for other subscriptions too - an operation's reply among them -
+  waited for the next read, and `drain()` discarded them at its deadline. They are now delivered in the
+  same pass. It used to be reported as well as thrown, logged at debug level; now each overflow reaches
+  the application once, and a reported one is logged at error level like any other overflow under
+  `Error` (with `slowConsumerErrorsFailOperations`, one that is thrown is still reported as well).
+- `[bugfix]` `drain()` now emits `ConnectionEvent::Closed` when it closes the connection - once, after
+  the drain is over, so a `Closed` listener can `connect()` again straight away. It used to close the
+  connection without any event; nats.go likewise calls its closed handler after `Drain()`. When
+  something else closed the connection during the drain - a reconnect that gave up, or `disconnect()` -
+  that path's `Closed` is the only one. A listener that reconnects on every `Closed` now also does so
+  after `drain()`, as it already did after `disconnect()`. Every close is now announced once:
+  `disconnect()` of a connection already closed and announced (after `drain()`, after a reconnect that
+  gave up, a second `disconnect()`) closes it again without a second `Closed` event. The same holds when
+  a `disconnect()` - or a `drain()` running out of time - comes while a connect or reconnect that gave up
+  is still closing the socket (a TLS or WebSocket close takes a while): that path's `Closed`, with its
+  error, is the only one. A `disconnect()` there used to announce the close a second time.
+
+### Fixed
+
+- `[bugfix]` A synchronous application could leave a reconnect stalled until the process restarted.
+  A reconnect only advances while something waits on the event loop, and awaiting an operation that
+  fails at once never lets the loop run its dials and backoff timers. So when the heartbeat started a
+  reconnect in the background (a hung server, a dropped connection noticed between operations), a
+  queue worker or daemon whose operations all failed that way stayed `Connecting` and failed every
+  operation from then on. With `waitForReconnect` the first operation waits and so drives the
+  reconnect. A publish buffered during a reconnect now also yields one event-loop tick, so a process that
+  only publishes moves the reconnect along, one tick per publish.
+- `[bugfix]` A request, pull fetch or `processIncoming()` whose socket read failed - or brought a corrupt
+  chunk - while another fiber (typically the heartbeat) was already reconnecting waited for the whole
+  reconnect, ignoring its own timeout - up to the full backoff schedule during a long outage. It now
+  gives up at its own deadline while the reconnect carries on.
+- `[bugfix]` One timeout now covers a whole request: the request timeout (and `requestMany()`'s total
+  timeout) starts when the request is issued, so the wait for a reconnect, the reply-inbox set-up and the
+  publish all count against it, and the reply wait gets what is left. It used to start only after the
+  publish. A request with a
+  non-positive timeout is now rejected before anything is published.
+- `[bugfix]` `flush()` and `rtt()` honor the single `requestTimeoutMs` budget they document: the PING
+  write and the PONG wait used to get a full budget each, so a backpressured flush could take twice
+  as long. `rtt()` does not count a wait for a reconnect as round-trip time.
+- `[bugfix]` `drain()` during a reconnect threw `Connection is not open` without closing anything, so
+  the reconnect could reopen - with every subscription replayed - the connection the application was
+  shutting down, and the publishes buffered during the outage were lost when it fell back to
+  `disconnect()`. `drain()` now waits for the reconnect within its budget, so those publishes are
+  flushed before the drain. If the budget runs out it stops the reconnect at once, bounds its backlog
+  pass by the same budget, and reports the buffered publishes it discards through the error listener;
+  `connect()` is refused (`Cannot connect: drain in progress`) until the drain is over, because the
+  drain's teardown would close a connection opened meanwhile. When it cannot wait (`waitForReconnect`
+  disabled, or called from a connection/error listener) it closes the connection, reports what it
+  discards - the buffered publishes and the messages received but not yet delivered - and throws
+  `Cannot drain while reconnecting: the connection was closed instead`, matching nats.go's `Drain()`.
+- `[bugfix]` `drainSubscription()` could leave the subscription alive on the server. When the
+  connection was lost during its flush, the reconnect re-subscribed the sid and `drainSubscription()`
+  then removed it only locally: the server kept delivering to a sid nothing handles, and for a queue
+  group that member silently took its share of the group's messages. A subscription being drained is
+  no longer re-subscribed.
+- `[bugfix]` A subscription removed while a reconnect was between re-subscribing and going live -
+  `unsubscribe()` and `drainSubscription()` can then only remove it locally - stayed subscribed on the
+  server, with the same effect. It is now unsubscribed on the new connection before that goes live, and
+  so is an auto-unsubscribe max armed in that window, which used to leave the server delivering past
+  the max.
+- `[bugfix]` `drainSubscription()` while reconnecting, or during `drain()`, dropped the messages already
+  received for the subscription without delivering or reporting them. While reconnecting it now waits for
+  the reconnect within its budget, like `flush()`, and drains on the new connection - so it also delivers
+  what the server sends on a subscription the reconnect had already re-subscribed before its UNSUB lands;
+  when it cannot wait (`waitForReconnect` disabled, a listener inside the reconnect, the budget spent) it
+  delivers what arrived. During a `drain()` it leaves the subscription to the drain, whose flush may still
+  bring messages for it: removing it at once dropped those. Its UNSUB write is bounded by its budget like
+  `drain()`'s writes; a peer that stopped reading held it forever. A handler that throws during it is
+  reported through the error listener and delivery goes on, like in `drain()`: a handler failing inside
+  its flush was swallowed without a trace,
+  and one failing in its final delivery made it throw and keep the subscription. When a delivery for the
+  subscription is already under way - a handler draining its own subscription included - that delivery
+  now hands over the messages queued behind it and then removes the subscription; the handler that
+  drained itself used to lose them. An UNSUB that fails because the connection just dropped no longer
+  makes it throw and keep the subscription: it still delivers and removes it. A second call for a sid
+  that is already being drained now resolves at once, instead of sending a second UNSUB.
+- `[bugfix]` `disconnect()` during a reconnect let the reconnect run on until its current backoff delay
+  ended, so a `connect()` right after the close joined it and failed with `Recovery was aborted before
+  the connection opened`, and a close during the backoff after the last attempt was reported as
+  `Reconnect attempts exhausted` with a second `Closed` event. Closing now cuts the backoff short, so a
+  reconnect waiting between attempts stops at once (an attempt already dialling finishes first), and it
+  stops without reporting exhaustion - also when its attempt then fails authentication, which used to
+  announce the close a second time. A `connect()` issued while such a reconnect is still winding down
+  now fails at once instead of waiting for it: it could never open the connection, and when the
+  `connect()` came from a `Closed` listener that the reconnect itself was waiting on, the wait never
+  ended.
+- `[bugfix]` `disconnect()` while `connect()` was still dialling, or retrying a failed first dial
+  (`retryOnFailedInitialConnect`), was overridden: the dial went `Open` behind the announced close, with
+  close intent still set, so nothing would recover that connection later. `connect()` now fails with
+  `Connect was aborted before the connection opened`, and the retries' backoff is cut short. A
+  `disconnect()` during the last retry, whose dial then failed too, no longer makes `connect()` report
+  that dial's error and announce the close a second time.
+- `[bugfix]` A read, write or heartbeat that failed on a connection the application had since closed and
+  reopened - for example from an error listener that reconnects - started a reconnect of the new,
+  healthy connection. Failures are now tied to the connection they happened on.
+- `[bugfix]` `drain()` whose connection died while it waited for its flush `PONG` read the dead socket
+  until its budget ran out; it now ends the flush at once. A server `PING` answered during a drain is
+  bounded by the drain budget like the drain's own writes, so a stalled socket cannot hold it past it.
+- `[bugfix]` A publish issued while `disconnect()` was closing the connection during a reconnect was
+  accepted into the reconnect buffer and reported success, then discarded silently. Publishes are
+  refused once a close is under way.
+- `[bugfix]` A reconnect the server refused to authenticate discarded the publishes buffered during the
+  outage without reporting them. It now reports them as an exhausted reconnect does (`Reconnect failed
+  authentication: N bytes of buffered publishes were discarded`).
+- `[bugfix]` A logger that threw while an exhausted reconnect reported the publishes it discarded
+  aborted the cleanup: the connection kept its subscriptions and no `Closed` event was emitted. A
+  logger that threw on a reconnect's "attempt failed" line ended the reconnect, leaving the connection
+  `Connecting` for good, and one that threw while a lifecycle event was logged kept that event from the
+  connection listener. A logger that threw on a failed read skipped the reconnect: the connection stayed
+  `Open` on a dead socket and every later read failed with the logger's exception. And one that threw on
+  an error the heartbeat's own read picked up (a fatal `-ERR`, a corrupt stream) escaped into the event
+  loop. All of these are now contained.
+- `[bugfix]` Under `SlowConsumerPolicy::Error`, a subscriber that could not keep up made the connection
+  close for good on its next reconnect. With its queue full - nothing delivers while a reconnect runs -
+  the first message the server sent after the reconnect re-subscribed it overflowed the queue, and the
+  overflow failed the attempt like a fatal server error; every attempt failed the same way until the
+  reconnect gave up, closed the connection and discarded the queued messages. The overflow now drops
+  that message and is reported through the error listener, as the policy says, and the reconnect carries
+  on; a fatal `-ERR` in the same read still fails the attempt. An overflow among the frames read just
+  before a corrupt one was not reported at all; it is now.
+- `[bugfix]` The flushes of `drain()` and `drainSubscription()` ended early when one of their reads
+  overflowed a subscription's queue under `SlowConsumerPolicy::Error`, or when a handler threw while they
+  delivered, and the messages still in flight were then lost without a trace: `drain()` closed the socket
+  on them, and for `drainSubscription()` they arrived after the subscription was removed. The overflow or
+  the handler's failure is reported through the error listener and the flush reads on to its `PONG`.
+- `[bugfix]` Under `SlowConsumerPolicy::Error`, the application's own read that met a subscription's
+  overflow and then a fatal `-ERR` threw the overflow and only reported the `-ERR`, so the caller took a
+  failed connection for a subscriber that fell behind. The `-ERR` is now thrown and the overflow reported.
+- `[bugfix]` Under `SlowConsumerPolicy::Error`, a read that ended in a corrupt frame could lose an
+  overflow: a second overflow in that read replaced the first, which was then neither thrown nor
+  reported - as did the failure of a connection that could not recover from that frame. Each overflow now
+  reaches the application once.
+- `[bugfix]` Under `SlowConsumerPolicy::Error`, an error listener that reacted to an overflow by reading on
+  the connection - `drainSubscription($error->sid)`, say - could have messages delivered out of order: the
+  overflow was reported before the rest of its read was queued, and the listener's read delivered the
+  next read's messages ahead of it. An overflow is now reported once its read is queued.
+- `[bugfix]` A handler that threw while the heartbeat's own read delivered was swallowed without a trace,
+  and the messages behind it waited for the next read. A handler that threw while a reconnect's handshake
+  delivered (the server had sent a frame right behind its `PONG`) failed that reconnect attempt. Both are
+  now reported through the error listener, and delivery goes on.
+- `[bugfix]` `SubscriptionQueue::fetchAll()` that failed - on an overflow of its own subscription under
+  `SlowConsumerPolicy::Error`, say - lost the messages it had already taken from the queue's buffer:
+  neither returned nor counted. They are now put back, in order, for the next call.
+- `[bugfix]` `subscribeQueue()` threw when the messages that arrived before its queue existed did not fit
+  in it under `SlowConsumerPolicy::Error`: the rest of those messages were lost, and the subscription stayed
+  registered, feeding a queue nobody held. The overflow is now counted and reported, and the queue is
+  returned.
+- `[bugfix]` Key/Value `keys()` and `history()` could return a cut-short list as if it were complete (under
+  the default `DropOldest`), or fail (under `Error`), when one read brought more records than
+  `maxPendingMessagesPerSubscription` - possible once `readChunkSizeBytes` is raised. Their replay
+  subscriptions are now exempt from that bound, like the JetStream fetch inboxes: the listing bounds
+  them.
+- `[bugfix]` Under `SlowConsumerPolicy::DropOldest` and `DropNewest`, a message the policy discarded was
+  reported in the middle of the read that brought it, as were a recoverable `-ERR` and a malformed async
+  `INFO`: an error listener that read on the connection then had the next read's messages delivered ahead
+  of the rest of that one. They are now reported once the read has queued everything it read, like the
+  `Error` overflows. A logger that threw on one of these reports failed the read - under `DropOldest` after
+  the oldest message was gone but before the new one was queued, so that one was lost too - and so did one
+  that threw on a `SubscriptionQueue`'s own drop report. A logger that throws on any report is now
+  contained, and the error listener still gets the report: a handler's failure after a reconnect and a
+  JetStream push consumer's status used to be kept from it.
+- `[bugfix]` A `processIncoming()` or `readIncoming()` loop could freeze the process at 100% CPU. When
+  another fiber held the socket read - a request waiting for its reply, or the heartbeat reading the
+  answer to its `PING` (a handler that awaits something is enough to let it start) - the call returned `0`
+  at once without handing the event loop control, so no timer or socket read ran again, that other read's
+  included. It now waits for that read to finish, bounded by its cancellation, and then returns `0`. A
+  loop over `SubscriptionQueue::fetch()`, or `next()` without a timeout, spun the same way and is fixed
+  with it.
+- `[bugfix]` A request made by a handler of a message that arrived during a reconnect timed out, and
+  `drain()` called from a `Reconnected` listener waited out its whole budget before closing. The read whose
+  failure started the reconnect held the socket read until the reconnect was over, so nothing called from
+  inside the reconnect could read. That read now lets go of the socket before it reconnects.
+- `[bugfix]` A reconnect with a large `maxReconnectAttempts` crashed after about 60 attempts instead of
+  backing off at `reconnectMaxDelayMs`: `reconnectDelayMs * 2^(attempt - 1)` left the int range, and
+  casting the out-of-range float gave a garbage, possibly negative, delay that `delay()` rejected
+  ("Delay must be greater than or equal to zero"; PHP 8.5 also warns that the float is not
+  representable as an int). The delay is now capped before the cast.
+
 ## [2.8.0] - 2026-08-08
 
 ### Added

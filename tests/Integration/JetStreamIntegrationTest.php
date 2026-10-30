@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace IDCT\NATS\Tests\Integration;
 
 use Amp\CancelledException;
+use Amp\DeferredFuture;
 use Amp\Future;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\Enum\ConnectionState;
@@ -13,12 +14,17 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\JetStreamException;
+use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\KeyValue\KeyValueEntry;
 use IDCT\NATS\JetStream\KeyValue\KeyWatchOptions;
 use IDCT\NATS\JetStream\ObjectStore\ObjectData;
 use IDCT\NATS\JetStream\ObjectStore\ObjectStoreBucket;
 use IDCT\NATS\Tests\Support\DroppingTransport;
+use IDCT\NATS\Tests\Support\FrameAtATimeTransport;
+use IDCT\NATS\Tests\Support\GatedDialTransport;
+use IDCT\NATS\Tests\Support\SeveringTransport;
 use IDCT\NATS\Transport\AmpSocketTransport;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 use function Amp\async;
@@ -638,7 +644,10 @@ final class JetStreamIntegrationTest extends TestCase
     }
 
     /**
-     * Verifies TERM and WPI tokens influence pull-consumer redelivery workflow.
+     * Verifies a WPI (inProgress) brings no immediate redelivery and leaves the message to be redelivered later,
+     * and that a TERM stops redelivery. The WPI probe runs well inside the 3 s ack_wait, when a message that got no
+     * WPI would not be redelivered yet either, so it only rules out an immediate redelivery: it would still pass
+     * if the WPI did nothing. JetStreamContextTest::testAckHelpersPublishProtocolTokens pins the +WPI token.
      */
     public function testJetStreamTermAndInProgressTokens(): void
     {
@@ -663,7 +672,8 @@ final class JetStreamIntegrationTest extends TestCase
             'max_deliver' => 3,
         ])->await();
 
-        // WPI should extend in-flight processing and delay redelivery.
+        // A WPI must not bring an immediate redelivery. Run inside ack_wait, the probe cannot tell whether the WPI
+        // pushed the redelivery back.
         $js->publish($subject, '{"event":"wpi"}')->await();
         $first = $js->fetchNext($stream, $consumer, 4_000)->await();
         self::assertSame('{"event":"wpi"}', $first->payload);
@@ -696,13 +706,15 @@ final class JetStreamIntegrationTest extends TestCase
         self::assertSame('{"event":"wpi"}', $redelivered->payload);
         $js->ack($redelivered)->await();
 
-        // TERM should stop further redeliveries for a message.
+        // TERM should stop further redeliveries for a message. The probe runs once ack_wait (3 s) is over,
+        // when a message that was not acknowledged at all would have been redelivered: before it, the probe
+        // could only tell a TERM from a NAK.
         $js->publish($subject, '{"event":"term"}')->await();
         $toTerm = $js->fetchNext($stream, $consumer, 4_000)->await();
         self::assertSame('{"event":"term"}', $toTerm->payload);
         $js->term($toTerm)->await();
 
-        delay(1.3);
+        delay(3.5);
         try {
             $js->fetchBatch($stream, $consumer, 1, 700)->await();
             self::fail('Expected TERM-ed message to stop redelivery.');
@@ -834,6 +846,119 @@ final class JetStreamIntegrationTest extends TestCase
         $client->disconnect()->await();
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function pinnedRunEndings(): iterable
+    {
+        yield 'stop' => ['stop'];
+        yield 'another subscription\'s handler fails the run' => ['handler failure'];
+    }
+
+    /**
+     * A pinned_client group's pin survives a run that ends before its first pull retires (#208). Run 1 pulls a batch of
+     * 10 with two messages stored, so its first pull holds both and stays open; the server pins the group and the
+     * worker reads the messages (the consumer reports them pending ack, and a flush's PONG behind them proves the
+     * client routed them). The run then ends: by stop(), which leaves them undelivered, or by another subscription's
+     * handler failing with handlerErrorsFailOperations, which hands them to the handler first (acked there). A third
+     * message is stored and run 2 starts on the same iterator: its pull carries the pin, so the server serves it at
+     * once under that pin, the consumer still pinned to it. Up to 2.25.8 the restart pulled without the pin and the
+     * server held the pull until the pin's priority_timeout (here 30 s, two minutes by default) had passed.
+     */
+    #[DataProvider('pinnedRunEndings')]
+    public function testJetStreamPinnedGroupKeepsItsPinWhenARunEndsBeforeItsFirstPullRetires(string $ending): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'IT_' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.pull.pinned';
+        $other = 'it.' . strtolower($stream) . '.other';
+        $consumer = 'C_' . strtoupper(bin2hex(random_bytes(2)));
+
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()], handlerErrorsFailOperations: true));
+        $client->connect()->await();
+        $publisher = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $publisher->connect()->await();
+        $js = $client->jetStream();
+        $iterator = null;
+
+        try {
+            $js->createStream($stream, [$subject])->await();
+            $js->createConsumer($stream, $consumer, $subject, [
+                'ack_policy' => 'explicit',
+                'priority_policy' => 'pinned_client',
+                'priority_groups' => ['g'],
+                'priority_timeout' => 30_000_000_000,
+            ])->await();
+            $client->subscribe($other, static function (): void {
+                throw new \RuntimeException('the other subscription\'s handler failed');
+            })->await();
+            $js->publish($subject, 'm-1')->await();
+            $js->publish($subject, 'm-2')->await();
+
+            $iterator = $js->pullConsumer($stream, $consumer)->setGroup('g')->setBatching(10)->setDepth(2)->setExpiresMs(30_000);
+            $handled = [];
+            $run1 = $iterator->handle(static function (NatsMessage $message, JetStreamContext $context) use (&$handled): void {
+                $handled[] = $message->payload;
+                $context->ack($message)->await();
+            });
+
+            $deadline = $this->monotonic() + 5.0;
+            do {
+                $info = $js->getConsumer($stream, $consumer)->await()->raw;
+                $pin = $info['priority_groups'][0]['pinned_client_id'] ?? null;
+                if (is_string($pin) && $pin !== '' && ($info['num_ack_pending'] ?? 0) === 2) {
+                    break;
+                }
+                self::assertLessThan($deadline, $this->monotonic(), 'the server pinned the group and sent run 1 both messages');
+                delay(0.02);
+            } while (true);
+            // Its PONG comes behind the two messages: once it is read, the worker has routed them.
+            $client->flush()->await(new TimeoutCancellation(5));
+            self::assertFalse($run1->isComplete(), 'run 1\'s first pull is still open');
+
+            if ($ending === 'stop') {
+                $iterator->stop();
+                self::assertSame(0, $run1->await(new TimeoutCancellation(5)));
+                self::assertSame([], $handled, 'stop() leaves the batch undelivered');
+            } else {
+                $publisher->publish($other, 'x')->await();
+                $publisher->flush()->await(new TimeoutCancellation(5));
+                try {
+                    $run1->await(new TimeoutCancellation(5));
+                    self::fail('run 1 ends with the other handler\'s failure');
+                } catch (\RuntimeException $failure) {
+                    self::assertSame('the other subscription\'s handler failed', $failure->getMessage());
+                }
+                self::assertSame(['m-1', 'm-2'], $handled, 'the failing run handed its batch over first');
+            }
+
+            $js->publish($subject, 'm-3')->await();
+            $iterator->setBatching(1)->setIterations(1);
+            $received = [];
+            $run2 = $iterator->handle(static function (NatsMessage $message, JetStreamContext $context) use (&$received): void {
+                $received[] = [$message->payload, $context->pinIdOf($message)];
+                $context->ack($message)->await();
+            });
+            // Bounded well inside the pin's 30 s priority_timeout: a pull without the pin waits that out.
+            try {
+                self::assertSame(1, $run2->await(new TimeoutCancellation(10)));
+            } catch (CancelledException) {
+                self::fail('run 2 was not served within 10 s: its pull did not carry the pin, and the server holds it until the pin\'s priority_timeout');
+            }
+            self::assertSame([['m-3', $pin]], $received, 'the restart is served at once, under the original pin');
+            $after = $js->getConsumer($stream, $consumer)->await()->raw;
+            self::assertSame($pin, $after['priority_groups'][0]['pinned_client_id'] ?? null, 'the group is still pinned to the original pin');
+        } finally {
+            $iterator?->stop();
+            try {
+                $js->deleteConsumer($stream, $consumer)->await();
+                $js->deleteStream($stream)->await();
+            } finally {
+                $publisher->disconnect()->await();
+                $client->disconnect()->await();
+            }
+        }
+    }
+
     /**
      * Verifies durable push helper delivers live payloads to subscribed handlers.
      */
@@ -934,9 +1059,17 @@ final class JetStreamIntegrationTest extends TestCase
         $subscriber->flush()->await();
 
         // Publish one message, then do NOT pump: the server's push MSG stays buffered on the socket
-        // until drain()'s flush-phase read consumes and delivers it during Draining.
+        // until drain()'s flush-phase read consumes and delivers it during Draining. The drain starts once
+        // the server has pushed it, which it then counts as waiting for an ack, rather than after a fixed
+        // pause: a server slower than that pause would push it after the drain's UNSUB, to no one.
         $adminJs->publish($subject, '{"event":"drain-ack"}')->await();
-        delay(0.3);
+        $deadline = $this->monotonic() + 5.0;
+        $ackPending = (int) ($adminJs->getConsumer($stream, $consumer)->await()->raw['num_ack_pending'] ?? 0);
+        while ($ackPending < 1 && $this->monotonic() < $deadline) {
+            delay(0.05);
+            $ackPending = (int) ($adminJs->getConsumer($stream, $consumer)->await()->raw['num_ack_pending'] ?? 0);
+        }
+        self::assertGreaterThanOrEqual(1, $ackPending, 'the server must push the message, and count it as waiting for an ack, before the drain starts');
 
         $subscriber->drain()->await();
 
@@ -2232,5 +2365,471 @@ final class JetStreamIntegrationTest extends TestCase
 
         $js->deleteStream($stream)->await();
         $client->disconnect()->await();
+    }
+
+    /**
+     * A JetStream publish issued while the client is reconnecting - its socket died and the server
+     * refused new connections for a while - waits for the reconnect and returns the stream's PubAck,
+     * instead of failing with "Connection is not open" (waitForReconnect).
+     */
+    public function testJetStreamPublishDuringReconnectWaitsForTheAckAgainstALiveServer(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITWAITPUB' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $admin = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $admin->connect()->await();
+        $admin->jetStream()->createStream($stream, [$subject])->await();
+        [$client, $transport] = $this->connectRecoverableClient();
+
+        try {
+            $this->takeServerDownFor($client, $transport);
+            $this->bringServerBackAfter($transport, 0.3);
+
+            $ack = $client->jetStream()->publish($subject, 'order-1')->await();
+
+            self::assertSame($stream, $ack->stream);
+            self::assertSame(1, $ack->seq);
+            self::assertSame(1, $client->statistics()->reconnects);
+        } finally {
+            $client->disconnect()->await();
+            $admin->jetStream()->deleteStream($stream)->await();
+            $admin->disconnect()->await();
+        }
+    }
+
+    /**
+     * A pull fetch issued while the client is reconnecting waits for the reconnect, then fetches the
+     * stored message through the new connection.
+     */
+    public function testJetStreamFetchDuringReconnectWaitsForItAgainstALiveServer(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITWAITFETCH' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $consumer = 'worker';
+        $admin = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $admin->connect()->await();
+        $js = $admin->jetStream();
+        $js->createStream($stream, [$subject])->await();
+        $js->createConsumer($stream, $consumer, $subject)->await();
+        $js->publish($subject, 'order-1')->await();
+        [$client, $transport] = $this->connectRecoverableClient();
+
+        try {
+            $this->takeServerDownFor($client, $transport);
+            $this->bringServerBackAfter($transport, 0.3);
+
+            $messages = $client->jetStream()->fetchBatch($stream, $consumer, 1, 3_000)->await();
+
+            self::assertCount(1, $messages);
+            self::assertSame('order-1', $messages[0]->payload);
+            self::assertSame(1, $client->statistics()->reconnects);
+        } finally {
+            $client->disconnect()->await();
+            $js->deleteStream($stream)->await();
+            $admin->disconnect()->await();
+        }
+    }
+
+    /**
+     * A plain ack() whose own write meets the dead socket - no heartbeat noticed it first - resolves while the server
+     * still refuses connections, and reaches the server once it is back (#244): the reconnect flushes it, and the
+     * consumer, asked after a flush, has nothing waiting for an ack. The ack used to run the reconnect inline and
+     * resolve only once the server was back: through the Symfony Messenger transport, 103 s at the default policy.
+     * A plain ack() is not a confirmation: ackSync() is the one that waits for the server to record it.
+     */
+    public function testAPlainAckWhoseWriteMeetsTheDeadSocketReachesTheRestoredServer(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITACKOUT' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $consumer = 'worker';
+        $admin = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $admin->connect()->await();
+        $adminJs = $admin->jetStream();
+        $adminJs->createStream($stream, [$subject])->await();
+        $adminJs->createConsumer($stream, $consumer, $subject)->await();
+        $adminJs->publish($subject, 'order-1')->await();
+        // No heartbeat: the ack's own write is the first to meet the dead socket.
+        $options = new NatsOptions(
+            servers: [$this->integrationServerUrl()],
+            reconnectEnabled: true,
+            maxReconnectAttempts: 200,
+            reconnectDelayMs: 10,
+            reconnectMaxDelayMs: 50,
+            reconnectJitterMs: 0,
+            pingIntervalSeconds: 0,
+        );
+        $transport = new GatedDialTransport(new SeveringTransport(new AmpSocketTransport($options)));
+        $client = new NatsClient($options, $transport);
+        $client->connect()->await();
+
+        try {
+            $messages = $client->jetStream()->fetchBatch($stream, $consumer, 1, 3_000)->await();
+            self::assertCount(1, $messages);
+            $transport->refuseDials();
+            $transport->sever();
+
+            $client->jetStream()->ack($messages[0])->await(new TimeoutCancellation(2));
+            self::assertSame(ConnectionState::Connecting, $client->state(), 'the ack resolved while the server was down');
+            $transport->acceptDials();
+            $client->flush()->await(new TimeoutCancellation(5));
+
+            self::assertSame(1, $client->statistics()->reconnects);
+            $info = $adminJs->getConsumer($stream, $consumer)->await();
+            self::assertSame(0, (int) ($info->raw['num_ack_pending'] ?? -1), 'the server recorded the ack');
+            self::assertSame(0, (int) ($info->raw['num_redelivered'] ?? -1));
+        } finally {
+            $client->disconnect()->await();
+            $adminJs->deleteStream($stream)->await();
+            $admin->disconnect()->await();
+        }
+    }
+
+    public function testJetStreamFetchDuringALongerOutageEndsWithItsOwnEmptyResult(): void
+    {
+        $this->requireIntegrationEnabled();
+        [$client, $transport] = $this->connectRecoverableClient();
+
+        try {
+            $this->takeServerDownFor($client, $transport);
+            try {
+                $client->jetStream()->fetchBatch('UNSENT', 'UNSENT', 1, 100)->await(new TimeoutCancellation(2));
+                self::fail('expected the fetch deadline to end before reconnect becomes available');
+            } catch (JetStreamException $error) {
+                self::assertSame(408, $error->getCode());
+                self::assertSame('No messages received within timeout', $error->getMessage());
+                self::assertSame(ConnectionState::Connecting, $client->state());
+            }
+        } finally {
+            $client->disconnect()->await();
+        }
+    }
+
+    /**
+     * An infinite pull consumer run hands its handler what a request the server kept across a reconnect brings
+     * (#187). The worker's run (batch 1, depth 1, a 10 s expiry, a consumer with ack_policy none) waits on its pull
+     * when its socket is severed, the server staying up: the server keeps that request, and once the reconnect has
+     * subscribed the run's inbox again it holds two of the run's requests, the old one and the pull the run issued
+     * on the new connection, where the run counts one. m-1 then goes to the old request, and the run's pull takes it;
+     * the handler holds m-1 until the worker has received m-2, which the server gives the run's own request, so that
+     * no pull of the run is open when m-2 arrives. The handler gets both, in order, and the consumer counts both as
+     * delivered, nothing pending. The run used to drop m-2 as a straggler: delivered and, without acks, done for the
+     * consumer, but never handled.
+     */
+    public function testAPullConsumerHandlesWhatARequestTheServerKeptAcrossAReconnectBrings(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITKEPT' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $admin = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $admin->connect()->await();
+        $js = $admin->jetStream();
+        $js->createStream($stream, [$subject])->await();
+        $js->createConsumer($stream, 'worker', $subject, ['ack_policy' => 'none'])->await();
+        [$client, $transport] = $this->connectRecoverableClient();
+        /** @var DeferredFuture<null> $gate */
+        $gate = new DeferredFuture();
+        /** @var \ArrayObject<int, string> $handled */
+        $handled = new \ArrayObject();
+        $iterator = $client->jetStream()->pullConsumer($stream, 'worker')->setBatching(1)->setDepth(1)->setExpiresMs(10_000);
+        $run = $iterator->handle(static function (NatsMessage $message) use ($handled, $gate): void {
+            $handled[] = $message->payload;
+            if ($message->payload === 'm-1') {
+                $gate->getFuture()->await();
+            }
+        });
+
+        try {
+            $this->waitForWaitingPulls($admin, $stream, 1);
+            $transport->sever();
+            $this->waitFor(static fn(): bool => $client->statistics()->reconnects === 1, 'the reconnect');
+            // The request the run issued before the reconnect, and the one it issued after it.
+            $this->waitForWaitingPulls($admin, $stream, 2);
+
+            $received = $client->statistics()->inMsgs;
+            $js->publish($subject, 'm-1')->await();
+            $this->waitFor(static fn(): bool => $handled->count() === 1, 'the handler holding m-1');
+            $js->publish($subject, 'm-2')->await();
+            // The worker reads m-2 while its handler holds m-1: none of the run's pulls is open.
+            $this->waitFor(static function () use ($client, $received): bool {
+                $client->processIncoming(new TimeoutCancellation(0.1))->await();
+
+                return $client->statistics()->inMsgs >= $received + 2;
+            }, 'the worker receiving m-2');
+            $gate->complete();
+            $this->waitFor(static fn(): bool => $handled->count() === 2, 'the handler getting m-2');
+            $iterator->stop();
+            $processed = $run->await(new TimeoutCancellation(5));
+            $info = $js->getConsumer($stream, 'worker')->await()->raw;
+
+            self::assertSame(['m-1', 'm-2'], $handled->getArrayCopy());
+            self::assertSame(2, $processed);
+            self::assertSame(1, $client->statistics()->reconnects);
+            self::assertIsArray($info['delivered'] ?? null);
+            self::assertSame(2, $info['delivered']['consumer_seq'] ?? null);
+            self::assertSame(0, $info['num_pending'] ?? null);
+        } finally {
+            if (!$gate->isComplete()) {
+                $gate->complete();
+            }
+            $iterator->stop();
+            $client->disconnect()->await();
+            $run->ignore();
+            $js->deleteStream($stream)->await();
+            $admin->disconnect()->await();
+        }
+    }
+
+    /**
+     * A supervisor's restart of a pull consumer, stop() and handle() again in one tick without awaiting the first run
+     * (#189): the first run, its pull waiting on the server for a stream still empty, ends on its stop with nothing
+     * handled, the server dropping its request with the interest in its inbox, and from then on only the second run's
+     * handler gets what is published, acking each message: the durable consumer delivers m-1 to m-4 once, all to the
+     * second run, and holds nothing pending or waiting for an ack. The second handle() used to clear the stop before
+     * the first run saw it: the first run went on next to the second, on the same consumer, the two handlers splitting
+     * the stream between them (m-1 and m-3 to the first, m-2 and m-4 to the second), and the first run's pull still
+     * waited on the server after a final stop().
+     */
+    public function testAPullConsumerRestartedWithStopAndHandleInOneTickHandsWhatFollowsToTheNewHandler(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITRESTART' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $client = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $client->connect()->await();
+        $js = $client->jetStream();
+        $js->createStream($stream, [$subject])->await();
+        $js->createConsumer($stream, 'worker', $subject, ['ack_policy' => 'explicit'])->await();
+        /** @var \ArrayObject<int, string> $handled */
+        $handled = new \ArrayObject();
+        $handler = static fn(string $run): \Closure => static function (NatsMessage $message, JetStreamContext $context) use ($handled, $run): void {
+            $handled[] = $run . ': ' . $message->payload;
+            $context->ack($message)->await();
+        };
+        $iterator = $js->pullConsumer($stream, 'worker')->setBatching(1)->setDepth(1)->setExpiresMs(30_000);
+        $first = $iterator->handle($handler('first run'));
+        $second = null;
+
+        try {
+            $this->waitForWaitingPulls($client, $stream, 1);
+            $iterator->stop();
+            $second = $iterator->handle($handler('second run'));
+            try {
+                $firstProcessed = $first->await(new TimeoutCancellation(5));
+            } catch (CancelledException) {
+                self::fail('the first run did not end at its stop: the second handle() cleared the stop before the first run saw it');
+            }
+            // The second run's request; the first run's left with the interest in its inbox.
+            $this->waitForWaitingPulls($client, $stream, 1);
+
+            for ($i = 1; $i <= 4; ++$i) {
+                $js->publish($subject, 'm-' . $i)->await();
+            }
+            $this->waitFor(static fn(): bool => $handled->count() === 4, 'four messages handled');
+            $iterator->stop();
+            $secondProcessed = $second->await(new TimeoutCancellation(5));
+            $this->waitFor(
+                static fn(): bool => ($js->getConsumer($stream, 'worker')->await()->raw['num_ack_pending'] ?? null) === 0,
+                'the acks to reach the server',
+            );
+            $info = $js->getConsumer($stream, 'worker')->await()->raw;
+
+            self::assertSame(0, $firstProcessed);
+            self::assertSame(['second run: m-1', 'second run: m-2', 'second run: m-3', 'second run: m-4'], $handled->getArrayCopy());
+            self::assertSame(4, $secondProcessed);
+            self::assertIsArray($info['delivered'] ?? null);
+            self::assertSame(4, $info['delivered']['consumer_seq'] ?? null, 'each message delivered once');
+            self::assertSame(0, $info['num_pending'] ?? null);
+        } finally {
+            $iterator->stop();
+            $first->ignore();
+            $second?->ignore();
+            $js->deleteStream($stream)->await();
+            $client->disconnect()->await();
+        }
+    }
+
+    /** @return iterable<string, array{array<string, mixed>, bool}> */
+    public static function consumersThatLoseWhatAFailedRunDrops(): iterable
+    {
+        yield 'ack_policy none' => [['ack_policy' => 'none'], false];
+        yield 'explicit acks, max_deliver 1' => [['ack_policy' => 'explicit', 'max_deliver' => 1], true];
+    }
+
+    /**
+     * A pull consumer run that fails closes its inbox to new deliveries before it hands what its pull holds to its
+     * handler (#212), so that what is published during the hand-over stays in the stream for the next pull. The worker
+     * runs with handlerErrorsFailOperations and a subscription whose handler throws; its run (batch 3, depth 1, a 30 s
+     * expiry) holds m-1 and m-2, its pull waiting for a third, when a message on that subscription ends the run. On m-1
+     * the handler has m-3 published and gives the server 300 ms to deliver it, acking each message where the consumer
+     * takes acks. The handler gets m-1 and m-2, handle() throws the subscription handler's exception, the consumer counts
+     * two delivered and one pending, and the next independent pull gets m-3. The server used to deliver m-3 to the
+     * failed run's pull, whose inbox was released only after the hand-over: delivered, so lost under ack_policy none or
+     * max_deliver 1, and never handled.
+     *
+     * @param array<string, mixed> $consumerConfig
+     */
+    #[DataProvider('consumersThatLoseWhatAFailedRunDrops')]
+    public function testAFailedPullConsumerRunLeavesWhatIsPublishedDuringItsHandOverForTheNextPull(array $consumerConfig, bool $acks): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITFAILED' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $boom = 'it.' . strtolower($stream) . '.boom';
+        $admin = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $admin->connect()->await();
+        $js = $admin->jetStream();
+        $js->createStream($stream, [$subject])->await();
+        $js->createConsumer($stream, 'worker', $subject, $consumerConfig)->await();
+        $js->publish($subject, 'm-1')->await();
+        $js->publish($subject, 'm-2')->await();
+
+        $worker = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()], handlerErrorsFailOperations: true));
+        $worker->connect()->await();
+        $worker->subscribe($boom, static function (): void {
+            throw new \RuntimeException('the other subscription\'s handler failed');
+        })->await();
+        $worker->flush()->await();
+        /** @var \ArrayObject<int, string> $handled */
+        $handled = new \ArrayObject();
+        $run = $worker->jetStream()->pullConsumer($stream, 'worker')->setBatching(3)->setDepth(1)->setExpiresMs(30_000)
+            ->handle(static function (NatsMessage $message, JetStreamContext $context) use ($handled, $js, $subject, $acks): void {
+                $handled[] = $message->payload;
+                if ($message->payload === 'm-1') {
+                    $js->publish($subject, 'm-3')->await();
+                    // Time for the server to deliver m-3 to a pull whose inbox still had interest.
+                    delay(0.3);
+                }
+                if ($acks) {
+                    $context->ack($message)->await();
+                }
+            });
+
+        try {
+            // The run's pull holds m-1 and m-2 and waits for a third message.
+            $this->waitFor(static function () use ($js, $stream): bool {
+                $info = $js->getConsumer($stream, 'worker')->await()->raw;
+
+                return ($info['delivered']['consumer_seq'] ?? 0) === 2 && ($info['num_waiting'] ?? 0) === 1;
+            }, 'the run\'s pull holding m-1 and m-2');
+            delay(0.1);
+            $admin->publish($boom, 'x')->await();
+
+            try {
+                $run->await(new TimeoutCancellation(10));
+                self::fail('the run did not fail');
+            } catch (\RuntimeException $failure) {
+                self::assertSame('the other subscription\'s handler failed', $failure->getMessage());
+            }
+            $info = $js->getConsumer($stream, 'worker')->await()->raw;
+
+            self::assertSame(['m-1', 'm-2'], $handled->getArrayCopy());
+            self::assertIsArray($info['delivered'] ?? null);
+            self::assertSame(2, $info['delivered']['consumer_seq'] ?? null, 'm-3 was not delivered to the failed run');
+            self::assertSame(1, $info['num_pending'] ?? null, 'm-3 stayed in the stream');
+            $next = $js->fetchNext($stream, 'worker', 4000)->await();
+            self::assertSame('m-3', $next->payload, 'the next independent pull got m-3');
+        } finally {
+            $run->ignore();
+            $worker->disconnect()->await();
+            $js->deleteStream($stream)->await();
+            $admin->disconnect()->await();
+        }
+    }
+
+    /**
+     * An infinite pull consumer run that ends on its head pull's terminal status hands over what a later pull received
+     * after it (#211). The worker reads one protocol frame at a time (tests/Support/FrameAtATimeTransport.php), a
+     * deliberate read boundary between the status and what follows it. The run (batch 1, depth 2, a 30 s expiry) gets
+     * m-1 with its first pull while its second waits; on m-1 the handler has the consumer deleted, the waiting pull's
+     * "409 Consumer Deleted" then queued on the worker's socket, unread, recreated under the same name (deliver_policy
+     * new, the same ack settings) and m-2 published. When the handler returns the run refills, the recreated consumer
+     * serves m-2 to the refill, and the engine reads the 409 in a read of its own. The handler gets m-1 and m-2, onError
+     * the 409 once, and handle() returns 2. m-2 used to be read after the run's UNSUB and dropped: delivered, so lost
+     * under ack_policy none or max_deliver 1, and never handled.
+     *
+     * @param array<string, mixed> $consumerConfig
+     */
+    #[DataProvider('consumersThatLoseWhatAFailedRunDrops')]
+    public function testAPullConsumerRunEndedByATerminalStatusHandsOverWhatALaterPullReceivedAfterIt(array $consumerConfig, bool $acks): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $stream = 'ITTERMINAL' . strtoupper(bin2hex(random_bytes(3)));
+        $subject = 'it.' . strtolower($stream) . '.orders';
+        $admin = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $admin->connect()->await();
+        $js = $admin->jetStream();
+        $js->createStream($stream, [$subject])->await();
+        $js->createConsumer($stream, 'worker', $subject, $consumerConfig)->await();
+        $js->publish($subject, 'm-1')->await();
+
+        $options = new NatsOptions(servers: [$this->integrationServerUrl()]);
+        $worker = new NatsClient($options, new FrameAtATimeTransport(new AmpSocketTransport($options)));
+        $worker->connect()->await();
+        /** @var \ArrayObject<int, string> $handled */
+        $handled = new \ArrayObject();
+        /** @var \ArrayObject<int, string> $reported */
+        $reported = new \ArrayObject();
+        $run = $worker->jetStream()->pullConsumer($stream, 'worker')->setBatching(1)->setDepth(2)->setExpiresMs(30_000)
+            ->setOnError(static function (\Throwable $status) use ($reported): void {
+                $reported[] = $status->getMessage();
+            })
+            ->handle(function (NatsMessage $message, JetStreamContext $context) use ($handled, $js, $admin, $stream, $subject, $consumerConfig, $acks): void {
+                $handled[] = $message->payload;
+                if ($acks) {
+                    $context->ack($message)->await();
+                }
+                if ($message->payload === 'm-1') {
+                    // The run's second pull is waiting: deleting the consumer answers it with a 409, left unread.
+                    $this->waitForWaitingPulls($admin, $stream, 1);
+                    $js->deleteConsumer($stream, 'worker')->await();
+                    $js->createConsumer($stream, 'worker', $subject, ['deliver_policy' => 'new'] + $consumerConfig)->await();
+                    $js->publish($subject, 'm-2')->await();
+                }
+            });
+
+        try {
+            $processed = $run->await(new TimeoutCancellation(10));
+
+            self::assertSame(['m-1', 'm-2'], $handled->getArrayCopy());
+            self::assertSame(['JetStream pull request ended with status 409: Consumer Deleted'], $reported->getArrayCopy());
+            self::assertSame(2, $processed);
+        } finally {
+            $run->ignore();
+            $worker->disconnect()->await();
+            $js->deleteStream($stream)->await();
+            $admin->disconnect()->await();
+        }
+    }
+
+    /** Waits until the pull consumer "worker" of $stream holds $count waiting pull requests, as its info reports. */
+    private function waitForWaitingPulls(NatsClient $admin, string $stream, int $count): void
+    {
+        $this->waitFor(
+            static fn(): bool => ($admin->jetStream()->getConsumer($stream, 'worker')->await()->raw['num_waiting'] ?? 0) === $count,
+            sprintf('%d waiting pull request(s)', $count),
+        );
+    }
+
+    /** Waits until $condition holds, failing after five seconds (monotonic) with what it waited for. */
+    private function waitFor(\Closure $condition, string $what): void
+    {
+        $deadline = $this->monotonic() + 5.0;
+        while (!$condition()) {
+            if ($this->monotonic() > $deadline) {
+                self::fail('Waited 5 s for ' . $what);
+            }
+
+            delay(0.01);
+        }
     }
 }

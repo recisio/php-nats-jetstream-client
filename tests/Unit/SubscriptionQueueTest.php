@@ -13,7 +13,9 @@ use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Core\SubscriptionQueue;
+use IDCT\NATS\Exception\SlowConsumerException;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
 
@@ -22,9 +24,18 @@ use function Amp\delay;
 
 final class SubscriptionQueueTest extends TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     private function makeConnectedClient(FakeTransport $transport): NatsClient
     {
-        $client = new NatsClient(new NatsOptions(), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(), $transport));
         $client->connect()->await();
 
         return $client;
@@ -82,12 +93,12 @@ final class SubscriptionQueueTest extends TestCase
 
             public function connect(string $dsn, int $timeoutMs): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
@@ -105,18 +116,16 @@ final class SubscriptionQueueTest extends TestCase
 
             public function readLine(?Cancellation $cancellation = null): Future
             {
-                return async(function (): string {
-                    return array_shift($this->reads) ?? '';
-                });
+                return async(fn(): string => array_shift($this->reads) ?? '');
             }
 
             public function close(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
         };
 
-        $client = new NatsClient(new NatsOptions(), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(), $transport));
         $client->connect()->await();
 
         $queueFuture = $client->subscribeQueue('updates');
@@ -468,7 +477,7 @@ final class SubscriptionQueueTest extends TestCase
             $errors[] = $e;
         });
         $transport = new FakeTransport($this->infoAndPong());
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
         $queue = new SubscriptionQueue($client, 99, 2, SlowConsumerPolicy::DropOldest);
 
@@ -498,7 +507,7 @@ final class SubscriptionQueueTest extends TestCase
             $errors[] = $e;
         });
         $transport = new FakeTransport($this->infoAndPong());
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
         $queue = new SubscriptionQueue($client, 99, 2, SlowConsumerPolicy::DropNewest);
 
@@ -526,9 +535,10 @@ final class SubscriptionQueueTest extends TestCase
     }
 
     /**
-     * SlowConsumerPolicy::Error throws NatsException when the queue is full, and the drop is
-     * observable: droppedCount() increments and the client's errorListener is notified before the
-     * throw, mirroring the DropOldest/DropNewest paths so the loss is never silent (#134/#159).
+     * SlowConsumerPolicy::Error throws a SlowConsumerException for the queue's subscription when the queue
+     * is full, and counts the drop in droppedCount(), like the DropOldest/DropNewest paths (#134/#159). It
+     * does not also report it: the connection's read that delivered the message throws it or reports it,
+     * so the overflow reaches the application once (see SlowConsumerErrorPolicyTest).
      */
     public function testEnqueueThrowsOnOverflowWhenPolicyIsError(): void
     {
@@ -537,7 +547,7 @@ final class SubscriptionQueueTest extends TestCase
             $errors[] = $e;
         });
         $transport = new FakeTransport($this->infoAndPong());
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
         $queue = new SubscriptionQueue($client, 99, 2, SlowConsumerPolicy::Error);
 
@@ -549,14 +559,14 @@ final class SubscriptionQueueTest extends TestCase
         try {
             $queue->enqueue(new NatsMessage('events', 99, null, 'c'));
             self::fail('the Error-policy overflow must throw');
-        } catch (\IDCT\NATS\Exception\NatsException $e) {
-            self::assertStringContainsString('Subscription queue overflow for sid 99', $e->getMessage());
+        } catch (SlowConsumerException $e) {
+            self::assertSame(99, $e->sid);
+            self::assertSame('Subscription queue overflow for sid 99', $e->getMessage());
         }
 
-        // The drop is observable even though it threw: counted and surfaced through the error listener.
+        // Counted, and not reported on top of the throw.
         self::assertSame(1, $queue->droppedCount());
-        self::assertCount(1, $errors);
-        self::assertStringContainsString('Subscription queue overflow for sid 99', $errors[0]->getMessage());
+        self::assertSame([], $errors);
     }
 
     /**

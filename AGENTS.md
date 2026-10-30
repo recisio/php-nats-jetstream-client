@@ -65,7 +65,7 @@ Use this file as the authoritative project guide for coding agents working in th
   TLS fixture material used by integration tests.
 
 - `docker-compose.yml`
-  Local integration fixture stack. Services expose client ports `14222` to `14227` and monitoring ports `18222` to `18227`.
+  Local integration fixture stack. Services expose client ports `14222` to `14229` (`14229` is `nats-ws`'s WebSocket port) and monitoring ports `18222` to `18229`.
 
 ## Commands Agents Should Know
 
@@ -148,9 +148,12 @@ Choose the narrowest useful test first, then broaden only as needed.
 - Behat feature tests reuse the same Docker Compose fixture stack and readiness flow via `composer test:bdd`.
 - `scripts/run-tests-e2e.sh` performs JWT fixture validation first, then starts compose, waits for readiness, runs unit tests, runs integration tests, and runs Behat.
 - `scripts/run-tests-bdd.sh` performs the same fixture preflight and readiness flow before running Behat.
+- `scripts/wait-for-nats-services.sh` polls the monitoring port of every compose server; keep its port list in step with `docker-compose.yml` when adding a server.
 - `KEEP_NATS_SERVICES=1 composer test:e2e` leaves compose services running after the run.
 - `SKIP_JWT_FIXTURE_CHECK=1 composer test:e2e` skips JWT fixture validation when explicitly desired.
+- `SKIP_UNIT_TESTS=1 composer test:e2e` skips the unit stage. CI's E2E job sets it: its coverage step and the Unit + Static jobs already run the unit suite.
 - `BEHAT_SUITE=core composer test:e2e` narrows only the Behat stage while keeping the unit/integration steps intact.
+- The compose servers run without debug or trace logging (`-D`/`-V`), and their healthchecks probe every 30 s; nothing reads either. Add `"-DV"` to a service's `command` locally when you need a protocol trace.
 
 ## Development Standards
 
@@ -183,6 +186,8 @@ Choose the narrowest useful test first, then broaden only as needed.
 - Keep test names descriptive and behavior-oriented.
 - If exception wording changes intentionally, update the tests in the same change.
 - Prefer Behat for end-to-end documented workflows and PHPUnit for low-level protocol edges and exhaustive negative cases.
+- A unit test owns what it starts on the event loop (#183): register each client or connection with `$this->own(...)` (`tests/Support/OwnsTestResources.php`, or `ReconnectScenarios`, which uses it) right after constructing it, and call `releaseOwnedResources()` from `tearDown()`. The shutdown closes everything, joins the closes and fails the test when something is still running. Register what only the test can end through `$this->resources()`: a background operation with its own cancellation (`ownOperation()`), a fixture gate such as a held dial or a stalled write (`onRelease()`), a listener that would reconnect on Closed or an injected close failure (`onStop()`). Do not cancel every loop callback in `setUp()`/`tearDown()`: that hides what a test leaves running. A class whose tests arm heartbeat watchdogs makes the scope in `setUp()` and calls `releaseOwnedResourcesAndTheirWatchdogs()`.
+- The scripted servers keep the write order a socket keeps (#192). `stallNextWriteContaining()` holds a write back before the server receives it, and every later write waits behind it. To keep an operation suspended in a write whose bytes must already have reached the server, hold the write's completion instead: `ReconnectingTransport::holdCompletionOfNextWriteContaining()`, or `tests/Support/CompletionHoldingTransport.php` around another transport. Do not stage a test on a later write overtaking an earlier one.
 
 ### Editing boundaries
 

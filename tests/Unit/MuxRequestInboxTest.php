@@ -6,8 +6,8 @@ namespace IDCT\NATS\Tests\Unit;
 
 use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
-use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -18,10 +18,19 @@ use PHPUnit\Framework\TestCase;
  */
 final class MuxRequestInboxTest extends TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     /** INFO+PONG so connect() succeeds; the mux SUB is written lazily on the first request. */
     private function connect(FakeTransport $transport): NatsConnection
     {
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $connection->connect()->await();
 
         return $connection;
@@ -64,11 +73,12 @@ final class MuxRequestInboxTest extends TestCase
 
         self::assertSame('hello', $response->payload);
 
-        // Exactly ONE wildcard mux SUB, and ZERO per-request UNSUB (the whole point of #118).
-        $subs = array_values(array_filter($transport->writes, static fn (string $w): bool => str_starts_with($w, 'SUB ')));
-        $unsubs = array_filter($transport->writes, static fn (string $w): bool => str_starts_with($w, 'UNSUB '));
+        // Exactly ONE wildcard mux SUB, and ZERO per-request UNSUB (the whole point of #118). The SUB's write
+        // carries the PING whose PONG confirms the mux; nothing waits for it.
+        $subs = array_values(array_filter($transport->writes, static fn(string $w): bool => str_starts_with($w, 'SUB ')));
+        $unsubs = array_filter($transport->writes, static fn(string $w): bool => str_starts_with($w, 'UNSUB '));
         self::assertCount(1, $subs);
-        self::assertStringMatchesFormat("SUB _INBOX.%s.* 1\r\n", $subs[0]);
+        self::assertStringMatchesFormat("SUB _INBOX.%s.* 1\r\nPING\r\n", $subs[0]);
         self::assertCount(0, $unsubs);
         // The request published its reply-to under the mux base's wildcard.
         self::assertStringStartsWith('PUB svc.echo _INBOX.', $transport->writes[3]);
@@ -88,8 +98,8 @@ final class MuxRequestInboxTest extends TestCase
         }
 
         // 5 requests -> still exactly one SUB and zero UNSUB (pre-#118 this was 5 SUB + 5 UNSUB).
-        $subs = array_filter($transport->writes, static fn (string $w): bool => str_starts_with($w, 'SUB '));
-        $unsubs = array_filter($transport->writes, static fn (string $w): bool => str_starts_with($w, 'UNSUB '));
+        $subs = array_filter($transport->writes, static fn(string $w): bool => str_starts_with($w, 'SUB '));
+        $unsubs = array_filter($transport->writes, static fn(string $w): bool => str_starts_with($w, 'UNSUB '));
         self::assertCount(1, $subs);
         self::assertCount(0, $unsubs);
     }
@@ -143,8 +153,10 @@ final class MuxRequestInboxTest extends TestCase
         $this->replyTo($transport, 'svc.scan', 'r');
         $connection = $this->connect($transport);
 
-        // maxResponses 1 so it completes as soon as the single reply lands.
-        $messages = $connection->requestMany('svc.scan', 'x', null, 1, 500)->await();
+        // maxResponses 1 so it completes as soon as the single reply lands. The total is only a safety net, and a
+        // long one: requestMany() gives up before its first read once the clock is past it, so a slow runner that
+        // paused for longer than a short total would return before reading the reply.
+        $messages = $connection->requestMany('svc.scan', 'x', null, 1, 5_000)->await();
         self::assertCount(1, $messages);
 
         $waiters = new \ReflectionProperty($connection, 'muxWaiters');

@@ -25,6 +25,7 @@ use IDCT\NATS\JetStream\KeyValue\KeyValueBucket;
 use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NATS\JetStream\Schedule;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use Revolt\EventLoop\CallbackType;
@@ -33,29 +34,36 @@ use function Amp\delay;
 
 final class JetStreamContextTest extends TestCase
 {
+    use OwnsTestResources;
+
     private const INFO_2_12 = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
 
     /**
-     * A subscription's idle-heartbeat watchdog (#113) is a live EventLoop timer that outlives a test
-     * whose client is never disconnect()ed. Cancel every callback left registered so the shared loop
-     * (Revolt keeps one per process) starts each test clean and a leaked watchdog cannot fire against
-     * a lingering client from an earlier test.
+     * Every client a test makes is registered as it is constructed (#183), and closed and checked here; what is left
+     * of the test's own repeat timers then are the heartbeat watchdogs (#113) of its subscriptions, which would cancel
+     * themselves only at their next tick, cancelled by the ids recorded since setUp(). The class used to cancel every
+     * callback on the loop, before and after each test, which hid the clients it left Open.
      */
     protected function tearDown(): void
     {
-        foreach (EventLoop::getIdentifiers() as $id) {
-            EventLoop::cancel($id);
-        }
+        $this->releaseOwnedResourcesAndTheirWatchdogs();
+    }
+
+    /** The scope is made first, so that it knows the callbacks registered before the test (see countRepeatTimers()). */
+    protected function setUp(): void
+    {
+        $this->resources();
     }
 
     /**
-     * Counts EventLoop repeat timers currently registered (the watchdog is one). Used by the
-     * teardown-leak regression to probe watchdog arm/cancel without reaching into private state.
+     * Counts the EventLoop repeat timers the test registered and that are still registered (the watchdog is one), by
+     * the ids recorded since setUp(): what earlier tests left on the loop is not the test's. Used by the teardown-leak
+     * regressions to probe watchdog arm/cancel without reaching into private state.
      */
-    private static function countRepeatTimers(): int
+    private function countRepeatTimers(): int
     {
         $count = 0;
-        foreach (EventLoop::getIdentifiers() as $id) {
+        foreach ($this->resources()->callbacksRegisteredSince() as $id) {
             if (EventLoop::getType($id) === CallbackType::Repeat) {
                 $count++;
             }
@@ -166,6 +174,22 @@ final class JetStreamContextTest extends TestCase
     }
 
     /**
+     * What a server sends when it drops the client in the middle of a request - a fatal -ERR - followed by
+     * the INFO and PONG that answer the client's reconnect handshake. A fatal -ERR ends the connection
+     * (#171), so the request fails with it only after the client has reconnected.
+     *
+     * @return list<string>
+     */
+    private static function serverDropsConnectionThenAcceptsReconnect(): array
+    {
+        return [
+            "-ERR 'Stale Connection'\r\n",
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ];
+    }
+
+    /**
      * Installs a mux-aware server for ordered/push consumer recreate tests. Pre-#118 each request owned
      * a per-request SUB, so a CONSUMER.CREATE/DELETE reply routed by a fixed sid and the rotated deliver
      * inbox landed at a sid shifted by those per-request subs (2,4,7,...). Post-#118 all requests share
@@ -255,7 +279,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.any 1 %d\r\n%s\r\n", strlen($accountPayload), $accountPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $account = $client->jetStream()->accountInfo()->await();
@@ -280,7 +304,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $config = \IDCT\NATS\JetStream\Configuration\StreamConfiguration::create('ORDERS')
@@ -319,7 +343,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $config = \IDCT\NATS\JetStream\Configuration\ConsumerConfiguration::create()
@@ -356,7 +380,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         self::assertSame(['cfg', 'sessions'], $client->jetStream()->keyValueBucketNames()->await());
@@ -377,7 +401,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         self::assertSame(['assets', 'media'], $client->jetStream()->objectStoreBucketNames()->await());
@@ -398,7 +422,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $names = $client->jetStream()->streamNames()->await();
@@ -422,7 +446,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $names = $client->jetStream()->consumerNames('ORDERS')->await();
@@ -446,7 +470,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->getLastMessageForSubject('ORDERS', 'orders.new')->await();
@@ -462,7 +486,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testGetLastMessageForSubjectRejectsWildcard(): void
     {
-        $client = new NatsClient(new NatsOptions());
+        $client = $this->own(new NatsClient(new NatsOptions()));
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('non-wildcard');
         $client->jetStream()->getLastMessageForSubject('ORDERS', 'orders.*')->await();
@@ -486,7 +510,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($updateOk), $updateOk),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $info = $client->jetStream()->createOrUpdateStream('ORDERS', ['orders.*', 'orders.archive'])->await();
@@ -513,7 +537,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($err), $err),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         try {
@@ -543,7 +567,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($withoutErrCode), $withoutErrCode),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         try {
@@ -581,7 +605,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($updateOk), $updateOk),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $info = $client->jetStream()->createOrUpdateStream('ORDERS', ['orders.*'])->await();
@@ -610,7 +634,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($updateOk), $updateOk),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -637,7 +661,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($updateOk), $updateOk),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $info = $client->jetStream()->createOrUpdateStream('ORDERS', ['orders.*'])->await();
@@ -662,7 +686,7 @@ final class JetStreamContextTest extends TestCase
             "MSG _INBOX.c 3 16\r\n{\"success\":true}\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -693,7 +717,7 @@ final class JetStreamContextTest extends TestCase
             "MSG _INBOX.a 1 48\r\n{\"error\":{\"code\":404,\"description\":\"not found\"}}\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -707,7 +731,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testJetStreamContextIsCached(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $a = $client->jetStream();
         $b = $client->jetStream();
@@ -724,7 +748,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testObjectStoreConstructsEquivalentBucketPerCall(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $a = $client->jetStream()->objectStore('assets');
         $b = $client->jetStream()->objectStore('assets');
@@ -745,7 +769,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testKeyValueConstructsEquivalentBucketPerCall(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $a = $client->jetStream()->keyValue('profiles');
         $b = $client->jetStream()->keyValue('profiles');
@@ -766,7 +790,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testPullConsumerReturnsIterator(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $iterator = $client->jetStream()->pullConsumer('ORDERS', 'PROC');
 
@@ -793,7 +817,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.c 3 %d\r\n%s\r\n", strlen($deletePayload), $deletePayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -827,7 +851,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->createConsumer('ORDERS', 'PROC', null, ['filter_subjects' => ['orders.eu.>', 'orders.us.>']])->await();
@@ -846,7 +870,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -869,7 +893,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -893,7 +917,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -919,7 +943,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -947,7 +971,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->createPushConsumer('ORDERS', 'PROC', '_INBOX.deliver', null, [
@@ -973,7 +997,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->createConsumer('ORDERS', 'PROC', null, [
@@ -995,7 +1019,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -1021,7 +1045,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg), $msg),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 2500, [
@@ -1048,7 +1072,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -1072,7 +1096,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -1098,7 +1122,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg), $msg),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 2500, [
@@ -1120,7 +1144,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(\InvalidArgumentException::class);
@@ -1145,7 +1169,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(\InvalidArgumentException::class);
@@ -1181,7 +1205,7 @@ final class JetStreamContextTest extends TestCase
             $burst,
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1300, 2500)->await();
@@ -1206,7 +1230,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg), $msg),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         // 1250ms heartbeat against a 2500ms expiry: exactly the 50% ceiling - allowed.
@@ -1234,7 +1258,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $startNs = hrtime(true);
@@ -1264,7 +1288,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen('{}'), '{}'),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $ok = $client->jetStream()->unpinConsumer('ORDERS', 'PROC', 'g1')->await();
@@ -1279,7 +1303,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testPinIdOf(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $pinned = new NatsMessage(
@@ -1319,7 +1343,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetBatch('ORDERS', ['batch' => 10])->await();
@@ -1356,7 +1380,7 @@ final class JetStreamContextTest extends TestCase
             $burst,
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetBatch('ORDERS', ['batch' => 1100])->await();
@@ -1384,7 +1408,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s\r\n", strlen($status), strlen($status), $status),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', ['orders.a', 'orders.b'])->await();
@@ -1413,7 +1437,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', ['orders.a', 'orders.b'])->await();
@@ -1454,7 +1478,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.y 2 %d %d\r\n%s%s\r\n", strlen($h2), strlen($h2) + strlen($b2), $h2, $b2),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', $subjects)->await();
@@ -1469,7 +1493,7 @@ final class JetStreamContextTest extends TestCase
         // Exactly two batched Direct Get requests were sent (not one oversized request).
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         self::assertCount(2, $directGets);
 
@@ -1517,7 +1541,7 @@ final class JetStreamContextTest extends TestCase
 
         $transport = new FakeTransport($reads);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         self::assertSame($maxPayload, $client->maxPayload());
 
@@ -1526,7 +1550,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
 
         // The small max_payload forces more than one request, and no request's JSON payload (the part
@@ -1588,7 +1612,7 @@ final class JetStreamContextTest extends TestCase
 
         $transport = new FakeTransport($reads);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         // With the escaping-aware budget this completes; with strlen + 3 the oversized chunk's PUB throws.
@@ -1597,7 +1621,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
 
         self::assertGreaterThan(1, count($directGets));
@@ -1639,7 +1663,7 @@ final class JetStreamContextTest extends TestCase
         }
 
         $transport = new FakeTransport($reads);
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         self::assertSame(0, $client->maxPayload());
 
@@ -1648,7 +1672,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         // Exactly ONE request: all ten subjects fit the 1 MiB fallback budget.
         self::assertCount(1, $directGets);
@@ -1679,7 +1703,7 @@ final class JetStreamContextTest extends TestCase
         }
 
         $transport = new FakeTransport($reads);
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', $subjects)->await();
@@ -1687,7 +1711,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         self::assertCount(2, $directGets);
         self::assertStringContainsString('"multi_last":["o.aaaa","o.bbbb"]', $directGets[0]);
@@ -1720,7 +1744,7 @@ final class JetStreamContextTest extends TestCase
         }
 
         $transport = new FakeTransport($reads);
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', $subjects)->await();
@@ -1728,7 +1752,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         self::assertCount(3, $directGets);
         self::assertStringContainsString('"multi_last":["o.aaaa"]', $directGets[0]);
@@ -1752,7 +1776,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s\r\n", strlen($err), strlen($err), $err),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -1773,13 +1797,13 @@ final class JetStreamContextTest extends TestCase
             '2.10.9' => false,            // pre-2.11: unsupported
             '2.11.0' => true,             // boundary: supported
             'v2.11.0' => true,            // leading 'v' consumed by v? - the MAJOR is match[1]==2, not
-                                          // match[0]=="v2.11" ((int) of which is 0 -> would misread as < 2.11)
+            // match[0]=="v2.11" ((int) of which is 0 -> would misread as < 2.11)
             '2.12.9' => true,
             '3.0.0' => true,
             '2.11.0-beta.1' => true,      // pre-release tag ignored, numeric prefix >= 2.11
             'dev-custom' => false,        // unparseable -> conservative fan-out fallback
             'x9.9' => false,              // leading non-digit: the ^ anchor forbids matching 9.9 mid-string,
-                                          // so an unparseable prefix stays unsupported (fan-out fallback)
+            // so an unparseable prefix stays unsupported (fan-out fallback)
         ];
 
         foreach ($cases as $version => $expected) {
@@ -1787,7 +1811,7 @@ final class JetStreamContextTest extends TestCase
                 'INFO {"server_id":"S1","server_name":"n1","version":"%s","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
                 $version,
             );
-            $client = new NatsClient(new NatsOptions(), new FakeTransport([$info, "PONG\r\n"]));
+            $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport([$info, "PONG\r\n"])));
             $client->connect()->await();
 
             self::assertSame($expected, $client->jetStream()->supportsBatchedDirectGet(), 'version ' . $version);
@@ -1809,7 +1833,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $ack = $client->jetStream()->publish('orders.created', '{"id":1}')->await();
@@ -1830,7 +1854,7 @@ final class JetStreamContextTest extends TestCase
             "MSG _INBOX.a 1 7\r\nnotjson\r\n", // a non-JSON publish ack
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -1853,7 +1877,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -1877,7 +1901,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->createStream(
@@ -1906,7 +1930,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         try {
@@ -1937,7 +1961,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $when = new DateTimeImmutable('2030-01-01 00:00:00', new DateTimeZone('UTC'));
@@ -1968,7 +1992,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2002,7 +2026,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publishScheduled(
@@ -2036,7 +2060,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publishScheduled(
@@ -2066,7 +2090,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publishScheduled(
@@ -2096,7 +2120,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publishScheduled(
@@ -2119,7 +2143,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2153,7 +2177,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $ack = $client->jetStream()->publish('orders.created', '{"id":1}', msgId: 'order-1')->await();
@@ -2178,7 +2202,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publish(
@@ -2213,7 +2237,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorAck), $errorAck),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2241,7 +2265,7 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         // Tight retry wait so the test is fast.
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         $js = new JetStreamContext($client, publishRetryAttempts: 3, publishRetryWaitMs: 1);
 
@@ -2264,7 +2288,7 @@ final class JetStreamContextTest extends TestCase
             "MSG _INBOX.any 1 0\r\n\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $delivered = new NatsMessage('events.x', 9, '$JS.ACK.ORDERS.c1.1.5.5.0.0', 'body');
@@ -2292,7 +2316,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ok), $ok),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         $js = $client->jetStream();
 
@@ -2312,7 +2336,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testMessageMetadataParsesAckTuple(): void
     {
-        $client = new NatsClient(new NatsOptions());
+        $client = $this->own(new NatsClient(new NatsOptions()));
         $js = $client->jetStream();
 
         // 9-token form: $JS.ACK.<stream>.<consumer>.<delivered>.<sseq>.<cseq>.<ts>.<pending>
@@ -2341,7 +2365,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testMessageMetadataThrowsForNonJetStreamMessage(): void
     {
-        $client = new NatsClient(new NatsOptions());
+        $client = $this->own(new NatsClient(new NatsOptions()));
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('not a JetStream delivery');
         $client->jetStream()->messageMetadata(new NatsMessage('events.x', 1, '_INBOX.plain', 'body'));
@@ -2362,7 +2386,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publish('orders.created', '{"id":1}', ttl: 30)->await();
@@ -2386,7 +2410,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->publish('orders.created', '{"id":1}', ttl: 'never')->await();
@@ -2404,7 +2428,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2427,7 +2451,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2455,7 +2479,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $value = $client->jetStream()->incrementCounter('counters.visits', '+5')->await();
@@ -2482,7 +2506,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $value = $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
@@ -2500,7 +2524,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2530,7 +2554,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.a 1 %d %d\r\n%s%s\r\n", $h, $h + strlen($body), $hdrs, $body),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $value = $client->jetStream()->counterValue('COUNTERS', 'counters.visits')->await();
@@ -2555,7 +2579,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.a 1 %d %d\r\n%s\r\n", $h, $h, $hdrs),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $value = $client->jetStream()->counterValue('COUNTERS', 'counters.visits')->await();
@@ -2578,7 +2602,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $when = new DateTimeImmutable('2030-01-01 00:00:00', new DateTimeZone('UTC'));
@@ -2609,7 +2633,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $when = new DateTimeImmutable('2030-01-01 00:00:00', new DateTimeZone('UTC'));
@@ -2638,7 +2662,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($deliveryPayload), $deliveryPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->fetchNext('ORDERS', 'PROC', 2500)->await();
@@ -2658,7 +2682,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2682,7 +2706,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 reply.ack %d\r\n%s\r\n", strlen($deliveryPayload), $deliveryPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->request('$JS.API.CONSUMER.MSG.NEXT.ORDERS.PROC', '{}')->await();
@@ -2719,7 +2743,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2739,7 +2763,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -2764,7 +2788,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $created = $client->jetStream()->createPushConsumer('ORDERS', 'PROC', 'deliver.proc', 'orders.*')->await();
@@ -2791,7 +2815,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $consumer = $client->jetStream()->createEphemeralPushConsumer('ORDERS', 'deliver.ep', 'orders.*')->await();
@@ -2833,7 +2857,7 @@ final class JetStreamContextTest extends TestCase
             "MSG deliver.proc 2 5\r\nhello\r\n",
         ];
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = null;
@@ -2886,7 +2910,7 @@ final class JetStreamContextTest extends TestCase
             ),
         ];
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $handled = false;
@@ -2934,7 +2958,7 @@ final class JetStreamContextTest extends TestCase
             ),
         ];
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $handled = false;
@@ -2969,7 +2993,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $consumer = $client->jetStream()->createEphemeralConsumer('ORDERS', 'orders.*')->await();
@@ -3001,7 +3025,7 @@ final class JetStreamContextTest extends TestCase
             "MSG deliver.ephemeral 2 5\r\nhello\r\n",
         ];
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = null;
@@ -3031,7 +3055,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -3053,7 +3077,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $created = $client->jetStream()->createStream('AGG', [], [
@@ -3081,7 +3105,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $created = $client->jetStream()->createStream('MIRROR', [], [
@@ -3101,7 +3125,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -3121,7 +3145,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.any 1 %d\r\n%s\r\n", strlen($malformedPayload), $malformedPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -3143,7 +3167,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($responsePayload), $responsePayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $updated = $client->jetStream()->updateStream('ORDERS', [
@@ -3167,7 +3191,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $consumer = $client->jetStream()->createConsumer('ORDERS', 'PROC', 'orders.*', [
@@ -3198,7 +3222,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         // No ack_policy passed: the durable createConsumer() path must default it to explicit.
@@ -3219,7 +3243,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->createPushConsumer('ORDERS', 'PROC', 'deliver.proc', 'orders.*', [
@@ -3241,7 +3265,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg2), $msg2),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->fetchBatch('ORDERS', 'PROC', 2, 2500)->await();
@@ -3262,7 +3286,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -3283,7 +3307,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->fetchBatch('ORDERS', 'PROC', 2, 2500)->await();
@@ -3310,7 +3334,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $observed = null;
@@ -3345,7 +3369,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.JS.FETCH.a 1 %d\r\n%s\r\n", strlen($msg1), $msg1),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->fetchBatch('ORDERS', 'PROC', 1, 2500)->await();
@@ -3365,7 +3389,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -3385,7 +3409,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.FETCH.a 1 %d %d\r\n%s\r\n", $headerBytes, $headerBytes, $statusHeaders),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         try {
@@ -3409,7 +3433,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse('{"paused":true,"pause_until":"2026-12-01T00:00:00Z"}'),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $result = $client->jetStream()->pauseConsumer('ORDERS', 'PROC', '2026-12-01T00:00:00Z')->await();
@@ -3431,7 +3455,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse('{"paused":false}'),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $result = $client->jetStream()->resumeConsumer('ORDERS', 'PROC')->await();
@@ -3466,7 +3490,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse($consumerCreateResponse),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->subscribeOrderedConsumer('ORDERS', function (NatsMessage $msg): void {})->await();
@@ -3493,7 +3517,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse('{"purged":42}'),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $result = $client->jetStream()->purgeStream('ORDERS')->await();
@@ -3512,7 +3536,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse('{"purged":10}'),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $result = $client->jetStream()->purgeStream('ORDERS', ['filter' => 'orders.old'])->await();
@@ -3538,7 +3562,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse($listPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $streams = $client->jetStream()->listStreams()->await();
@@ -3565,7 +3589,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse($listPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $streams = $client->jetStream()->listStreams(['subject' => 'orders.>'])->await();
@@ -3592,7 +3616,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse($listPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $consumers = $client->jetStream()->listConsumers('ORDERS')->await();
@@ -3632,7 +3656,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen((string) $page2), (string) $page2),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $streams = $client->jetStream()->listStreams()->await();
@@ -3662,7 +3686,7 @@ final class JetStreamContextTest extends TestCase
             $this->jsOkResponse($msgPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->getStreamMessage('ORDERS', 1)->await();
@@ -3676,7 +3700,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testExtractStreamSequenceParsesReplySubject(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $method = new \ReflectionMethod($js, 'extractStreamSequence');
@@ -3689,7 +3713,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testExtractStreamSequenceParsesDomainQualifiedReplySubject(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $method = new \ReflectionMethod($js, 'extractStreamSequence');
@@ -3708,7 +3732,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testExtractStreamSequenceParses13TokenReplySubject(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $method = new \ReflectionMethod($js, 'extractStreamSequence');
@@ -3720,7 +3744,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testKeyValueRejectsInvalidBucketName(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(\IDCT\NATS\Exception\JetStreamException::class);
         $this->expectExceptionMessage('Invalid bucket name');
@@ -3730,7 +3754,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testObjectStoreRejectsInvalidBucketName(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(\IDCT\NATS\Exception\JetStreamException::class);
         $this->expectExceptionMessage('Invalid bucket name');
@@ -3739,7 +3763,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testExtractSequencesParseElevenTokenDomainReplySubject(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $streamMethod = new \ReflectionMethod($js, 'extractStreamSequence');
@@ -3755,7 +3779,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testExtractStreamSequenceReturnsNullForInvalidReplySubject(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $method = new \ReflectionMethod($js, 'extractStreamSequence');
@@ -3778,7 +3802,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testHandlePushControlMessageInterceptsNon100StatusButNotDataMessages(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $method = new \ReflectionMethod($js, 'handlePushControlMessage');
@@ -3799,7 +3823,7 @@ final class JetStreamContextTest extends TestCase
 
     public function testHandlePushControlMessageHeartbeatWithoutReplyReturnsTrue(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $method = new \ReflectionMethod($js, 'handlePushControlMessage');
@@ -3819,7 +3843,7 @@ final class JetStreamContextTest extends TestCase
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
         ]);
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         $js = $client->jetStream();
 
@@ -3849,7 +3873,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($apiResponse), $apiResponse),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->getStreamMessage('EVENTS', 1)->await();
@@ -3882,7 +3906,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($apiResponse), $apiResponse),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->getStreamMessage('EVENTS', 2)->await();
@@ -3909,7 +3933,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($apiResponse), $apiResponse),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->getStreamMessage('EVENTS', 3)->await();
@@ -3933,7 +3957,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.any 1 %d %d\r\n%s%s\r\n", $hdrLen, $totalLen, $headerBlock, $body),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->directGetStreamMessage('EVENTS', 2)->await();
@@ -3963,7 +3987,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.any 1 %d %d\r\n%s%s\r\n", $hdrLen, $totalLen, $headerBlock, $body),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $message = $client->jetStream()->directGetLastMessageForSubject('EVENTS', 'events.order')->await();
@@ -3989,7 +4013,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.any 1 %d %d\r\n%s\r\n", $len, $len, $statusBlock),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -4015,14 +4039,14 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order delivery: consumer seq 1 / stream seq 1 -> next expected consumer seq 2.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // A missed push: consumer seq jumps to 3 (expected 2). The consumer is recreated from
@@ -4034,7 +4058,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4084,15 +4108,15 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (consumer seq 3, expected 2) -> recreate rotates the deliver sid.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -4100,7 +4124,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $sid = $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, 'events.>')->await();
@@ -4165,9 +4189,9 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4187,7 +4211,7 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(['m1', 'm2'], $received, 'heartbeats stay withheld from the user handler');
         $mismatches = array_values(array_filter(
             $errors,
-            static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
+            static fn(\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
         ));
         self::assertCount(2, $mismatches, 'exactly one report per gap episode: the repeated gap heartbeat must not spam, the post-delivery gap must re-report');
         self::assertStringContainsString('up to sequence 3 but only 1', $mismatches[0]->getMessage());
@@ -4220,9 +4244,9 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $client->jetStream()->subscribeEphemeralPushConsumer(
@@ -4238,7 +4262,7 @@ final class JetStreamContextTest extends TestCase
 
         self::assertSame([], array_values(array_filter(
             $errors,
-            static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
+            static fn(\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
         )), 'a pre-first-delivery heartbeat reporting history must not false-alarm');
     }
 
@@ -4281,9 +4305,9 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4303,7 +4327,7 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(['m1'], $received);
         $mismatches = array_values(array_filter(
             $errors,
-            static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
+            static fn(\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
         ));
         self::assertCount(2, $mismatches, 'one replacement report (not two for the same regression) plus one gap report in the new instance');
         self::assertStringContainsString('last delivered sequence 1 below the 2 already seen', $mismatches[0]->getMessage());
@@ -4346,9 +4370,9 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4368,7 +4392,7 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(['m1', 'm2'], $received, 'the regressed delivery is still user data and must reach the handler');
         $mismatches = array_values(array_filter(
             $errors,
-            static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
+            static fn(\Throwable $e): bool => str_contains($e->getMessage(), 'consumer sequence mismatch'),
         ));
         self::assertCount(1, $mismatches, 'the delivery regression itself must be SILENT; only the new instance\'s real gap reports');
         self::assertStringContainsString('up to sequence 2 but only 1', $mismatches[0]->getMessage(), 'the gap must be measured against the REBASED tracker, not the stale max');
@@ -4399,19 +4423,19 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Recreate attempt #1: NO reply - the recreate parks in this await while stop runs.
-                static fn (string $rt): array => [],
+                static fn(string $rt): array => [],
                 // Attempt #2 succeeds - but by then the consumer is stopped, so it must be torn down.
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD3'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD3'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap -> recreate starts and parks awaiting attempt #1's (withheld) reply.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -4419,7 +4443,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -4511,25 +4535,25 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Recreate attempts #1-#3: NO replies - every attempt times out while the
                 // connection stays Open, exhausting the budget with the stop already latched.
-                static fn (string $rt): array => [],
-                static fn (string $rt): array => [],
-                static fn (string $rt): array => [],
+                static fn(string $rt): array => [],
+                static fn(string $rt): array => [],
+                static fn(string $rt): array => [],
             ],
             onDelete: [
                 // Episode delete of ORD1, the stop's delete of the adopted candidate, and the
                 // best-effort orphan reap of all three attempt candidates.
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap -> recreate starts and parks awaiting attempt #1's (withheld) reply.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -4538,9 +4562,9 @@ final class JetStreamContextTest extends TestCase
         );
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 100, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 100, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -4668,7 +4692,7 @@ final class JetStreamContextTest extends TestCase
             ];
         };
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4712,9 +4736,9 @@ final class JetStreamContextTest extends TestCase
         // Mux inbox (#118): CREATE reply on the captured reply-to; deliveries on the actual deliver sid.
         $this->orderedConsumerServer(
             $transport,
-            onCreate: [static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)]],
+            onCreate: [static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order delivery from the current consumer ORD1 (consumer seq 1 -> expected next 2).
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // A STALE delivery from a DIFFERENT consumer instance (ORDX) whose consumer seq (2)
@@ -4724,7 +4748,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4752,7 +4776,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testSubscribeOrderedConsumerRecreatesOnHeartbeatTailGap(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -4773,12 +4797,12 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order msg1 (consumer seq 1, stream seq 1) -> expected next 2, lastStreamSeq 1.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Idle heartbeat: last delivered consumer seq 3 > processed (1) -> tail gap -> recreate.
@@ -4788,7 +4812,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4832,14 +4856,14 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
                 ],
@@ -4857,7 +4881,7 @@ final class JetStreamContextTest extends TestCase
         };
 
         // Logger configured, NO errorListener - the previously fully silent configuration.
-        $client = new NatsClient(new NatsOptions(logger: $logger), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(logger: $logger), $transport));
         $client->connect()->await();
 
         $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, 'events.>')->await();
@@ -4868,7 +4892,7 @@ final class JetStreamContextTest extends TestCase
 
         $recreateLogs = array_values(array_filter(
             $logger->records,
-            static fn (array $r): bool => str_contains($r['message'], 'Ordered consumer recreate failed'),
+            static fn(array $r): bool => str_contains($r['message'], 'Ordered consumer recreate failed'),
         ));
         self::assertNotSame([], $recreateLogs, 'the terminal consumer death must produce a log line even with no errorListener');
         self::assertSame('error', (string) $recreateLogs[0]['level']);
@@ -4893,14 +4917,14 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order msg1 (consumer seq 1).
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (consumer seq 3) triggers recovery.
@@ -4914,7 +4938,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -4964,16 +4988,16 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [
                     self::muxMsg($rt, (string) $recreateReply),
                     "MSG deliver.ord 3 \$JS.ACK.EVENTS.ORD2.1.4.1.0.0 4\r\nmsg4\r\n",
                 ],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap exposes a missed push -> recovery.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -4986,7 +5010,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5035,14 +5059,14 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [
                     self::muxMsg($rt, (string) $recreateReply),
                     "MSG deliver.ord 3 \$JS.ACK.EVENTS.ORD2.1.4.1.0.0 4\r\nmsg4\r\n",
                 ],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (consumer seq 3) triggers recovery; the queue is empty from here on.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -5055,7 +5079,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5097,11 +5121,11 @@ final class JetStreamContextTest extends TestCase
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
         ], JSON_THROW_ON_ERROR);
 
-        // Mux inbox (#118): the DELETE reply wait reads a fatal -ERR frame, which handleFrame() raises
-        // as a ConnectionException out of deleteConsumer() without closing the connection; the create-
-        // retry loop still runs and succeeds as ORD2. Replies echo on captured reply-tos; the single
-        // recreate's rotated deliver SUB is sid 3 (no per-request subs), and msg4 rides the successful
-        // create reply (the re-adopt point).
+        // Mux inbox (#118): the DELETE reply wait reads a fatal -ERR frame - the server drops the
+        // connection - so deleteConsumer() fails with a ConnectionException once the client has reconnected
+        // (#171); the create-retry loop still runs and succeeds as ORD2. Replies echo on captured reply-tos;
+        // the single recreate's rotated deliver SUB is sid 3 (no per-request subs), and msg4 rides the
+        // successful create reply (the re-adopt point).
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
@@ -5109,15 +5133,15 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [
                     self::muxMsg($rt, (string) $recreateReply),
                     "MSG deliver.ord 3 \$JS.ACK.EVENTS.ORD2.1.4.1.0.0 4\r\nmsg4\r\n",
                 ],
             ],
-            onDelete: [static fn (string $rt): array => ["-ERR 'Stale Connection'\r\n"]],
+            onDelete: [static fn(string $rt): array => self::serverDropsConnectionThenAcceptsReconnect()],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (consumer seq 3) triggers recovery.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -5130,7 +5154,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5172,9 +5196,9 @@ final class JetStreamContextTest extends TestCase
         // Mux inbox (#118): CREATE reply on the captured reply-to; deliveries on the actual deliver sid.
         $this->orderedConsumerServer(
             $transport,
-            onCreate: [static fn (string $rt): array => [self::muxMsg($rt, $createReply)]],
+            onCreate: [static fn(string $rt): array => [self::muxMsg($rt, $createReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.2.1.0.0 4\r\nmsg1\r\n", // cseq 1, sseq 2
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.2.4.2.0.0 4\r\nmsg2\r\n", // cseq 2, sseq 4
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.6.3.0.0 4\r\nmsg3\r\n", // cseq 3, sseq 6
@@ -5182,7 +5206,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5220,7 +5244,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createErr), $createErr),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -5246,7 +5270,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $names = $client->jetStream()->streamNames()->await();
@@ -5273,7 +5297,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.a 1 %d %d\r\n%s%s\r\n", $h, $h + strlen($body), $hdrs, $body),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -5288,7 +5312,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testDirectGetLastForSubjectsWithEmptySubjectsReturnsEmpty(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', [])->await();
 
@@ -5300,7 +5324,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testDirectGetLastForSubjectsRejectsWildcardSubjectWithStar(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('directGetLastForSubjects expects exact subjects');
@@ -5313,7 +5337,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testDirectGetLastForSubjectsRejectsWildcardSubjectWithGreaterThan(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('directGetLastForSubjects expects exact subjects');
@@ -5326,7 +5350,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testDirectGetBatchRejectsZeroExpiresMs(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('Direct Get batch expiresMs must be greater than zero');
@@ -5350,7 +5374,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createPayload), $createPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $info = $client->jetStream()->addOrUpdateConsumer('ORDERS', 'PROC', 'orders.*')->await();
@@ -5375,7 +5399,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($reply), $reply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $names = $client->jetStream()->consumerNames('ORDERS')->await();
@@ -5410,7 +5434,7 @@ final class JetStreamContextTest extends TestCase
             "MSG deliver.eph 2 5\r\nhello\r\n",
         ];
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5461,7 +5485,7 @@ final class JetStreamContextTest extends TestCase
             ),
         ];
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5512,7 +5536,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5565,7 +5589,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5623,7 +5647,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5649,7 +5673,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testSubscribeOrderedConsumerUnparseableAckErrorRearmsAfterRecreate(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -5673,12 +5697,12 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // Unparseable (10-token) ack subject on the first epoch -> first error.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0.X 4\r\nbad1\r\n",
                     // In-order delivery so the tail-gap heartbeat below has a processed baseline.
@@ -5686,7 +5710,7 @@ final class JetStreamContextTest extends TestCase
                     // Tail-gap heartbeat -> recreate (a new consumer epoch).
                     sprintf("HMSG deliver.ord $sid %d %d\r\n%s\r\n", strlen($hbHeaders), strlen($hbHeaders), $hbHeaders),
                 ],
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // Unparseable ack subject on the SECOND epoch -> the latch re-armed, second error.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD2.1.1.1.0.0.X 4\r\nbad2\r\n",
                 ],
@@ -5698,7 +5722,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5744,12 +5768,12 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $recreateReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $recreateReply)],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteError)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteError)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order message (consumer seq 1 / stream seq 1).
                     "MSG _INBOX.JS.ORD.test $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Out-of-order message (consumer seq jumps to 3, triggers recreation).
@@ -5758,7 +5782,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -5808,17 +5832,17 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
         );
 
         $errors = [];
         $options = new NatsOptions(pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         // 30 ms heartbeat -> the watchdog fires after ~60 ms of silence.
@@ -5874,15 +5898,16 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
-        // 100 ms heartbeat -> 200 ms watchdog threshold.
-        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, null, 100_000_000)->await();
+        // 500 ms heartbeat -> 1 s watchdog threshold.
+        $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, null, 500_000_000)->await();
 
-        // Feed a heartbeat roughly every 10 ms for ~500 ms (past two thresholds). Each frame rearms the
-        // watchdog with a ~20x margin on the feed gap, so a slow CI must not produce a false recreate.
-        $deadlineNs = hrtime(true) + 500_000_000;
+        // Feed a heartbeat roughly every 10 ms for ~1.6 s, past the threshold and the watchdog tick after it.
+        // Each frame rearms the watchdog with a ~100x margin on the feed gap, so even a pause of 0.8 s on a slow
+        // CI leaves a gap shorter than the threshold and must not produce a false recreate.
+        $deadlineNs = hrtime(true) + 1_600_000_000;
         while (hrtime(true) < $deadlineNs) {
             $transport->pushReadChunk($hbFrame);
             $client->processIncoming()->await();
@@ -5920,7 +5945,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         // 30 ms heartbeat -> the watchdog surfaces a stall after ~60 ms of silence.
@@ -5977,21 +6002,21 @@ final class JetStreamContextTest extends TestCase
 
         // pingIntervalSeconds: 0 disables the connection ping timer, so the only repeat timer the
         // subscription can add is the watchdog.
-        $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
 
-        $before = self::countRepeatTimers();
+        $before = $this->countRepeatTimers();
         $sid = $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, null, 30_000_000)->await();
-        self::assertSame($before + 1, self::countRepeatTimers(), 'subscribing an ordered consumer must arm exactly one heartbeat watchdog timer');
+        self::assertSame($before + 1, $this->countRepeatTimers(), 'subscribing an ordered consumer must arm exactly one heartbeat watchdog timer');
 
         $client->unsubscribe($sid)->await();
 
         // The next watchdog tick observes the dropped subscription and self-cancels; wait for it.
         $deadlineNs = hrtime(true) + 1_000_000_000;
-        while (self::countRepeatTimers() > $before && hrtime(true) < $deadlineNs) {
+        while ($this->countRepeatTimers() > $before && hrtime(true) < $deadlineNs) {
             delay(0.01);
         }
-        self::assertSame($before, self::countRepeatTimers(), 'the watchdog timer must be cancelled after unsubscribe (no leaked timer)');
+        self::assertSame($before, $this->countRepeatTimers(), 'the watchdog timer must be cancelled after unsubscribe (no leaked timer)');
 
         $client->disconnect()->await();
     }
@@ -6032,8 +6057,8 @@ final class JetStreamContextTest extends TestCase
         // recreate must be suppressed. The gap frame rides that DELETE write on the still-current sid 2.
         $this->orderedConsumerServer(
             $transport,
-            onCreate: [static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))]],
-            onDelete: [static fn (string $rt): array => [$gapFrame]],
+            onCreate: [static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))]],
+            onDelete: [static fn(string $rt): array => [$gapFrame]],
         );
 
         $errors = [];
@@ -6041,7 +6066,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(requestTimeoutMs: 200, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         // 30 ms heartbeat -> the watchdog fires the first recreate after ~60 ms of silence.
@@ -6091,17 +6116,17 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
         );
 
         $errors = [];
         $options = new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         // 30 ms heartbeat -> ~60 ms silence threshold.
@@ -6154,12 +6179,12 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
-        $before = self::countRepeatTimers();
+        $before = $this->countRepeatTimers();
         $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, null, 30_000_000)->await();
-        self::assertSame($before + 1, self::countRepeatTimers(), 'subscribing an ordered consumer must arm exactly one watchdog timer');
+        self::assertSame($before + 1, $this->countRepeatTimers(), 'subscribing an ordered consumer must arm exactly one watchdog timer');
 
         // Force the connection into a mid-reconnect state; the subscription stays registered.
         $connection = (new \ReflectionProperty(NatsClient::class, 'connection'))->getValue($client);
@@ -6179,7 +6204,7 @@ final class JetStreamContextTest extends TestCase
 
         self::assertSame(0, substr_count($written, '$JS.API.CONSUMER.DELETE.EVENTS'), 'the watchdog must not recreate during a reconnect');
         self::assertSame([], $errors, 'the watchdog must not surface a stall during a reconnect');
-        self::assertSame($before + 1, self::countRepeatTimers(), 'the watchdog timer must survive a transient reconnect (rebase, not cancel)');
+        self::assertSame($before + 1, $this->countRepeatTimers(), 'the watchdog timer must survive a transient reconnect (rebase, not cancel)');
 
         $client->disconnect()->await();
     }
@@ -6218,7 +6243,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $connection = (new \ReflectionProperty(NatsClient::class, 'connection'))->getValue($client);
@@ -6231,8 +6256,8 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             onDelete: [
                 // The watchdog fired and its recreate wrote the DELETE: the connection leaves Open
@@ -6246,7 +6271,7 @@ final class JetStreamContextTest extends TestCase
                     return [self::muxMsg($rt, $deleteReply)];
                 },
                 // The post-reconnect watchdog retry deletes the same never-replaced instance again.
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
         );
 
@@ -6330,7 +6355,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $connection = (new \ReflectionProperty(NatsClient::class, 'connection'))->getValue($client);
@@ -6340,7 +6365,7 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Recreate attempt 1: the fresh inbox is already subscribed and the candidate name
                 // adopted. The connection leaves Open HERE and the reply is withheld, so attempt 1
                 // times out (100 ms) and attempts 2-3 fail fast -> the deferral runs its
@@ -6350,11 +6375,11 @@ final class JetStreamContextTest extends TestCase
 
                     return [];
                 },
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
         );
 
@@ -6433,14 +6458,14 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -6501,11 +6526,11 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -6523,15 +6548,15 @@ final class JetStreamContextTest extends TestCase
         $newerTimerId = EventLoop::repeat(3600.0, static function (): void {});
         $watchdogState->watchdogTimerId = $newerTimerId;
 
-        $timersBefore = self::countRepeatTimers();
+        $timersBefore = $this->countRepeatTimers();
         $client->unsubscribe($sid)->await();
 
         // The stale timer's next tick still self-cancels (its sid is gone) ...
         $deadlineNs = hrtime(true) + 2_000_000_000;
-        while (self::countRepeatTimers() > $timersBefore - 1 && hrtime(true) < $deadlineNs) {
+        while ($this->countRepeatTimers() > $timersBefore - 1 && hrtime(true) < $deadlineNs) {
             delay(0.01);
         }
-        self::assertSame($timersBefore - 1, self::countRepeatTimers(), 'the stale timer must still self-cancel');
+        self::assertSame($timersBefore - 1, $this->countRepeatTimers(), 'the stale timer must still self-cancel');
 
         // ... but must NOT have run the cleanup: the registry entry and the (conceptually live,
         // new-sid) consumer belong to the current timer's watch.
@@ -6572,7 +6597,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $connection = (new \ReflectionProperty(NatsClient::class, 'connection'))->getValue($client);
@@ -6582,7 +6607,7 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Recreate attempt #1: the fresh inbox is subscribed and the candidate adopted.
                 // The connection leaves Open HERE and the reply is withheld, so attempt #1 times
                 // out and attempts #2-#3 fail fast -> the deferral runs with the dispatch state
@@ -6596,10 +6621,10 @@ final class JetStreamContextTest extends TestCase
             onDelete: [
                 // The episode's initial delete of ORD1 is ANSWERED but - as far as the scenario
                 // goes - never took effect server-side: ORD1 survives and resumes delivering.
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (cseq 3, expected 2) -> recreate -> deferral.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -6631,7 +6656,7 @@ final class JetStreamContextTest extends TestCase
         while ((substr_count(implode('', $transport->writes), '$JS.API.CONSUMER.CREATE.EVENTS') < 2 || $watchdogState->recreateInFlight) && hrtime(true) < $deadlineNs) {
             try {
                 $client->processIncoming(new \Amp\TimeoutCancellation(0.05))->await();
-            } catch (\Amp\CancelledException | NatsException) {
+            } catch (\Amp\CancelledException|NatsException) {
                 // Idle slice, or a fail-fast read while the connection is not Open; the saga's
                 // timers advance regardless.
             }
@@ -6687,7 +6712,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $connection = (new \ReflectionProperty(NatsClient::class, 'connection'))->getValue($client);
@@ -6717,19 +6742,19 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 $attemptResponder,
                 $attemptResponder,
                 $attemptResponder,
                 $attemptResponder,
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
         );
 
@@ -6827,7 +6852,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -6856,7 +6881,7 @@ final class JetStreamContextTest extends TestCase
         ]);
 
         // Use retryAttempts=3 so that a retry would produce a second request (proving we don't retry).
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         $js = new JetStreamContext($client, publishRetryAttempts: 3, publishRetryWaitMs: 1);
 
@@ -6887,7 +6912,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.a 1 %d %d\r\n%s\r\n", $h, $h, $hdrs),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -6913,7 +6938,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($badPayload), $badPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -6938,7 +6963,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($errorPayload), $errorPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -6964,7 +6989,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $value = $client->jetStream()->incrementCounter('counters.visits', '+1')->await();
@@ -6988,7 +7013,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($payload), $payload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7011,7 +7036,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7027,7 +7052,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testAckSyncThrowsForEmptyReplySubject(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(JetStreamException::class);
         $this->expectExceptionMessage('JetStream ACK requires a reply subject on the delivered message');
@@ -7047,7 +7072,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7072,7 +7097,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7096,7 +7121,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7121,7 +7146,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7145,7 +7170,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7177,7 +7202,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         // expiresMs=1 makes the TimeoutCancellation fire after ~1001 ms; the blocking transport
@@ -7207,7 +7232,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1), $transport));
         $client->connect()->await();
 
         $this->expectException(TimeoutException::class);
@@ -7242,7 +7267,7 @@ final class JetStreamContextTest extends TestCase
             'HMSG _INBOX.b 2 ' . strlen($status) . ' ' . strlen($status) . "\r\n" . $status . "\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         // publishRetryAttempts=2, publishRetryWaitMs=1 (tight loop so the test is fast).
@@ -7266,7 +7291,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7291,7 +7316,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7315,7 +7340,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7338,7 +7363,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7363,7 +7388,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7386,7 +7411,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7409,7 +7434,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7438,7 +7463,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($streamPayload), $streamPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $created = $client->jetStream()->createStream('ORDERS-2_prod', ['orders.*'])->await();
@@ -7457,7 +7482,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testSubscribeOrderedConsumerReapsOrphanFromLostCreateReply(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -7465,8 +7490,9 @@ final class JetStreamContextTest extends TestCase
         $deleteReply = '{"success":true}';
 
         // Mux inbox (#118): replies echo on captured reply-tos; deliver1 is sid 2. The recreate deletes
-        // ORD1, create attempt 1's reply is "lost" (a -ERR raised as ConnectionException), attempt 2
-        // succeeds as ORD2, then the orphaned attempt-1 name is best-effort-reaped (a second DELETE).
+        // ORD1, create attempt 1's reply is "lost" (the server drops the connection with a -ERR, raised as
+        // ConnectionException once the client has reconnected), attempt 2 succeeds as ORD2, then the
+        // orphaned attempt-1 name is best-effort-reaped (a second DELETE).
         $transport = new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
             "PONG\r\n",
@@ -7474,19 +7500,19 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Attempt 1: a -ERR (ConnectionException) - the reply is lost, the consumer may exist.
-                static fn (string $rt): array => ["-ERR 'Stale Connection'\r\n"],
+                static fn(string $rt): array => self::serverDropsConnectionThenAcceptsReconnect(),
                 // Attempt 2 succeeds as ORD2 and is adopted.
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             // The current ORD1 delete, then the best-effort reap of the orphaned attempt-1 name.
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order msg1 (consumer seq 1, stream seq 1) -> expected next 2, lastStreamSeq 1.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (consumer seq 3) triggers recovery.
@@ -7500,7 +7526,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -7539,7 +7565,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testSubscribeOrderedConsumerIgnoresOrphanHeartbeatOnRotatedOldInbox(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -7564,15 +7590,15 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [
                     self::muxMsg($rt, $createReply('ORD2')),
                     sprintf("HMSG deliver.ord 2 %d %d\r\n%s\r\n", strlen($orphanHb), strlen($orphanHb), $orphanHb),
                 ],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order msg1 (consumer seq 1, stream seq 1) on the ORIGINAL inbox (sid 2).
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Data gap (consumer seq 3) -> the ONE legitimate recreate.
@@ -7586,7 +7612,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -7615,7 +7641,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testSubscribeOrderedConsumerRotatesDeliverInboxAndUnsubscribesOld(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -7631,12 +7657,12 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Data gap -> recreate.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -7644,7 +7670,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, 'events.>')->await();
@@ -7691,17 +7717,17 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [
                     self::muxMsg($rt, $createError),
                     "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.2.2.2.0.0 4\r\ntail\r\n",
                 ],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap triggers recovery.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -7714,7 +7740,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -7742,7 +7768,7 @@ final class JetStreamContextTest extends TestCase
     public function testSubscribeEphemeralPushConsumerDropsNon100StatusFrames(): void
     {
         $createReply = '{"stream_name":"ORDERS","name":"EPH","config":{"deliver_subject":"deliver.eph","ack_policy":"none"}}';
-        $status = static fn (string $code, string $desc): string => NatsHeaders::toWireBlock([
+        $status = static fn(string $code, string $desc): string => NatsHeaders::toWireBlock([
             'Status' => $code,
             'Description' => $desc,
         ]);
@@ -7762,7 +7788,7 @@ final class JetStreamContextTest extends TestCase
         }
         $transport->enqueueOnWriteContaining['SUB deliver.eph '] = $statusFrames;
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -7814,7 +7840,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -7871,7 +7897,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -7920,7 +7946,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $this->expectException(JetStreamException::class);
@@ -7947,7 +7973,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.x 1 %d %d\r\n%s%s\r\n", strlen($h1), strlen($h1) + strlen($b1), $h1, $b1),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         try {
@@ -7980,7 +8006,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         return [$client, $transport];
@@ -8384,7 +8410,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 100, pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 100, pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
 
         try {
@@ -8410,7 +8436,7 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         try {
@@ -8443,7 +8469,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $hookName = '';
@@ -8458,7 +8484,7 @@ final class JetStreamContextTest extends TestCase
                 $hookNumPending = $info->raw['num_pending'] ?? null;
                 $deliverSubsAtHook = count(array_filter(
                     $transport->writes,
-                    static fn (string $w): bool => str_starts_with($w, 'SUB deliver.eph'),
+                    static fn(string $w): bool => str_starts_with($w, 'SUB deliver.eph'),
                 ));
             },
         )->await();
@@ -8492,9 +8518,9 @@ final class JetStreamContextTest extends TestCase
         ];
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -8513,7 +8539,7 @@ final class JetStreamContextTest extends TestCase
         self::assertSame(['hello'], $received, 'a throwing hook must not abort the consumer setup');
         $hookErrors = array_values(array_filter(
             $errors,
-            static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'consumer-created hook boom'),
+            static fn(\Throwable $e): bool => str_contains($e->getMessage(), 'consumer-created hook boom'),
         ));
         self::assertCount(1, $hookErrors, 'the hook error must be surfaced through the error listener');
     }
@@ -8533,14 +8559,14 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $dataFrame = static fn (int $sid, string $consumer, int $delivered, int $sseq, int $cseq, string $body): string => sprintf(
+        $dataFrame = static fn(int $sid, string $consumer, int $delivered, int $sseq, int $cseq, string $body): string => sprintf(
             "MSG deliver.ord %d %s %d\r\n%s\r\n",
             $sid,
             sprintf('$JS.ACK.EVENTS.%s.%d.%d.%d.0.0', $consumer, $delivered, $sseq, $cseq),
             strlen($body),
             $body,
         );
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -8584,9 +8610,9 @@ final class JetStreamContextTest extends TestCase
         };
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -8617,7 +8643,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testStopDuringInFlightRecreateToleratesTeardownFailures(): void
     {
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -8632,11 +8658,11 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Recreate attempt #1: NO reply - the recreate parks in this await while stop runs.
-                static fn (string $rt): array => [],
+                static fn(string $rt): array => [],
                 // Attempt #2 succeeds - but by then the consumer is stopped: teardown must run.
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [
                     // A status control frame on the ROTATED inbox (sid 3), read during this create's
                     // own pump - i.e. AFTER the stop latched - re-triggers $recreate(): the stopped
                     // guard at its head must swallow it (no nested recreate episode may start on a
@@ -8648,13 +8674,13 @@ final class JetStreamContextTest extends TestCase
             ],
             onDelete: [
                 // The recreate's best-effort delete of ORD1, then the stop closure's delete.
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
                 // The stopped-teardown's delete of the never-installed ORD3: server-rejected.
-                static fn (string $rt): array => [self::muxMsg($rt, '{"error":{"code":404,"err_code":10014,"description":"consumer not found"}}')],
+                static fn(string $rt): array => [self::muxMsg($rt, '{"error":{"code":404,"err_code":10014,"description":"consumer not found"}}')],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap -> recreate starts and parks awaiting attempt #1's (withheld) reply.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -8665,11 +8691,10 @@ final class JetStreamContextTest extends TestCase
         $transport->throwOnWriteContaining = "UNSUB 3\r\n";
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
-        $before = self::countRepeatTimers();
 
         $js = $client->jetStream();
         $sid = $js->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, 'events.>')->await();
@@ -8711,10 +8736,10 @@ final class JetStreamContextTest extends TestCase
         // The contained teardown failures are silent best-effort: no terminal recreate error.
         self::assertSame([], array_values(array_filter(
             $errors,
-            static fn (\Throwable $e): bool => str_contains($e->getMessage(), 'recreate failed'),
+            static fn(\Throwable $e): bool => str_contains($e->getMessage(), 'recreate failed'),
         )), 'teardown failures on a stopped consumer must not surface as a terminal recreate error');
         // No watchdog was re-armed for the never-installed instance.
-        self::assertSame($before, self::countRepeatTimers(), 'a stopped consumer must not re-arm a heartbeat watchdog');
+        self::assertSame(0, $this->countRepeatTimers(), 'a stopped consumer must not re-arm a heartbeat watchdog');
 
         $transport->throwOnWriteContaining = null;
         $client->disconnect()->await();
@@ -8733,14 +8758,14 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $dataFrame = static fn (int $sid, string $consumer, int $delivered, int $sseq, int $cseq, string $body): string => sprintf(
+        $dataFrame = static fn(int $sid, string $consumer, int $delivered, int $sseq, int $cseq, string $body): string => sprintf(
             "MSG deliver.ord %d %s %d\r\n%s\r\n",
             $sid,
             sprintf('$JS.ACK.EVENTS.%s.%d.%d.%d.0.0', $consumer, $delivered, $sseq, $cseq),
             strlen($body),
             $body,
         );
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -8783,9 +8808,9 @@ final class JetStreamContextTest extends TestCase
         $transport->throwOnWriteContaining = "UNSUB 2\r\n";
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -8835,18 +8860,18 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, (string) $createReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [self::muxMsg($rt, $createError)],
-                static fn (string $rt): array => [
+                static fn(string $rt): array => [self::muxMsg($rt, (string) $createReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [self::muxMsg($rt, $createError)],
+                static fn(string $rt): array => [
                     self::muxMsg($rt, $createError),
                     // Late frame on the old inbox: read after the teardown, must be dropped.
                     "MSG deliver.ord 2 \$JS.ACK.EVENTS.ORD1.2.2.2.0.0 4\r\ntail\r\n",
                 ],
             ],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)]],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap triggers recovery; every attempt fails -> terminal teardown.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -8861,7 +8886,7 @@ final class JetStreamContextTest extends TestCase
             $errors[] = $error;
         });
 
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -8897,14 +8922,14 @@ final class JetStreamContextTest extends TestCase
             "PONG\r\n",
         ]);
 
-        $dataFrame = static fn (int $sid, string $consumer, int $delivered, int $sseq, int $cseq, string $body): string => sprintf(
+        $dataFrame = static fn(int $sid, string $consumer, int $delivered, int $sseq, int $cseq, string $body): string => sprintf(
             "MSG deliver.ord %d %s %d\r\n%s\r\n",
             $sid,
             sprintf('$JS.ACK.EVENTS.%s.%d.%d.%d.0.0', $consumer, $delivered, $sseq, $cseq),
             strlen($body),
             $body,
         );
-        $createReply = static fn (string $name): string => json_encode([
+        $createReply = static fn(string $name): string => json_encode([
             'stream_name' => 'EVENTS',
             'name' => $name,
             'config' => ['deliver_subject' => 'deliver.ord', 'ack_policy' => 'none'],
@@ -8942,9 +8967,9 @@ final class JetStreamContextTest extends TestCase
         };
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -8983,19 +9008,19 @@ final class JetStreamContextTest extends TestCase
         ]);
         $this->orderedConsumerServer(
             $transport,
-            onCreate: [static fn (string $rt): array => [self::muxMsg($rt, $createReply)]],
-            onDelete: [static fn (string $rt): array => [self::muxMsg($rt, '{"error":{"code":404,"err_code":10014,"description":"consumer not found"}}')]],
+            onCreate: [static fn(string $rt): array => [self::muxMsg($rt, $createReply)]],
+            onDelete: [static fn(string $rt): array => [self::muxMsg($rt, '{"error":{"code":404,"err_code":10014,"description":"consumer not found"}}')]],
         );
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
         $sid = $js->subscribeOrderedConsumer('EVENTS', static function (NatsMessage $message): void {}, 'events.>')->await();
-        $timersBefore = self::countRepeatTimers();
+        $timersBefore = $this->countRepeatTimers();
         self::assertGreaterThan(0, $timersBefore, 'precondition: the ordered consumer must have armed its watchdog');
 
         // The live inbox's UNSUB write fails; the delete is rejected by the server (above).
@@ -9003,7 +9028,7 @@ final class JetStreamContextTest extends TestCase
 
         $js->stopOrderedConsumer($sid)->await();
 
-        self::assertSame($timersBefore - 1, self::countRepeatTimers(), 'the watchdog must be cancelled despite the teardown failures');
+        self::assertSame($timersBefore - 1, $this->countRepeatTimers(), 'the watchdog must be cancelled despite the teardown failures');
         self::assertFalse($client->isSubscriptionActive($sid), 'local subscription state must be dropped despite the failed UNSUB write');
         self::assertStringContainsString('$JS.API.CONSUMER.DELETE.EVENTS.ORD1', implode('', $transport->writes), 'the best-effort delete must still be attempted after the failed UNSUB');
         self::assertSame([], $errors, 'best-effort stop failures must stay silent');
@@ -9044,7 +9069,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
 
         $startNs = hrtime(true);
@@ -9083,9 +9108,9 @@ final class JetStreamContextTest extends TestCase
         ];
 
         $errors = [];
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
-        }), $transport);
+        }), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -9142,7 +9167,14 @@ final class JetStreamContextTest extends TestCase
             }
         };
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, logger: $logger), $transport);
+        $errors = [];
+        $client = $this->own(new NatsClient(new NatsOptions(
+            requestTimeoutMs: 1000,
+            errorListener: static function (\Throwable $error) use (&$errors): void {
+                $errors[] = $error->getMessage();
+            },
+            logger: $logger,
+        ), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -9159,6 +9191,8 @@ final class JetStreamContextTest extends TestCase
 
         self::assertGreaterThanOrEqual(1, $logger->errorLogAttempts, 'precondition: the throwing error-log path must actually have fired');
         self::assertSame(['hello'], $received, 'a throwing logger must never break the dispatch loop');
+        // Nor does it keep the surfaced status from the error listener.
+        self::assertCount($logger->errorLogAttempts, $errors, 'every error the logger threw on still reached the listener: ' . json_encode($errors));
     }
 
     /**
@@ -9169,7 +9203,7 @@ final class JetStreamContextTest extends TestCase
     public function testClientOptionsAccessorReturnsConstructedOptionsInstance(): void
     {
         $options = new NatsOptions(requestTimeoutMs: 1234);
-        $client = new NatsClient($options, new FakeTransport());
+        $client = $this->own(new NatsClient($options, new FakeTransport()));
 
         self::assertSame($options, $client->options());
     }
@@ -9409,14 +9443,14 @@ final class JetStreamContextTest extends TestCase
             sprintf("HMSG _INBOX.JS.DGET.c2 2 %d %d\r\n%s%s\r\n", strlen($h3), strlen($h3) + strlen($b3), $h3, $b3),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', [$s1, $s2, $s3])->await();
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         self::assertCount(2, $directGets, 'precondition: the subject list must split into two chunks');
 
@@ -9449,7 +9483,7 @@ final class JetStreamContextTest extends TestCase
         }
 
         $transport = new FakeTransport($reads);
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', [$s1, $s2])->await();
@@ -9457,7 +9491,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         self::assertCount(1, $directGets, 'two subjects filling the fallback budget exactly must share one request');
         self::assertStringContainsString('"batch":2', $directGets[0]);
@@ -9484,7 +9518,7 @@ final class JetStreamContextTest extends TestCase
         }
 
         $transport = new FakeTransport($reads);
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $messages = $client->jetStream()->directGetLastForSubjects('ORDERS', [$s1, $s2])->await();
@@ -9492,7 +9526,7 @@ final class JetStreamContextTest extends TestCase
 
         $directGets = array_values(array_filter(
             $transport->writes,
-            static fn (string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
+            static fn(string $frame): bool => str_contains($frame, '$JS.API.DIRECT.GET.ORDERS'),
         ));
         self::assertCount(2, $directGets, 'one byte over the fallback budget must split into two requests');
         self::assertStringContainsString('"batch":1', $directGets[0]);
@@ -9511,7 +9545,7 @@ final class JetStreamContextTest extends TestCase
         ]);
         $this->muxReplies($transport, [$this->jsOkResponse('{"success":0}')]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         self::assertFalse($client->jetStream()->unpinConsumer('ORDERS', 'PROC', 'g1')->await());
@@ -9536,7 +9570,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         $js = new JetStreamContext($client, publishRetryAttempts: 2, publishRetryWaitMs: -5);
 
@@ -9564,7 +9598,7 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($ackPayload), $ackPayload),
         ]);
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
         $js = new JetStreamContext($client, publishRetryAttempts: 2, publishRetryWaitMs: 40);
 
@@ -9615,7 +9649,7 @@ final class JetStreamContextTest extends TestCase
             blockWhenEmpty: true,
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000, pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000, pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
 
         try {
@@ -9664,7 +9698,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -9706,7 +9740,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $client->jetStream()->subscribePushConsumer(
@@ -9715,12 +9749,13 @@ final class JetStreamContextTest extends TestCase
             static function (NatsMessage $message): void {},
             'deliver.dur',
             null,
-            ['idle_heartbeat' => 100_000_000],
+            ['idle_heartbeat' => 500_000_000],
         )->await();
 
-        // Feed a frame every ~20ms for ~260ms: far inside the 100ms heartbeat interval, while the
-        // watchdog (2 x 100ms threshold) gets several chances to tick.
-        for ($i = 1; $i <= 13; $i++) {
+        // Feed a frame every ~20ms for ~1.6s: far inside the 500ms heartbeat interval, so even a pause of 0.8 s
+        // on a slow CI leaves a gap shorter than the watchdog's 1 s threshold (2 x 500ms), while the watchdog
+        // gets three chances to tick.
+        for ($i = 1; $i <= 80; $i++) {
             $transport->pushReadChunk("MSG deliver.dur 2 \$JS.ACK.ORDERS.DUR.$i.$i.$i.0.0 1\r\nx\r\n");
             $client->processIncoming()->await();
             delay(0.02);
@@ -9753,7 +9788,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $sid = $client->jetStream()->subscribePushConsumer(
@@ -9783,7 +9818,7 @@ final class JetStreamContextTest extends TestCase
      */
     public function testPushConsumerWatchdogArmsOnlyForPositiveIntegerIdleHeartbeat(): void
     {
-        $createReply = static fn (string $name): string => sprintf(
+        $createReply = static fn(string $name): string => sprintf(
             '{"stream_name":"ORDERS","name":"%s","config":{"deliver_subject":"deliver.%s","ack_policy":"none"}}',
             $name,
             strtolower($name),
@@ -9798,9 +9833,8 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.b 2 %d\r\n%s\r\n", strlen($createReply('D1')), $createReply('D1')),
         ]);
 
-        $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
-        $before = self::countRepeatTimers();
 
         // Zero: not a positive interval -> no watchdog.
         $sidZero = $client->jetStream()->subscribePushConsumer(
@@ -9811,7 +9845,7 @@ final class JetStreamContextTest extends TestCase
             null,
             ['idle_heartbeat' => 0],
         )->await();
-        self::assertSame($before, self::countRepeatTimers(), 'idle_heartbeat=0 must not arm a watchdog timer');
+        self::assertSame(0, $this->countRepeatTimers(), 'idle_heartbeat=0 must not arm a watchdog timer');
 
         // Numeric string: not an int -> no watchdog, and no type error from the extractor.
         $sidString = $client->jetStream()->subscribePushConsumer(
@@ -9822,7 +9856,7 @@ final class JetStreamContextTest extends TestCase
             null,
             ['idle_heartbeat' => '40000000'],
         )->await();
-        self::assertSame($before, self::countRepeatTimers(), 'a string idle_heartbeat must not arm a watchdog timer');
+        self::assertSame(0, $this->countRepeatTimers(), 'a string idle_heartbeat must not arm a watchdog timer');
 
         self::assertGreaterThan(0, $sidZero);
         self::assertGreaterThan($sidZero, $sidString);
@@ -9845,9 +9879,8 @@ final class JetStreamContextTest extends TestCase
             sprintf("MSG _INBOX.a 1 %d\r\n%s\r\n", strlen($createReply), $createReply),
         ]);
 
-        $client = new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
-        $before = self::countRepeatTimers();
 
         $sid = $client->jetStream()->subscribeEphemeralPushConsumer(
             'ORDERS',
@@ -9857,7 +9890,7 @@ final class JetStreamContextTest extends TestCase
             ['idle_heartbeat' => 50_000_000],
         )->await();
 
-        self::assertSame($before + 1, self::countRepeatTimers(), 'an idle_heartbeat ephemeral push subscription must arm exactly one watchdog timer');
+        self::assertSame(1, $this->countRepeatTimers(), 'an idle_heartbeat ephemeral push subscription must arm exactly one watchdog timer');
 
         $client->unsubscribe($sid)->await();
         $client->disconnect()->await();
@@ -9889,7 +9922,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $received = [];
@@ -9935,21 +9968,21 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     sprintf("HMSG deliver.ord $sid %d %d\r\n%s\r\n", strlen($terminal), strlen($terminal), $terminal),
                 ],
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $client->jetStream()->subscribeOrderedConsumer('EVENTS', static function (): void {}, 'events.>')->await();
@@ -9981,14 +10014,14 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD2'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     // In-order msg at STREAM seq 7 -> the resume cursor.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.7.1.0.0 2\r\nm1\r\n",
                     // Malformed stream-seq token "0" (consumer seq 2, in order): cursor must stay 7.
@@ -9999,7 +10032,7 @@ final class JetStreamContextTest extends TestCase
             ],
         );
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 1000), $transport));
         $client->connect()->await();
 
         $received = [];
@@ -10036,18 +10069,18 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
         );
         // Park the stop's UNSUB write: the stop latch is set, but the deliver subscription is
         // still registered while the write is in flight - the race window for a late recreate.
         $transport->wedgeOnWriteContaining = 'UNSUB';
 
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 300, pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
 
         $js = $client->jetStream();
@@ -10103,7 +10136,7 @@ final class JetStreamContextTest extends TestCase
         $options = new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 100, errorListener: static function (\Throwable $e) use (&$errors): void {
             $errors[] = $e;
         });
-        $client = new NatsClient($options, $transport);
+        $client = $this->own(new NatsClient($options, $transport));
         $client->connect()->await();
 
         $connection = (new \ReflectionProperty(NatsClient::class, 'connection'))->getValue($client);
@@ -10113,16 +10146,16 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // Recreate attempts are orchestrated by the wrapper below (2nd/3rd CREATE writes).
             ],
             onDelete: [
                 // The episode's initial delete of ORD1 is ANSWERED but - scenario-wise - never took
                 // effect server-side: ORD1 survives and resumes delivering after the reconnect.
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (cseq 3, expected 2) -> recreate episode starts.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -10196,7 +10229,7 @@ final class JetStreamContextTest extends TestCase
         while (($createWrites < 3 || $watchdogState->recreateInFlight) && hrtime(true) < $deadlineNs) {
             try {
                 $client->processIncoming(new \Amp\TimeoutCancellation(0.05))->await();
-            } catch (\Amp\CancelledException | NatsException) {
+            } catch (\Amp\CancelledException|NatsException) {
                 // Idle slice, or a fail-fast read while the connection is not Open.
             }
         }
@@ -10256,7 +10289,7 @@ final class JetStreamContextTest extends TestCase
         $this->orderedConsumerServer(
             $transport,
             onCreate: [
-                static fn (string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
+                static fn(string $rt): array => [self::muxMsg($rt, $createReply('ORD1'))],
                 // The recreate's create: WITHHOLD the reply (park), remember where to send it later.
                 static function (string $rt) use (&$parkedReplyTo): array {
                     $parkedReplyTo = $rt;
@@ -10265,12 +10298,12 @@ final class JetStreamContextTest extends TestCase
                 },
             ],
             onDelete: [
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
-                static fn (string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
+                static fn(string $rt): array => [self::muxMsg($rt, $deleteReply)],
             ],
             deliverEpochs: [
-                static fn (int $sid): array => [
+                static fn(int $sid): array => [
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.1.1.1.0.0 4\r\nmsg1\r\n",
                     // Gap (cseq 3, expected 2) -> the recreate starts and parks in its create await.
                     "MSG deliver.ord $sid \$JS.ACK.EVENTS.ORD1.3.4.3.0.0 4\r\nbad3\r\n",
@@ -10280,9 +10313,8 @@ final class JetStreamContextTest extends TestCase
 
         // Long request timeout keeps the create parked for the whole orchestration; a short idle
         // heartbeat makes the watchdog tick (and its defunct discovery) prompt.
-        $client = new NatsClient(new NatsOptions(requestTimeoutMs: 2000, pingIntervalSeconds: 0), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(requestTimeoutMs: 2000, pingIntervalSeconds: 0), $transport));
         $client->connect()->await();
-        $before = self::countRepeatTimers();
 
         $js = $client->jetStream();
         $received = [];
@@ -10338,7 +10370,7 @@ final class JetStreamContextTest extends TestCase
         // (latching the stop + best-effort delete), the delayed release resumes the create - and
         // the resumed recreate must tear the fresh instance down instead of installing it.
         $deadlineNs = hrtime(true) + 5_000_000_000;
-        while (strpos(implode('', $transport->writes), '$JS.API.CONSUMER.DELETE.EVENTS.ORDX') === false && hrtime(true) < $deadlineNs) {
+        while (!str_contains(implode('', $transport->writes), '$JS.API.CONSUMER.DELETE.EVENTS.ORDX')   && hrtime(true) < $deadlineNs) {
             try {
                 $client->processIncoming(new \Amp\TimeoutCancellation(0.1))->await();
             } catch (\Amp\CancelledException) {
@@ -10351,7 +10383,7 @@ final class JetStreamContextTest extends TestCase
         self::assertIsInt($freshSid);
         $defunctDeletes = array_values(array_filter(
             $transport->writes,
-            static fn (string $w): bool => str_contains($w, '$JS.API.CONSUMER.DELETE.EVENTS.ord-'),
+            static fn(string $w): bool => str_contains($w, '$JS.API.CONSUMER.DELETE.EVENTS.ord-'),
         ));
         self::assertNotSame([], $defunctDeletes, 'precondition: the defunct tick must have best-effort deleted the adopted candidate');
 
@@ -10359,7 +10391,7 @@ final class JetStreamContextTest extends TestCase
         // Teardown, not install: the fresh inbox is released and the just-created instance deleted.
         self::assertStringContainsString("UNSUB {$freshSid}\r\n", $written, 'the never-installed fresh inbox must be unsubscribed');
         self::assertStringContainsString('$JS.API.CONSUMER.DELETE.EVENTS.ORDX', $written, 'the created-but-not-installed instance must be best-effort deleted');
-        self::assertSame($before, self::countRepeatTimers(), 'no watchdog may be re-armed for a defunct consumer');
+        self::assertSame(0, $this->countRepeatTimers(), 'no watchdog may be re-armed for a defunct consumer');
 
         // And nothing may deliver through the fresh inbox: a post-release frame on it is inert.
         $transport->pushReadChunk("MSG deliver.fresh {$freshSid} \$JS.ACK.EVENTS.ORDX.1.9.1.0.0 5\r\nnope!\r\n");

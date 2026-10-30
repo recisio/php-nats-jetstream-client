@@ -16,6 +16,7 @@ use IDCT\NATS\Protocol\ProtocolFrame;
 use IDCT\NATS\Protocol\ServerInfo;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FlakyTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
 
@@ -24,9 +25,19 @@ use function Amp\delay;
 
 final class NatsConnectionInternalsTest extends TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly, so that the
+        // lifetime tests still see what they drop collected: the shutdown closes what is left and checks that nothing
+        // goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     public function testNormalizeDsnConvertsNatsScheme(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $normalized = $this->invokePrivate($connection, 'normalizeDsn', 'nats://127.0.0.1:4222');
         $passthrough = $this->invokePrivate($connection, 'normalizeDsn', 'tls://example.org:4443');
@@ -37,22 +48,22 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testNextServerRoundRobinAndFallback(): void
     {
-        $rotating = new NatsConnection(
+        $rotating = $this->own(new NatsConnection(
             new NatsOptions(servers: ['nats://a:4222', 'nats://b:4222']),
             new FakeTransport(),
-        );
+        ));
 
         self::assertSame('nats://a:4222', $this->invokePrivate($rotating, 'nextServer'));
         self::assertSame('nats://b:4222', $this->invokePrivate($rotating, 'nextServer'));
         self::assertSame('nats://a:4222', $this->invokePrivate($rotating, 'nextServer'));
 
-        $fallback = new NatsConnection(new NatsOptions(servers: []), new FakeTransport());
+        $fallback = $this->own(new NatsConnection(new NatsOptions(servers: []), new FakeTransport()));
         self::assertSame('nats://127.0.0.1:4222', $this->invokePrivate($fallback, 'nextServer'));
     }
 
     public function testValidateSubjectPrivateBranches(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Wildcards must occupy an entire token');
@@ -61,7 +72,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testValidateSubjectRejectsGreaterThanMiddleToken(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(ProtocolException::class);
         $this->expectExceptionMessage('Wildcard ">" must be the last token');
@@ -70,7 +81,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testIsNoRespondersStatusPrivateChecks(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $noHeaders = new NatsMessage('s', 1, null, '', null);
         self::assertFalse($this->invokePrivate($connection, 'isNoRespondersStatus', $noHeaders));
@@ -84,7 +95,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testExtractHeadersAndPayloadPrivatePaths(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $msgFrame = new ProtocolFrame(type: ProtocolFrameType::Msg, payload: 'abc');
         [$rawHeaders, $payload] = $this->invokePrivate($connection, 'extractHeadersAndPayload', $msgFrame);
@@ -104,7 +115,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testRecoverConnectionDisabledThrowsImmediately(): void
     {
-        $connection = new NatsConnection(new NatsOptions(reconnectEnabled: false), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(reconnectEnabled: false), new FakeTransport()));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Reconnect is disabled');
@@ -124,7 +135,7 @@ final class NatsConnectionInternalsTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 2,
@@ -132,7 +143,7 @@ final class NatsConnectionInternalsTest extends TestCase
                 reconnectJitterMs: 0,
             ),
             $transport,
-        );
+        ));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Reconnect attempts exhausted');
@@ -147,7 +158,7 @@ final class NatsConnectionInternalsTest extends TestCase
     public function testConnectReturnsImmediatelyWhenAlreadyOpen(): void
     {
         $transport = new FakeTransport();
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $this->setPrivate($connection, 'state', ConnectionState::Open);
 
         $connection->connect()->await();
@@ -158,7 +169,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitServerInfoThrowsWhenInfoNeverArrives(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport(["PONG\r\n", "+OK\r\n", "PING\r\n", '', '', '', '', '']));
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport(["PONG\r\n", "+OK\r\n", "PING\r\n", '', '', '', '', ''])));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Expected INFO during connect');
@@ -167,7 +178,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitInitialPongThrowsWhenPongNeverArrives(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport(["+OK\r\n", "PING\r\n", '', 'INFO {}', '', '', '', '']));
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport(["+OK\r\n", "PING\r\n", '', 'INFO {}', '', '', '', ''])));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Expected PONG after CONNECT');
@@ -179,7 +190,7 @@ final class NatsConnectionInternalsTest extends TestCase
         $transport = new FakeTransport([
             "+OK\r\nPING\r\nPONG\r\n",
         ]);
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
 
         $this->invokePrivate($connection, 'awaitInitialPong');
 
@@ -188,15 +199,20 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitInitialPongThrowsOnParsedErrFrame(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport([
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport([
             "-ERR 'boom'\r\n",
-        ]));
+        ])));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Server error during connect');
         $this->invokePrivate($connection, 'awaitInitialPong');
     }
 
+    /**
+     * The twelve empty reads before INFO are polled through. The connect timeout, which is also the handshake's
+     * deadline, is two seconds, so that a slow runner cannot end the wait before the polls run out; the sixteen
+     * polls a 100 ms timeout still gets are checked on the budget itself.
+     */
     public function testAwaitServerInfoAllowsMoreThanEightPollsBeforeInfoArrives(): void
     {
         $queue = array_merge(
@@ -204,21 +220,24 @@ final class NatsConnectionInternalsTest extends TestCase
             ["INFO {\"server_id\":\"S9\",\"server_name\":\"n9\",\"version\":\"2.12.0\",\"jetstream\":true,\"max_payload\":1048576,\"headers\":true}\r\n"],
         );
 
-        $connection = new NatsConnection(new NatsOptions(connectTimeoutMs: 100), new FakeTransport($queue));
+        $connection = $this->own(new NatsConnection(new NatsOptions(connectTimeoutMs: 2_000), new FakeTransport($queue)));
 
         $info = $this->invokePrivate($connection, 'awaitServerInfo');
 
         self::assertSame('S9', $info->serverId);
+        self::assertSame(16, $this->invokePrivate($this->own(new NatsConnection(new NatsOptions(connectTimeoutMs: 100), new FakeTransport())), 'handshakePollBudget'));
     }
 
+    /** As above, for the PONG after CONNECT behind twelve +OKs. */
     public function testAwaitInitialPongAllowsMoreThanEightPollsBeforePongArrives(): void
     {
         $queue = array_merge(array_fill(0, 12, "+OK\r\n"), ["PONG\r\n"]);
 
-        $connection = new NatsConnection(new NatsOptions(connectTimeoutMs: 100), new FakeTransport($queue));
+        $connection = $this->own(new NatsConnection(new NatsOptions(connectTimeoutMs: 2_000), new FakeTransport($queue)));
 
         // awaitInitialPong() returns the frames coalesced behind the PONG (#157); none here.
         self::assertSame([], $this->invokePrivate($connection, 'awaitInitialPong'));
+        self::assertSame(16, $this->invokePrivate($this->own(new NatsConnection(new NatsOptions(connectTimeoutMs: 100), new FakeTransport())), 'handshakePollBudget'));
     }
 
     public function testAwaitServerInfoRespondsToPingBeforeInfo(): void
@@ -227,7 +246,7 @@ final class NatsConnectionInternalsTest extends TestCase
             "PING\r\n",
             'INFO {"server_id":"S4","server_name":"n4","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
         ]);
-        $connection = new NatsConnection(new NatsOptions(connectTimeoutMs: 100), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(connectTimeoutMs: 100), $transport));
 
         $info = $this->invokePrivate($connection, 'awaitServerInfo');
 
@@ -237,9 +256,9 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitServerInfoParsesInfoLine(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport([
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport([
             'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n",
-        ]));
+        ])));
 
         $info = $this->invokePrivate($connection, 'awaitServerInfo');
 
@@ -249,9 +268,9 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitServerInfoParsesInfoFrame(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport([
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport([
             "INFO {\"server_id\":\"S2\",\"server_name\":\"n2\",\"version\":\"2.12.0\",\"jetstream\":true,\"max_payload\":1048576,\"headers\":true}\r\n",
-        ]));
+        ])));
 
         $info = $this->invokePrivate($connection, 'awaitServerInfo');
 
@@ -261,9 +280,9 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testAwaitInitialPongThrowsOnErrLine(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport([
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport([
             "-ERR Permissions Violation\r\n",
-        ]));
+        ])));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Server error during connect');
@@ -272,7 +291,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testHandleFramePongResetsOutstandingPingAndCompletesOldestPongSlot(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
         $this->setPrivate($connection, 'outstandingPings', 5);
         $first = new DeferredFuture();
         $first->getFuture()->ignore();
@@ -280,7 +299,7 @@ final class NatsConnectionInternalsTest extends TestCase
         $second->getFuture()->ignore();
         $this->setPrivate($connection, 'pongWaiters', [$first, $second]);
 
-        $this->invokePrivate($connection, 'handleFrame', new ProtocolFrame(type: ProtocolFrameType::Pong));
+        $this->handleFrame($connection, new ProtocolFrame(type: ProtocolFrameType::Pong));
 
         // Any PONG resets the liveness watchdog, but flush completion is FIFO per PING (#117):
         // the oldest slot completes and later slots keep waiting for their own pongs.
@@ -292,18 +311,18 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testHandleFrameErrThrowsConnectionException(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Server sent error frame');
-        $this->invokePrivate($connection, 'handleFrame', new ProtocolFrame(type: ProtocolFrameType::Err, error: 'boom'));
+        $this->handleFrame($connection, new ProtocolFrame(type: ProtocolFrameType::Err, error: 'boom'));
     }
 
     public function testHandleFrameInfoUpdatesServerInfo(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
-        $this->invokePrivate($connection, 'handleFrame', new ProtocolFrame(
+        $this->handleFrame($connection, new ProtocolFrame(
             type: ProtocolFrameType::Info,
             infoPayload: '{"server_id":"S2","server_name":"n2","version":"2.12.1","jetstream":true,"max_payload":2048,"headers":true}',
         ));
@@ -316,22 +335,26 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testHandleFrameRecoverableErrDoesNotThrow(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
         $this->setPrivate($connection, 'state', ConnectionState::Open);
 
-        $this->invokePrivate($connection, 'handleFrame', new ProtocolFrame(
+        $reports = $this->handleFrame($connection, new ProtocolFrame(
             type: ProtocolFrameType::Err,
             error: "'Permissions Violation for Publish to updates'",
         ));
 
         self::assertSame(ConnectionState::Open, $connection->state());
+        // Reported once the chunk is queued (dispatchFrames), at error level.
+        self::assertCount(1, $reports);
+        self::assertSame("Server sent recoverable error frame: 'Permissions Violation for Publish to updates'", $reports[0][0]->getMessage());
+        self::assertSame('error', $reports[0][1]);
     }
 
     public function testHandleFrameIgnoresUnknownSubscriptionSid(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
-        $this->invokePrivate($connection, 'handleFrame', new ProtocolFrame(
+        $this->handleFrame($connection, new ProtocolFrame(
             type: ProtocolFrameType::Msg,
             subject: 'updates',
             sid: 42,
@@ -343,7 +366,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testDrainAllPendingDeliversBufferedMessagesInOrder(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         $queue = new \SplQueue();
         $queue->enqueue(new NatsMessage('subj', 1, null, 'a'));
@@ -366,7 +389,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testEnforceMaxPayloadAllowsUnknownServerInfoAndThrowsWhenExceeded(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         // No server info yet: no payload enforcement should happen.
         $this->invokePrivate($connection, 'enforceMaxPayload', 10);
@@ -388,14 +411,15 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testDrainPendingForSidNoOpWhenStateMissing(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
-        self::assertNull($this->invokePrivate($connection, 'drainPendingForSid', 101));
+        // Nothing queued for the sid: no delivery, so the count of messages handed to a handler is zero (#179).
+        self::assertSame(0, $this->invokePrivate($connection, 'drainPendingForSid', 101));
     }
 
     public function testIsNoRespondersStatusHandlesEmptyRawHeaderString(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
         $message = new NatsMessage('s', 1, null, '', '');
 
         self::assertFalse($this->invokePrivate($connection, 'isNoRespondersStatus', $message));
@@ -403,7 +427,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testStartPingTimerCancelsWhenConnectionStateIsNotOpen(): void
     {
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0.05), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0.05), new FakeTransport()));
         $this->setPrivate($connection, 'state', ConnectionState::Closed);
 
         $this->invokePrivate($connection, 'startPingTimer');
@@ -445,14 +469,14 @@ final class NatsConnectionInternalsTest extends TestCase
             }
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 pingIntervalSeconds: 0.05,
                 maxPingsOut: 3,
                 reconnectEnabled: false,
             ),
             $transport,
-        );
+        ));
 
         $this->setPrivate($connection, 'state', ConnectionState::Open);
         $this->invokePrivate($connection, 'startPingTimer');
@@ -464,7 +488,7 @@ final class NatsConnectionInternalsTest extends TestCase
 
     public function testDropSubscriptionStateRemovesEntries(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
         $sid = 5;
 
         $this->setPrivate($connection, 'subscriptions', [
@@ -484,10 +508,56 @@ final class NatsConnectionInternalsTest extends TestCase
         self::assertSame([], $this->getPrivate($connection, 'pendingMessages'));
     }
 
+    /**
+     * An operation waiting for a reconnect waits again when, by the time it resumes, another reconnect
+     * is in flight and the connection is still not open. (Through the public API the waiter always
+     * resumes before a follow-up reconnect can start, so the state is set up directly.)
+     */
+    public function testAwaitOpenConnectionWaitsAgainWhenAnotherReconnectFollows(): void
+    {
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
+        /** @var DeferredFuture<void> $first */
+        $first = new DeferredFuture();
+        /** @var DeferredFuture<void> $second */
+        $second = new DeferredFuture();
+        $this->setPrivate($connection, 'state', ConnectionState::Connecting);
+        $this->setPrivate($connection, 'reconnecting', $first);
+
+        $waiter = async(function () use ($connection): void {
+            $this->invokePrivate($connection, 'awaitOpenConnection', null, false);
+        });
+        delay(0.01);
+
+        // The first reconnect ends with the next one already in flight.
+        $this->setPrivate($connection, 'reconnecting', $second);
+        $first->complete();
+        delay(0.01);
+        self::assertFalse($waiter->isComplete(), 'waiting for the second reconnect');
+
+        $this->setPrivate($connection, 'state', ConnectionState::Open);
+        $this->setPrivate($connection, 'reconnecting', null);
+        $second->complete();
+        $waiter->await();
+    }
+
     private function invokePrivate(object $object, string $method, mixed ...$args): mixed
     {
         $ref = new \ReflectionMethod($object, $method);
         return $ref->invoke($object, ...$args);
+    }
+
+    /**
+     * Handles one frame the way dispatchFrames() does, and returns what the frame reported, with its log
+     * level.
+     *
+     * @return list<array{\Throwable, string}>
+     */
+    private function handleFrame(NatsConnection $connection, ProtocolFrame $frame): array
+    {
+        $reports = [];
+        (new \ReflectionMethod($connection, 'handleFrame'))->invokeArgs($connection, [$frame, &$reports]);
+
+        return $reports;
     }
 
     private function setPrivate(object $object, string $property, mixed $value): void

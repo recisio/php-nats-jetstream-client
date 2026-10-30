@@ -23,7 +23,7 @@ final class ProtocolCodec
      * from-source checkout). Bump to the current major.minor as part of the release checklist so a
      * source build does not advertise a stale version in the server's connz/monitoring.
      */
-    private const FALLBACK_CLIENT_VERSION = '2.4.0';
+    private const FALLBACK_CLIENT_VERSION = '2.27.2';
 
     /**
      * Builds the CONNECT frame payload for the initial client handshake.
@@ -120,7 +120,7 @@ final class ProtocolCodec
     {
         if (class_exists(InstalledVersions::class)) {
             try {
-                $version = InstalledVersions::getPrettyVersion('recisio/php-nats-jetstream-client');
+                $version = InstalledVersions::getPrettyVersion('idct/php-nats-jetstream-client');
                 if ($version !== null && $version !== '') {
                     return $version;
                 }

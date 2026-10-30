@@ -60,11 +60,21 @@ final class NatsOptions
       * @param (\Closure(\IDCT\NATS\Connection\Enum\ConnectionEvent,?\Throwable):void)|null $connectionListener
       *        Optional callback invoked on connection lifecycle transitions (connected, disconnected,
       *        reconnected, closed, discovered-servers, lame-duck). Exceptions thrown by the listener are
-      *        swallowed so a faulty handler cannot break the connection runtime.
+      *        swallowed so a faulty handler cannot break the connection runtime. A reconnect announces the
+      *        new connection (Reconnected, or Connected when it completes a failed initial connect) once it
+      *        is over: operations waiting for the reconnect resume without waiting for the listener, and an
+      *        operation the listener calls that finds the new connection gone already reconnects it again,
+      *        the listener hearing Disconnected and Reconnected, or Closed, while its call is still running.
+      *        Such an announcement made while another Connected or Reconnected call runs is delivered from the
+      *        event loop, and the messages the reconnect read can reach their handlers before it. Either way the
+      *        listener is told of a connection only while it is still the open one: one closed, being closed,
+      *        replaced or lost before it could be told is not announced, and when it was lost, neither is its
+      *        loss, though a Closed still is.
       * @param (\Closure(\Throwable):void)|null $errorListener Optional callback invoked on asynchronous
-      *        errors that do not surface to a specific caller: slow-consumer drops, recoverable server
-      *        `-ERR` frames, and transport read failures that trigger reconnect. Exceptions thrown by the
-      *        listener are swallowed.
+      *        errors that do not surface to a specific caller, such as slow-consumer drops, server `-ERR`
+      *        frames, a handler that throws while a drain, a service's run() loop or an operation's read
+      *        delivers to it ({@see $handlerErrorsFailOperations}), and transport read failures that trigger
+      *        reconnect. Exceptions thrown by the listener are swallowed.
       * @param (\Closure():?string)|null $jwtProvider Optional callback returning the user JWT, invoked on
       *        every (re)connect. Takes precedence over the static {@see $jwt} when set, so short-lived or
       *        rotated JWTs are picked up on reconnect without rebuilding the client. Pair with a
@@ -96,6 +106,66 @@ final class NatsOptions
       *        the per-chunk syscall + fiber-spawn + parser-push overhead for large payloads (e.g. an
       *        ObjectStore download) without forcing larger reads: the socket still returns only what is
       *        available, so small messages are unaffected (#119). Must be at least 1.
+      * @param bool $waitForReconnect While a reconnect is in flight, operations that need an open
+      *        connection - request()/requestWithHeaders()/requestMany(), subscribe(), flush(), rtt(),
+      *        processIncoming()/readIncoming(), drain() and drainSubscription() - wait for it within their
+      *        own timeout (or cancellation) instead of failing at once with "Connection is not open", and a
+      *        publish buffered during the reconnect yields one event-loop tick. The wait is also what lets
+      *        a synchronous application drive the reconnect: the reconnect only advances while something
+      *        waits on the event loop, so a caller that only ever issued operations failing on the spot
+      *        would starve it forever. An operation whose own read, control write or request PUB/HPUB
+      *        write is the first to notice a lost connection, or whose read brings a lame-duck INFO
+      *        that fails the connection over,
+      *        starts the reconnect and waits for it the same way, within its own timeout (#178, #191, #215).
+      *        Requests never enter the reconnect publish buffer; a retry checks the same budget and
+      *        reply inbox, and a transport write already in progress may finish after the request ends.
+      *        Batch fetch setup uses its expiry plus a second; Direct Get renews that interval on replies,
+      *        including during PUB backpressure. Their failed writes obey this flag too (#188). A plain
+      *        publish (publish(), publishWithHeaders(), a JetStream ack()/nak()/term(), respond()) whose
+      *        write is the first to notice the loss waits for neither setting: its frame goes to the
+      *        reconnect buffer, the publish resolves once it is accepted there, and the reconnect it starts
+      *        runs on its own (#244); with `true` the publish then yields one tick, as one buffered during
+      *        the reconnect does. To wait for the frame to go out, call flush(). Your
+      *        own processIncoming()/readIncoming(), a serving loop's read and the heartbeat run the reconnect
+      *        themselves and wait for all of it. Set `false` to fail fast instead (the behavior before this
+      *        option existed): an operation whose own read or write noticed the loss, or whose read brought
+      *        the lame-duck INFO, then fails at once with "Connection is not open" as well, unless what it
+      *        waits for has come by then, and a requestMany() or a JetStream fetchBatch() returns what it
+      *        has received instead; the reconnect it started advances only while something awaits on the
+      *        event loop; drain() closes the connection and throws rather than leaving the reconnect to
+      *        reopen a connection being shut down, and drainSubscription() delivers what already arrived
+      *        and removes the subscription at once.
+      * @param bool $slowConsumerErrorsFailOperations Under {@see SlowConsumerPolicy::Error}: whether a full
+      *        subscription queue fails whichever operation's read ran into it. Operations read the socket
+      *        themselves while they wait for a result of their own - request()/requestMany(), flush(),
+      *        rtt(), JetStream fetches, directGetBatch() and consumePipelined(), Key/Value keys() and
+      *        history(), SubscriptionQueue polling - and so pick up messages for every subscription. By
+      *        default an overflow of another subscription is reported through the error listener and the
+      *        operation completes: that subscriber fell behind, the operation did not (an overflow of the
+      *        operation's own subscription still fails it). Set `true` for the behavior before this
+      *        option existed: any overflow fails the operation that read it, even a request whose reply
+      *        had already arrived - and an overflow of a SubscriptionQueue's polling buffer that is thrown
+      *        is reported as well, as it was then, so that code swallowing the failure cannot lose it.
+      *        processIncoming() and readIncoming() throw an overflow either way. Service::run(), which has
+      *        no caller to fail, the heartbeat, a reconnect and drain()/drainSubscription() report it
+      *        either way. A SubscriptionQueue's own polling buffer follows the same rules.
+      * @param bool $handlerErrorsFailOperations Whether a subscription handler that throws fails whichever
+      *        operation's read delivered to it. Operations read the socket themselves while they wait for a
+      *        result of their own (the same ones as above) and so deliver messages for every subscription.
+      *        By default the exception of another subscription's handler is reported through the error
+      *        listener, the rest of the read is still delivered, and the operation completes: that handler
+      *        failed, the operation did not. A request() made inside a service endpoint, for instance, no
+      *        longer fails with it, so the endpoint no longer answers with a HANDLER_ERROR for it. A handler
+      *        of the operation's own subscription that throws still fails it. Set `true` for the behavior
+      *        before this option existed: any handler's exception fails the operation whose read delivered
+      *        to it, even a request whose reply had already arrived, and a handler's CancelledException can
+      *        end an operation's wait early, as it did then, unless the operation's own result arrived in
+      *        the same read behind it: the read delivers it first and the operation completes with it. The
+      *        read still delivers the other subscriptions' messages behind the failing one before it throws;
+      *        only the failing subscription's later messages wait for your next read, or the next read that
+      *        receives anything (#177, #186). processIncoming() and readIncoming() throw a handler's exception
+      *        either way, after the same delivery. Service::run(), the heartbeat, a reconnect and
+      *        drain()/drainSubscription() report it either way.
      */
     public function __construct(
         public readonly array $servers = [self::DEFAULT_SERVER],
@@ -141,6 +211,9 @@ final class NatsOptions
         public readonly bool $webSocketCompression = false,
         public readonly ?LoggerInterface $logger = null,
         public readonly int $readChunkSizeBytes = 131_072,
+        public readonly bool $waitForReconnect = true,
+        public readonly bool $slowConsumerErrorsFailOperations = false,
+        public readonly bool $handlerErrorsFailOperations = false,
     ) {
         // Fail fast on values that have no valid meaning, rather than misbehaving later. Note that
         // pingIntervalSeconds <= 0 (disables the heartbeat) and an empty servers list (falls back to

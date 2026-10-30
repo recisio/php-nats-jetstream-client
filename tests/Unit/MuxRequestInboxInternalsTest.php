@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Unit;
 
+use Amp\DeferredCancellation;
 use IDCT\NATS\Connection\Enum\SlowConsumerPolicy;
 use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -20,9 +22,18 @@ use PHPUnit\Framework\TestCase;
  */
 final class MuxRequestInboxInternalsTest extends TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     private function connection(?NatsOptions $options = null): NatsConnection
     {
-        return new NatsConnection($options ?? new NatsOptions(), new FakeTransport());
+        return $this->own(new NatsConnection($options ?? new NatsOptions(), new FakeTransport()));
     }
 
     private function message(string $subject): NatsMessage
@@ -38,8 +49,12 @@ final class MuxRequestInboxInternalsTest extends TestCase
 
         $aCalls = 0;
         $bCalls = 0;
-        $this->invokePrivate($connection, 'registerMuxWaiter', 'a', function (NatsMessage $m) use (&$aCalls): void { $aCalls++; });
-        $this->invokePrivate($connection, 'registerMuxWaiter', 'b', function (NatsMessage $m) use (&$bCalls): void { $bCalls++; });
+        $this->invokePrivate($connection, 'registerMuxWaiter', 'a', function (NatsMessage $m) use (&$aCalls): void {
+            $aCalls++;
+        }, new DeferredCancellation());
+        $this->invokePrivate($connection, 'registerMuxWaiter', 'b', function (NatsMessage $m) use (&$bCalls): void {
+            $bCalls++;
+        }, new DeferredCancellation());
 
         $this->invokePrivate($connection, 'dispatchMuxReply', $this->message('_INBOX.base.a'));
 
@@ -54,7 +69,9 @@ final class MuxRequestInboxInternalsTest extends TestCase
         $this->setPrivate($connection, 'muxBase', '_INBOX.base');
 
         $calls = 0;
-        $this->invokePrivate($connection, 'registerMuxWaiter', 'a', function (NatsMessage $m) use (&$calls): void { $calls++; });
+        $this->invokePrivate($connection, 'registerMuxWaiter', 'a', function (NatsMessage $m) use (&$calls): void {
+            $calls++;
+        }, new DeferredCancellation());
         $this->invokePrivate($connection, 'removeMuxWaiter', 'a');
 
         // Late/duplicate reply for the now-removed token 'a', and a reply for a never-registered token.
@@ -63,6 +80,7 @@ final class MuxRequestInboxInternalsTest extends TestCase
 
         self::assertSame(0, $calls);
         self::assertSame([], $this->getPrivate($connection, 'muxWaiters'));
+        self::assertSame([], $this->getPrivate($connection, 'muxWakes'), 'the wake-up goes with the waiter (#180)');
     }
 
     /** A reply addressed to a DIFFERENT base (wrong prefix) never reaches a waiter (the strncmp guard). */
@@ -72,7 +90,9 @@ final class MuxRequestInboxInternalsTest extends TestCase
         $this->setPrivate($connection, 'muxBase', '_INBOX.mine');
 
         $calls = 0;
-        $this->invokePrivate($connection, 'registerMuxWaiter', 'a', function (NatsMessage $m) use (&$calls): void { $calls++; });
+        $this->invokePrivate($connection, 'registerMuxWaiter', 'a', function (NatsMessage $m) use (&$calls): void {
+            $calls++;
+        }, new DeferredCancellation());
 
         // Foreign base of the SAME length as muxBase, so the token-strip (strlen(base)+1) lines up on the
         // 'a' suffix: WITHOUT the prefix guard the reply would be mis-delivered to waiter 'a'; WITH it the
@@ -105,7 +125,7 @@ final class MuxRequestInboxInternalsTest extends TestCase
         $this->setPrivate($connection, 'unboundedSids', [$sid => true]);
 
         for ($i = 0; $i < 5; $i++) {
-            $this->invokePrivate($connection, 'enqueueMessage', $sid, $this->message('_INBOX.base.a'));
+            $this->enqueueMessage($connection, $sid, $this->message('_INBOX.base.a'));
         }
 
         /** @var array<int, \SplQueue<NatsMessage>> $pending */
@@ -128,7 +148,7 @@ final class MuxRequestInboxInternalsTest extends TestCase
 
         $this->expectException(ConnectionException::class);
         $this->expectExceptionMessage('Subscription queue overflow for sid ' . $sid);
-        $this->invokePrivate($connection, 'enqueueMessage', $sid, $this->message('c'));
+        $this->enqueueMessage($connection, $sid, $this->message('c'));
     }
 
     /** A terminal close resets all mux state so the next connect() starts a fresh epoch. */
@@ -138,6 +158,8 @@ final class MuxRequestInboxInternalsTest extends TestCase
         $this->setPrivate($connection, 'muxBase', '_INBOX.old');
         $this->setPrivate($connection, 'muxSid', 7);
         $this->setPrivate($connection, 'muxWaiters', ['a' => static function (): void {}]);
+        $wake = new DeferredCancellation();
+        $this->setPrivate($connection, 'muxWakes', ['a' => $wake]);
         $this->setPrivate($connection, 'unboundedSids', [7 => true]);
 
         $this->invokePrivate($connection, 'releaseRuntimeState');
@@ -145,6 +167,8 @@ final class MuxRequestInboxInternalsTest extends TestCase
         self::assertNull($this->getPrivate($connection, 'muxBase'));
         self::assertNull($this->getPrivate($connection, 'muxSid'));
         self::assertSame([], $this->getPrivate($connection, 'muxWaiters'));
+        self::assertSame([], $this->getPrivate($connection, 'muxWakes'), 'the wake-ups go with the waiters (#180)');
+        self::assertFalse($wake->isCancelled(), 'a terminal close drops the wake-ups without firing them: the reads fail with the closed connection, and a fired one would make a read return at once');
         self::assertSame([], $this->getPrivate($connection, 'unboundedSids'));
     }
 
@@ -159,11 +183,92 @@ final class MuxRequestInboxInternalsTest extends TestCase
         self::assertSame([], $this->getPrivate($connection, 'unboundedSids'));
     }
 
+    /**
+     * The set-up of the inbox writes every UNSUB it owes for muxes dropped before, in order, ahead of its SUB and in the
+     * same write, taken as the write is made (#213): two owed sids, 7 and 8, go out as "UNSUB 7", "UNSUB 8", then the
+     * SUB and its PING, and nothing is owed afterwards.
+     */
+    public function testTheSetUpWritesEveryOwedUnsubscribeAheadOfItsSub(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->onWrite = static function (string $bytes): array {
+            $head = strtok($bytes, "\r\n");
+            if ($head === false || !str_starts_with($head, 'PUB svc.echo ')) {
+                return [];
+            }
+
+            return [sprintf("MSG %s 1 2\r\nok\r\n", explode(' ', $head)[2])];
+        };
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport));
+        $connection->connect()->await();
+        $this->setPrivate($connection, 'muxSidsToRelease', [7, 8]);
+
+        self::assertSame('ok', $connection->request('svc.echo', 'x', 1_000)->await()->payload);
+
+        $installs = array_values(array_filter($transport->writes, static fn(string $bytes): bool => str_contains($bytes, 'SUB _INBOX.')));
+        self::assertCount(1, $installs);
+        self::assertMatchesRegularExpression('/^UNSUB 7\r\nUNSUB 8\r\nSUB _INBOX\.[0-9a-f]+\.\* 1\r\nPING\r\n$/', $installs[0]);
+        self::assertSame([], $this->getPrivate($connection, 'muxSidsToRelease'));
+        $connection->disconnect()->await();
+    }
+
+    /**
+     * The drain releases the reply inbox together with every UNSUB still owed for muxes dropped before, in one write,
+     * once its delivery phase is over (#213): with sid 7 owed and the inbox on sid 1, the drain writes "UNSUB 7" and
+     * "UNSUB 1" together, and owes nothing afterwards.
+     */
+    public function testTheDrainReleasesTheReplyInboxWithEveryOwedUnsubscribeInOneWrite(): void
+    {
+        $transport = new FakeTransport([
+            'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","max_payload":1048576,"headers":true}' . "\r\n",
+            "PONG\r\n",
+        ]);
+        $transport->onWrite = static function (string $bytes): array {
+            $frames = [];
+            $head = strtok($bytes, "\r\n");
+            if ($head !== false && str_starts_with($head, 'PUB svc.echo ')) {
+                $frames[] = sprintf("MSG %s 1 2\r\nok\r\n", explode(' ', $head)[2]);
+            }
+
+            if (str_contains($bytes, "PING\r\n")) {
+                $frames[] = "PONG\r\n";
+            }
+
+            return $frames;
+        };
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport));
+        $connection->connect()->await();
+        self::assertSame('ok', $connection->request('svc.echo', 'x', 1_000)->await()->payload);
+        $this->setPrivate($connection, 'muxSidsToRelease', [7]);
+
+        $connection->drain()->await();
+
+        self::assertContains("UNSUB 7\r\nUNSUB 1\r\n", $transport->writes);
+        self::assertSame([], $this->getPrivate($connection, 'muxSidsToRelease'));
+    }
+
     private function invokePrivate(object $object, string $method, mixed ...$args): mixed
     {
         $ref = new \ReflectionMethod($object, $method);
 
         return $ref->invoke($object, ...$args);
+    }
+
+    /**
+     * Queues a message through the real intake path, the way handleFrame() does, and returns what the
+     * intake reported (a drop policy's report).
+     *
+     * @return list<array{\Throwable, string}>
+     */
+    private function enqueueMessage(NatsConnection $connection, int $sid, NatsMessage $message): array
+    {
+        $reports = [];
+        (new \ReflectionMethod($connection, 'enqueueMessage'))->invokeArgs($connection, [$sid, $message, &$reports]);
+
+        return $reports;
     }
 
     private function setPrivate(object $object, string $property, mixed $value): void

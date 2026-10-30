@@ -131,7 +131,8 @@ final class NatsClientIntegrationTest extends TestCase
         } catch (CancelledException) {
             // Fewer than three within the window; the assertion below reports it.
         }
-        self::assertSame(['m1', 'm2', 'm3'], $received);
+        $afterTheThirdDelivery = $received;
+        self::assertSame(['m1', 'm2', 'm3'], $afterTheThirdDelivery);
 
         // Bounded settle window: m4 must never arrive - the server stopped at the max and the client
         // dropped the subscription after the third delivery.
@@ -1514,6 +1515,13 @@ final class NatsClientIntegrationTest extends TestCase
         } catch (TimeoutException $e) {
             self::assertStringContainsString('Request timed out', $e->getMessage());
             self::assertStringContainsString($subject, $e->getMessage());
+
+            // The responder must have received the request, but on a slow runner it may get it only after
+            // the requester's 300 ms are up: wait for it rather than expect it within them.
+            $deadline = $this->monotonic() + 5.0;
+            while ($received === 0 && $this->monotonic() < $deadline) {
+                delay(0.01);
+            }
         } finally {
             $serverPumpCancellation->cancel();
             $serverPump->await();
@@ -1996,5 +2004,189 @@ final class NatsClientIntegrationTest extends TestCase
             $client->disconnect()->await();
             $server->disconnect()->await();
         }
+    }
+
+    /**
+     * The client's live socket dies while nothing reads it and the server refuses new connections for
+     * a while, so the heartbeat starts the recovery in its own fiber. A request awaited meanwhile - the
+     * way a synchronous caller would - waits for the reconnect, driving it, and succeeds once the server
+     * is back instead of failing with "Connection is not open" (waitForReconnect).
+     */
+    public function testRequestIssuedDuringReconnectWaitsForItAgainstALiveServer(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $echo = 'it.wait.echo.' . bin2hex(random_bytes(4));
+        $server = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $server->connect()->await();
+        [$client, $transport] = $this->connectRecoverableClient();
+
+        try {
+            $server->subscribe($echo, static function (NatsMessage $message): void {
+                $message->respond('pong:' . $message->payload)->await();
+            })->await();
+            $server->flush()->await();
+            [$pump, $pumpFuture] = $this->pumpInBackground($server);
+
+            try {
+                $this->takeServerDownFor($client, $transport);
+                $this->bringServerBackAfter($transport, 0.3);
+
+                $start = $this->monotonic();
+                $reply = $client->request($echo, 'during-reconnect', 5000)->await();
+
+                self::assertSame('pong:during-reconnect', $reply->payload);
+                self::assertGreaterThanOrEqual(0.25, $this->monotonic() - $start, 'the request waited for the reconnect');
+                self::assertSame(ConnectionState::Open, $client->state());
+                self::assertSame(1, $client->statistics()->reconnects);
+                self::assertGreaterThan(0, $transport->refusedDials, 'the server really was unreachable for a while');
+            } finally {
+                $pump->cancel();
+                $pumpFuture->await();
+            }
+        } finally {
+            $client->disconnect()->await();
+            $server->disconnect()->await();
+        }
+    }
+
+    /**
+     * A subscription created while the client is reconnecting waits for the reconnect, then registers
+     * on the new connection: a message published afterwards by another client is delivered.
+     */
+    public function testSubscribeIssuedDuringReconnectDeliversAfterItAgainstALiveServer(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.wait.sub.' . bin2hex(random_bytes(4));
+        [$client, $transport] = $this->connectRecoverableClient();
+        $publisher = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $publisher->connect()->await();
+
+        try {
+            $this->takeServerDownFor($client, $transport);
+            $this->bringServerBackAfter($transport, 0.3);
+
+            $received = [];
+            $client->subscribe($subject, static function (NatsMessage $message) use (&$received): void {
+                $received[] = $message->payload;
+            })->await();
+            self::assertSame(ConnectionState::Open, $client->state(), 'subscribe() waited for the reconnect');
+
+            // Round-trip a PING so the SUB is registered server-side before the other client publishes.
+            $client->flush()->await();
+            $publisher->publish($subject, 'after-reconnect')->await();
+
+            $cancellation = new TimeoutCancellation(5.0);
+            try {
+                while ($received === []) {
+                    $client->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+                // Window elapsed; the assertion below reports it.
+            }
+
+            self::assertSame(['after-reconnect'], $received);
+        } finally {
+            $publisher->disconnect()->await();
+            $client->disconnect()->await();
+        }
+    }
+
+    /**
+     * drain() issued while the client is reconnecting waits for the reconnect, which flushes the
+     * publishes buffered during the outage, then drains and closes: another client receives every one
+     * of them - the lossless close even across an outage.
+     */
+    public function testDrainDuringReconnectDeliversBufferedPublishesAgainstALiveServer(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        $subject = 'it.wait.drain.' . bin2hex(random_bytes(4));
+        $subscriber = new NatsClient(new NatsOptions(servers: [$this->integrationServerUrl()]));
+        $subscriber->connect()->await();
+        $received = [];
+        $subscriber->subscribe($subject, static function (NatsMessage $message) use (&$received): void {
+            $received[] = $message->payload;
+        })->await();
+        $subscriber->flush()->await();
+        [$client, $transport] = $this->connectRecoverableClient();
+
+        try {
+            $this->takeServerDownFor($client, $transport);
+            $client->publish($subject, 'during-outage-1')->await();
+            $client->publish($subject, 'during-outage-2')->await();
+            $this->bringServerBackAfter($transport, 0.3);
+
+            $client->drain()->await();
+
+            self::assertSame(ConnectionState::Closed, $client->state());
+            self::assertSame(1, $client->statistics()->reconnects);
+
+            $cancellation = new TimeoutCancellation(5.0);
+            try {
+                while (count($received) < 2) {
+                    $subscriber->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+                // Window elapsed; the assertion below reports it.
+            }
+
+            self::assertSame(['during-outage-1', 'during-outage-2'], $received);
+        } finally {
+            $subscriber->disconnect()->await();
+        }
+    }
+
+    /**
+     * With waitForReconnect disabled the same outage fails a request at once, the behaviour before the
+     * option existed.
+     */
+    public function testRequestDuringReconnectFailsFastAgainstALiveServerWhenWaitingIsDisabled(): void
+    {
+        $this->requireIntegrationEnabled();
+
+        [$client, $transport] = $this->connectRecoverableClient(waitForReconnect: false);
+
+        try {
+            $this->takeServerDownFor($client, $transport);
+
+            $start = $this->monotonic();
+            try {
+                $client->request('it.wait.none.' . bin2hex(random_bytes(4)), 'x', 5000)->await();
+                self::fail('Expected the request to fail at once while reconnecting.');
+            } catch (ConnectionException $e) {
+                self::assertSame('Connection is not open', $e->getMessage());
+            }
+
+            // A request that waited would wait out its 5 s timeout, since dials stay refused until the end
+            // of the test, and fail with a TimeoutException instead. The bound leaves a slow runner room.
+            self::assertLessThan(2.0, $this->monotonic() - $start);
+        } finally {
+            $transport->acceptDials();
+            $client->disconnect()->await();
+        }
+    }
+
+    /**
+     * Keeps a client reading in a background fiber until the returned cancellation is requested.
+     *
+     * @return array{DeferredCancellation, \Amp\Future<null>}
+     */
+    private function pumpInBackground(NatsClient $client): array
+    {
+        $pump = new DeferredCancellation();
+        $future = async(static function () use ($client, $pump): void {
+            $cancellation = $pump->getCancellation();
+            try {
+                while (!$cancellation->isRequested()) {
+                    $client->processIncoming($cancellation)->await();
+                }
+            } catch (CancelledException) {
+                // Stopped.
+            }
+        });
+
+        return [$pump, $future];
     }
 }

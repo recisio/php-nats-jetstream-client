@@ -17,6 +17,7 @@ use IDCT\NATS\Exception\AuthenticationException;
 use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FlakyTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use IDCT\NATS\Transport\TransportClosedException;
 use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
@@ -25,6 +26,15 @@ use function Amp\async;
 
 final class NatsConnection_3MutationTest extends TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     private const INFO = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
 
     /**
@@ -91,13 +101,14 @@ final class NatsConnection_3MutationTest extends TestCase
         // a pre-seeded fixed-subject HMSG, which would route to the random mux base and be dropped.
         $this->echoHeaderReply($transport, 'svc.scan', $status);
 
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $connection->connect()->await();
 
         // kills PregMatchRemoveCaret @ 982: real treats this as a normal reply (collected),
         // the mutant treats it as a no-responders sentinel (empty result).
-        // No maxResponses/stall: the loop collects the one reply then runs to the (small) total deadline.
-        $replies = $connection->requestMany('svc.scan', 'q', null, null, 200)->await();
+        // No maxResponses/stall: the loop collects the one reply then runs to the total deadline, 1.2 s: long
+        // enough that a slow runner pausing for 0.8 s before the first read still reads the reply before it.
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 1_200)->await();
         self::assertCount(1, $replies);
         self::assertSame('', $replies[0]->payload);
     }
@@ -117,7 +128,7 @@ final class NatsConnection_3MutationTest extends TestCase
         // so it is really classified as no-responders (not merely dropped) - preserving the positive pin.
         $this->echoHeaderReply($transport, 'svc.scan', $status);
 
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $connection->connect()->await();
 
         $replies = $connection->requestMany('svc.scan', 'q', null, null, 200)->await();
@@ -132,10 +143,10 @@ final class NatsConnection_3MutationTest extends TestCase
     {
         $transport = new FakeTransport([self::INFO, "PONG\r\n"]);
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(servers: ['nats://s3cr3t-token@127.0.0.1:4222']),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         $connect = $transport->writes[0];
@@ -156,10 +167,10 @@ final class NatsConnection_3MutationTest extends TestCase
         $transport = new FakeTransport([self::INFO, "PONG\r\n"]);
         $transport->canUpgrade = false; // upgradeTls() leaves tlsActive false
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(servers: ['nats://127.0.0.1:4222'], tlsRequired: true, reconnectEnabled: false),
             $transport,
-        );
+        ));
 
         // kills Concat + both ConcatOperandRemoval @ 1077: the exact full message (both halves, in order)
         // distinguishes the real concat from a reordered or truncated one.
@@ -191,7 +202,7 @@ final class NatsConnection_3MutationTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 servers: ['nats://127.0.0.1:4222'],
                 reconnectEnabled: true,
@@ -201,7 +212,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 0,
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         // First connection advertised a peer: it is seeded.
@@ -233,15 +244,16 @@ final class NatsConnection_3MutationTest extends TestCase
         // #118 mux: the single reply is echoed on the request's captured reply-to (mux sid 1).
         $this->echoReply($transport, 'svc.scan', 'A');
 
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $connection->connect()->await();
 
-        // No maxResponses, no stall: the loop ends on the total deadline. Each idle slice read is
+        // No maxResponses, no stall: the loop ends on the total deadline, 1.2 s, long enough that a slow runner
+        // pausing for 0.8 s before the first read still reads the reply before it. Each idle slice read is
         // cancelled, hitting the catch with $cancellation === null.
         // kills NotIdentical / LogicalAnd / LogicalAndAllSubExprNegation / LogicalAndNegation @ 947:
         //  - && -> ||, or any negation that makes the branch fire (or dereference null), would throw
         //    instead of returning the one collected message.
-        $replies = $connection->requestMany('svc.scan', 'q', null, null, 40)->await();
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 1_200)->await();
 
         self::assertCount(1, $replies);
         self::assertSame('A', $replies[0]->payload);
@@ -263,7 +275,7 @@ final class NatsConnection_3MutationTest extends TestCase
         // #118 mux: the single reply is echoed on the request's captured reply-to (mux sid 1).
         $this->echoReply($transport, 'svc.scan', 'A');
 
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $connection->connect()->await();
 
         $deferredCancellation = new DeferredCancellation(); // present but never cancelled
@@ -271,8 +283,10 @@ final class NatsConnection_3MutationTest extends TestCase
         // kills LogicalAndSingleSubExprNegation @ 947: real ($cancellation->isRequested() === false) ->
         // continue; the mutant (`&& !isRequested()`) would treat the slice timeout as an external
         // cancellation and rethrow, dropping the collected message.
+        // A 1.2 s total deadline, long enough that a slow runner pausing for 0.8 s before the first read still
+        // reads the reply before it.
         $replies = $connection
-            ->requestMany('svc.scan', 'q', null, null, 40, null, $deferredCancellation->getCancellation())
+            ->requestMany('svc.scan', 'q', null, null, 1_200, null, $deferredCancellation->getCancellation())
             ->await();
 
         self::assertCount(1, $replies);
@@ -294,7 +308,7 @@ final class NatsConnection_3MutationTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 servers: ['nats://127.0.0.1:4222'],
                 reconnectEnabled: false,
@@ -304,7 +318,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 reconnectJitterMs: 0,
             ),
             $transport,
-        );
+        ));
 
         try {
             $connection->connect()->await();
@@ -335,7 +349,7 @@ final class NatsConnection_3MutationTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 servers: ['nats://127.0.0.1:4222'],
                 reconnectEnabled: false,
@@ -345,7 +359,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 reconnectJitterMs: 0,
             ),
             $transport,
-        );
+        ));
 
         // kills CatchBlockRemoval @ 1201: real rethrows AuthenticationException (fail fast); the mutant
         // (no auth catch) swallows it via the generic catch and keeps retrying -> ConnectionException.
@@ -367,7 +381,7 @@ final class NatsConnection_3MutationTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 servers: ['nats://127.0.0.1:4222'],
                 reconnectEnabled: false,
@@ -380,7 +394,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 },
             ),
             $transport,
-        );
+        ));
 
         $connection->connect()->await();
 
@@ -404,7 +418,7 @@ final class NatsConnection_3MutationTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: false,
                 pingIntervalSeconds: 0,
@@ -413,7 +427,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 },
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         // EOF triggers recovery; reconnectEnabled=false -> Closed event then 'Reconnect is disabled'
@@ -445,7 +459,7 @@ final class NatsConnection_3MutationTest extends TestCase
             readFailures: 0,
         );
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 3,
@@ -457,7 +471,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 },
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         (new \ReflectionProperty(NatsConnection::class, 'closing'))->setValue($connection, true);
@@ -480,7 +494,7 @@ final class NatsConnection_3MutationTest extends TestCase
     public function testRecoverConnectionEarlyReturnSkipsPendingDrain(): void
     {
         $transport = new FakeTransport([self::INFO, "PONG\r\n"]);
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport));
         $connection->connect()->await();
 
         $delivered = [];
@@ -517,7 +531,7 @@ final class NatsConnection_3MutationTest extends TestCase
     public function testRecoverConnectionAwaitsInProgressReconnect(): void
     {
         $transport = new FakeTransport([self::INFO, "PONG\r\n"]);
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport));
         $connection->connect()->await();
 
         $deferred = new DeferredFuture();
@@ -567,12 +581,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -589,11 +603,11 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 2,
@@ -602,7 +616,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 0,
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         // Drive the read loop: it hits the read failure, recovers (all attempts fail), goes Closed.
@@ -655,12 +669,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -684,7 +698,7 @@ final class NatsConnection_3MutationTest extends TestCase
             }
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 3,
@@ -693,7 +707,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 0,
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         $closesBefore = $transport->closeCalls;
@@ -741,12 +755,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -762,7 +776,7 @@ final class NatsConnection_3MutationTest extends TestCase
             }
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 servers: ['nats://127.0.0.1:4222'],
                 reconnectEnabled: false,
@@ -773,7 +787,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 0,
             ),
             $transport,
-        );
+        ));
 
         $connection->connect()->await();
 
@@ -813,12 +827,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -835,11 +849,11 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 1,
@@ -848,7 +862,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 30, // arm a (slow, never-firing) ping timer on the initial connect
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         $pingProp = new \ReflectionProperty(NatsConnection::class, 'pingTimerId');
@@ -897,12 +911,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -919,13 +933,13 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public const INFO_LINE = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 0,
@@ -934,7 +948,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 0,
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         try {
@@ -978,12 +992,12 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function upgradeTls(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function write(string $bytes): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public function readLine(?Cancellation $cancellation = null): Future
@@ -1000,13 +1014,13 @@ final class NatsConnection_3MutationTest extends TestCase
 
             public function close(): Future
             {
-                return async(static fn(): mixed => null);
+                return async(static fn(): null => null);
             }
 
             public const INFO_LINE = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
         };
 
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 1,
@@ -1015,7 +1029,7 @@ final class NatsConnection_3MutationTest extends TestCase
                 pingIntervalSeconds: 0,
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         try {

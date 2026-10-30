@@ -7,10 +7,12 @@ namespace IDCT\NATS\Tests\Unit;
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsMessage;
+use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Exception\JetStreamException;
 use IDCT\NATS\JetStream\Consumers\PullConsumerIterator;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 use IDCT\NATS\Tests\Support\PullServerTrait;
 use PHPUnit\Framework\TestCase;
 
@@ -24,11 +26,20 @@ use PHPUnit\Framework\TestCase;
  */
 final class PullConsumerIteratorTest extends TestCase
 {
+    use OwnsTestResources;
+
     use PullServerTrait;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
 
     public function testFluentBuilderSetsProperties(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $js = $client->jetStream();
 
         $iter = $js->pullConsumer('ORDERS', 'PROC')
@@ -44,7 +55,7 @@ final class PullConsumerIteratorTest extends TestCase
 
     public function testDefaultValues(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         // #120: the default batch is now 100 (was 1) - a single pull fetches a full batch and the engine
@@ -56,7 +67,7 @@ final class PullConsumerIteratorTest extends TestCase
 
     public function testSetBatchingRejectsZero(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -65,7 +76,7 @@ final class PullConsumerIteratorTest extends TestCase
 
     public function testSetExpiresMsRejectsZero(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -74,7 +85,7 @@ final class PullConsumerIteratorTest extends TestCase
 
     public function testSetIterationsRejectsZero(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -83,7 +94,7 @@ final class PullConsumerIteratorTest extends TestCase
 
     public function testSetIterationsAcceptsNull(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C')
             ->setIterations(5)
             ->setIterations(null);
@@ -93,7 +104,7 @@ final class PullConsumerIteratorTest extends TestCase
 
     public function testSetDepthRejectsZero(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -435,7 +446,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetGroupRejectsInvalidName(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -447,7 +458,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetGroupAcceptsNull(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C')->setGroup('g1')->setGroup(null);
 
         // No exception; setGroup returns $this so we can still call methods.
@@ -459,7 +470,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetPriorityRejectsNegative(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -471,7 +482,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetPriorityRejectsAboveNine(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $this->expectException(JetStreamException::class);
@@ -483,7 +494,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetPriorityAcceptsValidValues(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $result = $iter->setPriority(5);
@@ -499,7 +510,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetPriorityAcceptsNull(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C')->setPriority(3)->setPriority(null);
         self::assertInstanceOf(PullConsumerIterator::class, $iter);
     }
@@ -509,7 +520,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetMinPendingStoresValue(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $result = $iter->setMinPending(42);
@@ -521,7 +532,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetMinPendingAcceptsNull(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C')->setMinPending(10)->setMinPending(null);
         self::assertInstanceOf(PullConsumerIterator::class, $iter);
     }
@@ -531,7 +542,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetMinAckPendingStoresValue(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $result = $iter->setMinAckPending(7);
@@ -543,7 +554,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetMinAckPendingAcceptsNull(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C')->setMinAckPending(5)->setMinAckPending(null);
         self::assertInstanceOf(PullConsumerIterator::class, $iter);
     }
@@ -553,7 +564,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetMaxBytesStoresValue(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $result = $iter->setMaxBytes(1024);
@@ -565,7 +576,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetMaxBytesAcceptsNull(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C')->setMaxBytes(512)->setMaxBytes(null);
         self::assertInstanceOf(PullConsumerIterator::class, $iter);
     }
@@ -575,7 +586,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetNoWaitStoresValue(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $result = $iter->setNoWait(true);
@@ -590,7 +601,7 @@ final class PullConsumerIteratorTest extends TestCase
      */
     public function testSetNoWaitDefaultsToTrue(): void
     {
-        $client = new NatsClient(new NatsOptions(), new FakeTransport());
+        $client = $this->own(new NatsClient(new NatsOptions(), new FakeTransport()));
         $iter = $client->jetStream()->pullConsumer('S', 'C');
 
         $result = $iter->setNoWait();
@@ -671,12 +682,13 @@ final class PullConsumerIteratorTest extends TestCase
         self::assertStringNotContainsString('"no_wait"', $firstPull);
     }
 
-    // ── stop() / drain() / resetLifecycle() re-use tests ─────────────────────────────────────────
+    // ── stop() / drain() and the runs of a reused iterator ─────────────────────────────────────────
 
     /**
-     * Covers resetLifecycle(): a reused iterator whose stop() was called in the first run must
-     * NOT be pre-stopped during a second handle() call. Each handle() run opens its own pull inbox
-     * subscription, so the pull server relearns the sid per run and routes replies by reply-token.
+     * Each run has its own stop/drain flags (#189): a reused iterator whose stop() was called in the
+     * first run must NOT be pre-stopped during a second handle() call. Each handle() run opens its own
+     * pull inbox subscription, so the pull server relearns the sid per run and routes replies by
+     * reply-token.
      */
     public function testReusedIteratorAfterStopStartsFresh(): void
     {
@@ -703,7 +715,7 @@ final class PullConsumerIteratorTest extends TestCase
         })->await();
         self::assertSame(['m1'], $firstRun);
 
-        // Second run: stop flag must be cleared by resetLifecycle(). 1 message + 404 stop.
+        // Second run: its own stop flag, never set. 1 message + 404 stop.
         $secondRun = [];
         $iter->handle(function (NatsMessage $msg) use (&$secondRun): void {
             $secondRun[] = $msg->payload;
@@ -712,8 +724,8 @@ final class PullConsumerIteratorTest extends TestCase
     }
 
     /**
-     * Covers resetLifecycle(): a reused iterator whose drain() was called in the first run must
-     * NOT be pre-drained during a second handle() call.
+     * Each run has its own stop/drain flags (#189): a reused iterator whose drain() was called in the
+     * first run must NOT be pre-drained during a second handle() call.
      */
     public function testReusedIteratorAfterDrainStartsFresh(): void
     {
@@ -740,12 +752,110 @@ final class PullConsumerIteratorTest extends TestCase
         })->await();
         self::assertSame(['run1'], $firstRun);
 
-        // Second run: drain flag must be reset; the iterator must poll again.
+        // Second run: its own drain flag, never set; the iterator must poll again.
         $secondRun = [];
         $iter->handle(function (NatsMessage $msg) use (&$secondRun): void {
             $secondRun[] = $msg->payload;
         })->await();
         self::assertSame(['run2'], $secondRun);
+    }
+
+    /**
+     * Guard, passes on 2.24.6 too: a stop() or drain() outside a run changes no later run (#189).
+     * Called before the first handle(), and again between two runs, both reach no run: each run that
+     * follows pulls and delivers as usual.
+     */
+    public function testAStopAndADrainOutsideARunChangeNoLaterRun(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $this->pullServer($transport, 'S', 'C', [
+            [['msg' => 'run1']],
+            [['msg' => 'run2']],
+        ]);
+        $js = $this->context($transport);
+
+        $iter = $js->pullConsumer('S', 'C')->setBatching(1)->setExpiresMs(200)->setIterations(1);
+        $handled = [];
+        $handler = static function (NatsMessage $msg) use (&$handled): void {
+            $handled[] = $msg->payload;
+        };
+
+        $iter->stop();
+        $iter->drain();
+        self::assertSame(1, $iter->handle($handler)->await(), 'a stop() and a drain() before the first run reach no run');
+
+        $iter->stop();
+        $iter->drain();
+        self::assertSame(1, $iter->handle($handler)->await(), 'nor do a stop() and a drain() between two runs');
+
+        self::assertSame(['run1', 'run2'], $handled);
+        self::assertCount(2, $this->pullWrites($transport));
+    }
+
+    /**
+     * A run leaves the iterator's active runs, the ones stop() and drain() signal, once its future
+     * resolves, however it ends (#189): registered as handle() returns, it is gone once the future
+     * has resolved with its count, failed with the handler's exception, or failed with the
+     * connection's error before its first pull; a handle() that throws on an invalid name registers
+     * nothing. A run left registered would keep its state, its handler included, referenced for as
+     * long as the iterator lives.
+     */
+    public function testARunLeavesTheIteratorsActiveRunsOnceItsFutureResolvesHoweverItEnds(): void
+    {
+        $transport = new FakeTransport($this->infoAndPong());
+        $this->pullServer($transport, 'S', 'C', [
+            [['msg' => 'm1']],
+            [['msg' => 'm2']],
+        ]);
+        $client = $this->own(new NatsClient(new NatsOptions(), $transport));
+        $client->connect()->await();
+        $js = $client->jetStream();
+
+        $invalid = new PullConsumerIterator($js, 'bad.stream', 'C');
+        try {
+            $invalid->handle(static function (): void {});
+            self::fail('handle() accepted an invalid stream name');
+        } catch (JetStreamException $e) {
+            self::assertStringContainsString('Invalid stream name "bad.stream"', $e->getMessage());
+        }
+        self::assertSame(0, self::activeRuns($invalid), 'a run the engine refused is never registered');
+
+        $iter = $js->pullConsumer('S', 'C')->setBatching(1)->setExpiresMs(200)->setIterations(1);
+        $completed = $iter->handle(static function (): void {});
+        self::assertSame(1, self::activeRuns($iter), 'registered as handle() returns');
+        self::assertSame(1, $completed->await());
+        self::assertSame(0, self::activeRuns($iter), 'gone once the future resolved with its count');
+
+        $failing = $iter->handle(static function (): void {
+            throw new \RuntimeException('the handler failed');
+        });
+        try {
+            $failing->await();
+            self::fail('the handler\'s exception did not fail the run');
+        } catch (\RuntimeException $e) {
+            self::assertSame('the handler failed', $e->getMessage());
+        }
+        self::assertSame(0, self::activeRuns($iter), 'gone once the future failed with the handler\'s exception');
+
+        $client->disconnect()->await();
+        $refused = $iter->handle(static function (): void {});
+        self::assertSame(1, self::activeRuns($iter));
+        try {
+            $refused->await();
+            self::fail('a run on a closed connection did not fail');
+        } catch (ConnectionException $e) {
+            self::assertSame('Connection is not open', $e->getMessage());
+        }
+        self::assertSame(0, self::activeRuns($iter), 'gone once the future failed before the run pulled');
+    }
+
+    /** How many runs the iterator holds as active, the ones its stop() and drain() signal (#189). */
+    private static function activeRuns(PullConsumerIterator $iterator): int
+    {
+        $runs = (new \ReflectionProperty(PullConsumerIterator::class, 'activeRuns'))->getValue($iterator);
+        self::assertIsArray($runs);
+
+        return count($runs);
     }
 
     /**

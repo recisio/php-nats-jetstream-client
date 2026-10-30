@@ -12,8 +12,10 @@ use IDCT\NATS\Exception\JetStreamException;
  *
  * It decouples the engine (which lives on JetStreamContext, the only holder of the client handle)
  * from the mutable iterator: everything the engine needs to shape pull requests and drive the
- * lifecycle is frozen here at handle() time, EXCEPT the pin id and the stop/drain flags, which stay
- * live through {@see PullPipelineControl} so a handler can mutate them mid-run (#120).
+ * lifecycle is frozen here at handle() time, EXCEPT the pin id and the run's own stop/drain flags
+ * (#189), which stay live through {@see PullPipelineControl} so a handler can mutate them mid-run
+ * (#120), along with the run's stop/drain wake-ups that end the engine's waits (#181). A later
+ * handle() snapshots its own configuration and leaves an earlier run's alone.
  *
  * @internal Not part of the supported public API.
  */
@@ -25,7 +27,7 @@ final class PullPipelineConfig
      * @param int $depth Max concurrent in-flight pulls in infinite, ungrouped, non-idle steady state.
      * @param int|null $iterations Finite pull count (null = infinite). A finite run is strictly serial.
      * @param bool $noWait Whether pulls carry no_wait (immediate empties need idle-backoff pacing, #153).
-     * @param bool $grouped Whether an ADR-42 priority group is set (gates pin capture + serial-until-pinned).
+     * @param bool $grouped Whether an ADR-42 priority group is set (gates pin capture on receipt + serial pin acquisition, #208).
      * @param array<string,mixed> $pullFields Snapshot of the iterator's buildPull() output; the engine
      *        overrides the dynamic `id` (pin) field per issue from the live {@see PullPipelineControl}.
      * @param int|null $idleHeartbeatNs Requested ADR-13 idle heartbeat (ns), or null. A route-wide miss

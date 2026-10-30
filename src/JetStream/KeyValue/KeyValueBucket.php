@@ -536,7 +536,7 @@ final class KeyValueBucket
      * (`Nats-Marker-Reason`: MaxAge/Remove/Purge, ADR-43) carries no `KV-Operation`; it is treated as
      * a PURGE tombstone so a reader/watcher sees a deletion rather than a live empty value.
      *
-     * @param array<string,string> $headers
+     * @param array<int|string,string> $headers A map from {@see NatsHeaders::fromWireBlock()}.
      */
     private function operationFromHeaders(array $headers): string
     {
@@ -821,6 +821,11 @@ final class KeyValueBucket
                     $caughtUp = true;
                 }
             })->await();
+            // Exempt from the pending bound, like the fetch and Direct Get inboxes (#118/#120 twin): one read
+            // chunk can carry more records than the bound, and a record dropped here left the listing short -
+            // returned as if complete under DropOldest - or failed it under Error. The replay is bounded by
+            // num_pending, and each read's records are delivered before the next read.
+            $this->client->markSubscriptionUnbounded($sid);
 
             // Progress-based bound identical to history(): reset the stall clock on each replayed record,
             // so a healthy-but-slow large bucket that keeps making progress is never failed - only a
@@ -842,7 +847,7 @@ final class KeyValueBucket
 
                     $waitCancellation = new TimeoutCancellation(($progressIntervalNs - ($nowNs - $lastActivityNs)) / 1e9);
                     try {
-                        $read = $this->client->readIncoming($waitCancellation)->await();
+                        $read = $this->client->readIncomingForOperation($waitCancellation, $sid)->await();
                         if (!$read->consumedBytes) {
                             // Only a genuinely idle read yields 1 ms; a read that consumed bytes but
                             // completed no key-record frame yet (a chunked replay) loops immediately,
@@ -931,6 +936,9 @@ final class KeyValueBucket
                     $caughtUp = true;
                 }
             })->await();
+            // Exempt from the pending bound, as in keys(): a history larger than the bound in one read chunk
+            // would otherwise come back short, or fail.
+            $this->client->markSubscriptionUnbounded($sid);
 
             // Progress-based bound: reset the stall clock on each replayed revision, so a healthy-but-
             // slow large history that keeps making progress is never failed - only a server that makes
@@ -956,7 +964,7 @@ final class KeyValueBucket
 
                     $waitCancellation = new TimeoutCancellation(($progressIntervalNs - ($nowNs - $lastActivityNs)) / 1e9);
                     try {
-                        $read = $this->client->readIncoming($waitCancellation)->await();
+                        $read = $this->client->readIncomingForOperation($waitCancellation, $sid)->await();
                         if (!$read->consumedBytes) {
                             // Only a genuinely idle read yields 1 ms; a read that consumed bytes but
                             // completed no revision frame yet (a chunked history payload) loops

@@ -11,6 +11,9 @@ use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Core\SubscriptionQueue;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\LoopTickCountingTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
+use IDCT\NATS\Transport\TransportInterface;
 use PHPUnit\Framework\TestCase;
 
 use function Amp\async;
@@ -24,6 +27,15 @@ use function Amp\Future\await;
  */
 final class ReadPathProgressTest extends TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     /** @return list<string> */
     private function infoAndPong(): array
     {
@@ -33,9 +45,9 @@ final class ReadPathProgressTest extends TestCase
         ];
     }
 
-    private function makeConnectedClient(FakeTransport $transport): NatsClient
+    private function makeConnectedClient(TransportInterface $transport): NatsClient
     {
-        $client = new NatsClient(new NatsOptions(), $transport);
+        $client = $this->own(new NatsClient(new NatsOptions(), $transport));
         $client->connect()->await();
 
         return $client;
@@ -137,18 +149,21 @@ final class ReadPathProgressTest extends TestCase
 
     /**
      * End-to-end proof through a real wait loop ({@see SubscriptionQueue::fetchAll()}): a message split
-     * into many partial chunks is collected inside a short window because partial-progress reads loop
-     * immediately instead of idle-sleeping.
+     * into many partial chunks is collected with no pause between its reads, because partial-progress
+     * reads loop immediately instead of idle-sleeping.
      *
-     * FALSIFIABILITY: the frame is split into 317 one-byte chunks. On the pre-#119 path each of the ~316
-     * partial reads sleeps 1 ms (~316 ms of accrued idle sleeps), far past the 60 ms window - the wait
-     * cancellation fires mid-frame and fetchAll() returns []. With the fix the whole frame is drained
-     * near-instantly and the message is collected, so assertCount(1) holds only after the fix.
+     * FALSIFIABILITY: the frame is split into 317 one-byte chunks, and the transport counts the chunks
+     * read after the event loop ran a tick since the chunk before ({@see LoopTickCountingTransport}). On
+     * the pre-#119 path each of the ~316 partial reads sleeps 1 ms, and the loop ticks during each sleep:
+     * every chunk after the first counts. With the fix the reads follow each other without a tick and the
+     * count is 0. The count does not depend on how fast the machine is, and the 5 s window gives the fixed
+     * path all the time it needs to collect the message (#176).
      */
     public function testChunkedMessageIsCollectedWithoutIdleSleepPerChunk(): void
     {
         $transport = new FakeTransport($this->infoAndPong());
-        $client = $this->makeConnectedClient($transport);
+        $counting = new LoopTickCountingTransport($transport);
+        $client = $this->makeConnectedClient($counting);
 
         $queue = $client->subscribeQueue('big')->await();
         self::assertInstanceOf(SubscriptionQueue::class, $queue);
@@ -160,17 +175,21 @@ final class ReadPathProgressTest extends TestCase
             $transport->pushReadChunk($byte);
         }
 
-        $queue->setTimeout(0.06); // 60 ms window; ~316 ms of 1 ms sleeps on the old path exceeds it
+        $queue->setTimeout(5.0);
+        $counting->reset(); // count the frame's chunks only, not the handshake's
 
-        $startedNs = hrtime(true);
         // Outer bound: fail loudly rather than hang if a regression parks the caller.
-        $messages = await([async(static fn (): array => $queue->fetchAll(1))], new TimeoutCancellation(5.0))[0];
-        $elapsedSeconds = (hrtime(true) - $startedNs) / 1e9;
+        $messages = await([async(static fn(): array => $queue->fetchAll(1))], new TimeoutCancellation(10.0))[0];
 
-        self::assertCount(1, $messages, 'the chunked message must be collected without idle-sleeping per partial chunk');
+        self::assertCount(1, $messages, 'the chunked message must be collected');
         self::assertSame($payload, $messages[0]->payload);
-        // It completed near-instantly: not the ~316 ms an old-path per-chunk 1 ms sleep would take.
-        self::assertLessThan(0.06, $elapsedSeconds, 'collection must finish inside the window, not accrue a 1 ms sleep per chunk');
+        self::assertSame(count($bytes), $counting->chunksRead, 'every byte of the frame must be read as its own chunk');
+        // Only a loop that sleeps 1 ms per partial read lets the event loop tick between two of them.
+        self::assertSame(
+            0,
+            $counting->chunksReadAfterALoopTick,
+            'collection must read the next chunk at once, not accrue a 1 ms sleep per chunk',
+        );
     }
 
     /**
@@ -186,7 +205,7 @@ final class ReadPathProgressTest extends TestCase
         $queue->setTimeout(0.05);
 
         $startedNs = hrtime(true);
-        $message = await([async(static fn (): ?NatsMessage => $queue->next())], new TimeoutCancellation(5.0))[0];
+        $message = await([async(static fn(): ?NatsMessage => $queue->next())], new TimeoutCancellation(5.0))[0];
         $elapsedSeconds = (hrtime(true) - $startedNs) / 1e9;
 
         self::assertNull($message, 'an idle wait returns null at its deadline');

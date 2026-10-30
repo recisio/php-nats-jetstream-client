@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace IDCT\NATS\Tests\Unit\Mutation;
 
+use Amp\CancelledException;
+use Amp\DeferredCancellation;
 use Amp\DeferredFuture;
 use Amp\TimeoutCancellation;
 use IDCT\NATS\Connection\Enum\ConnectionEvent;
@@ -15,6 +17,8 @@ use IDCT\NATS\Exception\ConnectionException;
 use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Tests\Support\FakeTransport;
 use IDCT\NATS\Tests\Support\FlakyTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
+use IDCT\NATS\Tests\Support\ReconnectingTransport;
 use SplQueue;
 
 use function Amp\async;
@@ -27,6 +31,15 @@ use function Amp\delay;
  */
 final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     private const HANDSHAKE_INFO
         = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
 
@@ -38,7 +51,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
     private function openConnection(array $reads = [], ?NatsOptions $options = null, ?FakeTransport &$transport = null): NatsConnection
     {
         $transport = new FakeTransport(array_merge([self::HANDSHAKE_INFO, "PONG\r\n"], $reads));
-        $connection = new NatsConnection($options ?? new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection = $this->own(new NatsConnection($options ?? new NatsOptions(pingIntervalSeconds: 0), $transport));
         $connection->connect()->await();
 
         return $connection;
@@ -57,7 +70,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
     // kills NullSafePropertyCall @ line 189
     public function testMaxPayloadReturnsNullBeforeServerInfoIsKnown(): void
     {
-        $connection = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $connection = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
 
         // serverInfo is null before connect; the null-safe operator must yield null, not dereference it.
         self::assertNull($connection->maxPayload());
@@ -68,7 +81,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
     {
         // rtt() on a connection that was never opened must throw (line 215's throw is masked by flush()'s
         // own identical guard, so this pins the observable contract rather than that specific mutant).
-        $closed = new NatsConnection(new NatsOptions(), new FakeTransport());
+        $closed = $this->own(new NatsConnection(new NatsOptions(), new FakeTransport()));
         $threw = false;
         try {
             $closed->rtt()->await();
@@ -95,12 +108,12 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
             self::HANDSHAKE_INFO,
             "-ERR Authorization Violation\r\n",
         ]);
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(connectionListener: static function (ConnectionEvent $e) use (&$events): void {
                 $events[] = $e;
             }),
             $transport,
-        );
+        ));
 
         try {
             $connection->connect()->await();
@@ -119,14 +132,14 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         // maxReconnectAttempts == 0 is the boundary: `> 0` is false, so the connect must NOT enter
         // recovery and must surface the failure. `>= 0` (mutant) would swallow it via recoverConnection().
         $transport = new FlakyTransport([[self::HANDSHAKE_INFO, "PONG\r\n"]], connectFailures: 1);
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 0,
                 retryOnFailedInitialConnect: false,
             ),
             $transport,
-        );
+        ));
 
         $this->expectException(ConnectionException::class);
         $connection->connect()->await();
@@ -138,7 +151,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         // retryOnFailedInitialConnect path, boundary maxReconnectAttempts == 0: `> 0` false -> throw,
         // never invoking the retry loop. `>= 0` (mutant) would retry (and succeed) instead.
         $transport = new FlakyTransport([[self::HANDSHAKE_INFO, "PONG\r\n"]], connectFailures: 1);
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: false,
                 retryOnFailedInitialConnect: true,
@@ -147,7 +160,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
                 reconnectJitterMs: 0,
             ),
             $transport,
-        );
+        ));
 
         $this->expectException(ConnectionException::class);
         try {
@@ -164,7 +177,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         $events = [];
         // A bad control line during handshake -> ConnectionException with reconnect disabled.
         $transport = new FakeTransport([self::HANDSHAKE_INFO, "UNKNOWN\r\n"]);
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: false,
                 retryOnFailedInitialConnect: false,
@@ -173,7 +186,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
                 },
             ),
             $transport,
-        );
+        ));
 
         try {
             $connection->connect()->await();
@@ -229,10 +242,20 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
     // kills MethodCallRemoval @ line 367 (drain delivers remaining buffered messages)
     public function testDrainDeliversBufferedMessagesNotDrainedByTheFlushLoop(): void
     {
-        // After the flush loop ends (here by deadline, having drained nothing), drain() must still hand
-        // any buffered message to its callback. Without that final drainAllPending() it is silently lost.
-        $transport = new FakeTransport([self::HANDSHAKE_INFO, "PONG\r\n"], blockWhenEmpty: true);
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1), $transport);
+        // A drain whose budget runs out before the reconnect it waited for is done winds down without a connection,
+        // and its final backlog pass must still hand a buffered message to its callback. Without that pass it is
+        // silently lost. (A drain with a connection hands nothing over past its deadline since #213: the deadline
+        // seals its delivery phase, and the message is reported as discarded instead.)
+        $transport = new ReconnectingTransport();
+        $connection = $this->own(new NatsConnection(new NatsOptions(
+            connectTimeoutMs: 500,
+            requestTimeoutMs: 100,
+            maxReconnectAttempts: 1_000,
+            reconnectDelayMs: 5,
+            reconnectMaxDelayMs: 20,
+            reconnectJitterMs: 0,
+            pingIntervalSeconds: 0,
+        ), $transport));
         $connection->connect()->await();
 
         $delivered = [];
@@ -240,7 +263,8 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
             $delivered[] = $m->payload;
         })->await();
 
-        // Buffer a message that the flush loop will never read (the socket blocks until the deadline).
+        // Buffer a message that no read delivers before the drain does: the connection drops right after, its
+        // reconnect's dials refused, so it stays Connecting through the drain's whole budget.
         $queue = new SplQueue();
         $queue->enqueue(new NatsMessage('updates', $sid, null, 'buffered'));
         $pending = self::getProp($connection, 'pendingMessages');
@@ -250,10 +274,18 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         $dirty = self::getProp($connection, 'pendingDirty');
         $dirty[$sid] = true;
         self::setProp($connection, 'pendingDirty', $dirty);
+        $transport->refuseDials();
+        $transport->dropConnection();
+        $reader = async(static fn(): int => $connection->readIncomingForOperation()->await()->frames);
+        $reader->ignore();
+        while ($connection->state() !== ConnectionState::Connecting) {
+            delay(0.001);
+        }
 
-        $connection->drain()->await();
+        $connection->drain()->await(new TimeoutCancellation(5));
 
         self::assertSame(['buffered'], $delivered);
+        self::assertSame(ConnectionState::Closed, $connection->state());
     }
 
     // kills MethodCallRemoval @ line 402 (record outbound on buffered publish) and
@@ -362,7 +394,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         // The flush() in drainSubscription times out (socket blocks), so the only delivery path for a
         // buffered message is the explicit drainPendingForSid() at line 567.
         $transport = new FakeTransport([self::HANDSHAKE_INFO, "PONG\r\n"], blockWhenEmpty: true);
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1), $transport));
         $connection->connect()->await();
 
         $delivered = [];
@@ -388,7 +420,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         // method falls through and writes a PING (then processIncoming's guard throws the same type),
         // so we pin "no bytes written on the not-open path" to distinguish the two.
         $closedTransport = new FakeTransport();
-        $closed = new NatsConnection(new NatsOptions(), $closedTransport);
+        $closed = $this->own(new NatsConnection(new NatsOptions(), $closedTransport));
         $threw = false;
         try {
             $closed->flush()->await();
@@ -410,7 +442,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
     public function testFlushTimeoutLeavesItsPongSlotQueuedForItsLatePong(): void
     {
         $transport = new FakeTransport([self::HANDSHAKE_INFO, "PONG\r\n"], blockWhenEmpty: true);
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0, requestTimeoutMs: 1), $transport));
         $connection->connect()->await();
 
         try {
@@ -439,7 +471,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         self::assertSame([], self::getProp($connection, 'pongWaiters'));
     }
 
-    // kills ReturnRemoval @ line 629 (concurrent-read guard returns 0 without reading)
+    // kills ReturnRemoval @ the concurrent-read guard (it waits for the other read, then returns 0 without reading)
     public function testProcessIncomingReturnsZeroWhenReadAlreadyInProgress(): void
     {
         $connection = $this->openConnection(["MSG updates 1 5\r\nhello\r\n"], transport: $transport);
@@ -451,13 +483,18 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
         // Pretend a concurrent read owns the socket.
         self::setProp($connection, 'readInProgress', true);
 
-        // Guard must short-circuit to 0 WITHOUT consuming the queued frame.
-        $frames = $connection->processIncoming()->await();
-        self::assertSame(0, $frames);
+        // The guard waits for that read instead of starting a second one...
+        $frames = async(static fn(): int => $connection->processIncoming()->await());
+        delay(0.01);
+        self::assertFalse($frames->isComplete());
+
+        // ...and once it ends, returns 0 WITHOUT consuming the queued frame.
+        self::setProp($connection, 'readInProgress', false);
+        (new \ReflectionMethod($connection, 'signalReadSlotFree'))->invoke($connection);
+        self::assertSame(0, $frames->await());
         self::assertSame([], $received);
 
-        // Release the guard: the still-queued frame is now read and dispatched.
-        self::setProp($connection, 'readInProgress', false);
+        // The still-queued frame is read and dispatched by the next call.
         self::assertSame(1, $connection->processIncoming()->await());
         self::assertSame(['hello'], $received);
     }
@@ -466,11 +503,14 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
     public function testProcessIncomingMarksReadInProgressToExcludeConcurrentRead(): void
     {
         $transport = new FakeTransport([self::HANDSHAKE_INFO, "PONG\r\n"], blockWhenEmpty: true);
-        $connection = new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(pingIntervalSeconds: 0), $transport));
         $connection->connect()->await();
 
-        // Read #1 enters the blocking socket read; it must set readInProgress = true.
-        $read1 = async(static fn(): int => $connection->processIncoming()->await());
+        // Read #1 enters the blocking socket read; it must set readInProgress = true. The gate keeps it
+        // parked on a live timer, as a socket watcher would, until the test lets it go: a read parked on
+        // nothing at all would be collected with its fiber once the event loop runs out of work.
+        $gate = new DeferredCancellation();
+        $read1 = async(static fn(): int => $connection->processIncoming($gate->getCancellation())->await());
         // Cooperatively let read1 enter readLine() and latch the in-progress flag.
         while ($transport->startedReads < 1) {
             delay(0.001);
@@ -478,12 +518,23 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
 
         self::assertTrue(self::getProp($connection, 'readInProgress'), 'first read must latch readInProgress');
 
-        // Read #2 must be excluded by the guard and return 0 immediately. If 632 set the flag false,
-        // read2 would instead enter a second blocking read and its bounded cancellation would throw.
-        $read2 = $connection->processIncoming(new TimeoutCancellation(1.0))->await();
-        self::assertSame(0, $read2);
+        // Read #2 must be excluded by the guard: it waits for read #1 until its own cancellation instead of
+        // starting a second socket read, which it would if 632 set the flag false.
+        try {
+            $connection->processIncoming(new TimeoutCancellation(0.05))->await();
+            self::fail('expected read #2 to wait for read #1 until its cancellation');
+        } catch (CancelledException) {
+            // Expected: read #1 still owns the socket.
+        }
 
-        $read1->ignore();
+        self::assertSame(1, $transport->startedReads, 'read #2 did not start a second socket read');
+
+        $gate->cancel();
+        try {
+            $read1->await();
+        } catch (CancelledException) {
+            // Read #1 let go.
+        }
     }
 
     // kills MethodCallRemoval @ line 643 (read failure surfaces to the error listener)
@@ -498,7 +549,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
             connectFailures: 0,
             readFailures: 0,
         );
-        $connection = new NatsConnection(
+        $connection = $this->own(new NatsConnection(
             new NatsOptions(
                 reconnectEnabled: true,
                 maxReconnectAttempts: 3,
@@ -510,7 +561,7 @@ final class NatsConnection_1MutationTest extends \PHPUnit\Framework\TestCase
                 },
             ),
             $transport,
-        );
+        ));
         $connection->connect()->await();
 
         // The read throws -> recovery runs, but the error must first be surfaced to the listener.

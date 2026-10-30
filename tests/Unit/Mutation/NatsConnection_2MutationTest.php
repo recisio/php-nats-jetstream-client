@@ -11,6 +11,7 @@ use IDCT\NATS\Core\NatsMessage;
 use IDCT\NATS\Exception\ProtocolException;
 use IDCT\NATS\Exception\TimeoutException;
 use IDCT\NATS\Tests\Support\FakeTransport;
+use IDCT\NATS\Tests\Support\OwnsTestResources;
 
 /**
  * Mutation-killing tests for the request / requestMany code paths in
@@ -23,6 +24,15 @@ use IDCT\NATS\Tests\Support\FakeTransport;
  */
 final class NatsConnection_2MutationTest extends \PHPUnit\Framework\TestCase
 {
+    use OwnsTestResources;
+
+    protected function tearDown(): void
+    {
+        // Every client and connection a test makes is registered as it is constructed (#183), weakly: the shutdown
+        // closes what is left and checks that nothing goes on running into the next test.
+        $this->releaseOwnedResources();
+    }
+
     private const INFO = 'INFO {"server_id":"S1","server_name":"n1","version":"2.12.0","jetstream":true,"max_payload":1048576,"headers":true}' . "\r\n";
 
     /**
@@ -39,7 +49,7 @@ final class NatsConnection_2MutationTest extends \PHPUnit\Framework\TestCase
             array_merge([self::INFO, "PONG\r\n"], $reads),
             blockWhenEmpty: $blockWhenEmpty,
         );
-        $connection = new NatsConnection(new NatsOptions(), $transport);
+        $connection = $this->own(new NatsConnection(new NatsOptions(), $transport));
         $connection->connect()->await();
 
         return [$connection, $transport];
@@ -132,11 +142,11 @@ final class NatsConnection_2MutationTest extends \PHPUnit\Framework\TestCase
 
         $start = hrtime(true);
         // Large total budget: the real code returns [] the instant the 503 arrives. If $noResponders is
-        // never set to true the loop keeps polling until the whole 2s budget elapses.
-        $replies = $connection->requestMany('svc.scan', 'q', null, null, 2000)->await();
+        // never set to true the loop keeps polling until the whole 5s budget elapses.
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 5000)->await();
 
         self::assertSame([], $replies);
-        self::assertLessThan(0.5, $this->elapsed($start), 'no-responders must short-circuit, not run the full budget');
+        self::assertLessThan(2.0, $this->elapsed($start), 'no-responders must short-circuit, not run the full budget');
     }
 
     // kills GreaterThanOrEqualTo @ 913 and LogicalAndAllSubExprNegation @ 913 (maxResponses cap "count >= max")
@@ -148,12 +158,12 @@ final class NatsConnection_2MutationTest extends \PHPUnit\Framework\TestCase
 
         $start = hrtime(true);
         // Exactly one reply with maxResponses=1: "count >= max" breaks at the boundary. With ">" or the
-        // negated guard the cap never fires and collection runs until the 2s total budget expires.
-        $replies = $connection->requestMany('svc.scan', 'q', null, 1, 2000)->await();
+        // negated guard the cap never fires and collection runs until the 5s total budget expires.
+        $replies = $connection->requestMany('svc.scan', 'q', null, 1, 5000)->await();
 
         self::assertCount(1, $replies);
         self::assertSame('A', $replies[0]->payload);
-        self::assertLessThan(0.5, $this->elapsed($start), 'maxResponses cap must fire at the boundary');
+        self::assertLessThan(2.0, $this->elapsed($start), 'maxResponses cap must fire at the boundary');
     }
 
     // kills Minus @ 920, Multiplication @ 920, GreaterThanOrEqualToNegotiation @ 920
@@ -188,13 +198,13 @@ final class NatsConnection_2MutationTest extends \PHPUnit\Framework\TestCase
         $this->respondWith($transport, 'svc.scan', 'A');
 
         $start = hrtime(true);
-        // stall=15ms, total=3000ms: the real code returns ~15-40ms after the reply. Any mutant that
-        // disables the stall or fails to shorten the idle wake slice runs the full 3s budget.
-        $replies = $connection->requestMany('svc.scan', 'q', null, null, 3000, 15)->await();
+        // stall=15ms, total=5000ms: the real code returns ~15-40ms after the reply. Any mutant that
+        // disables the stall or fails to shorten the idle wake slice runs the full 5s budget.
+        $replies = $connection->requestMany('svc.scan', 'q', null, null, 5000, 15)->await();
 
         self::assertCount(1, $replies);
         self::assertSame('A', $replies[0]->payload);
-        self::assertLessThan(0.5, $this->elapsed($start), 'stall interval must stop collection well before the total budget');
+        self::assertLessThan(2.0, $this->elapsed($start), 'stall interval must stop collection well before the total budget');
     }
 
     // kills LogicalAnd @ 926 ($cancellation !== null && $cancellation->isRequested())

@@ -7,10 +7,13 @@ namespace IDCT\NATS\Core;
 use Amp\Cancellation;
 use Amp\Future;
 use IDCT\NATS\Connection\ConnectionStats;
+use IDCT\NATS\Connection\DrainParticipant;
 use IDCT\NATS\Connection\Enum\ConnectionState;
+use IDCT\NATS\Connection\Enum\InboxRetirement;
 use IDCT\NATS\Connection\IncomingChunkResult;
 use IDCT\NATS\Connection\NatsConnection;
 use IDCT\NATS\Connection\NatsOptions;
+use IDCT\NATS\Exception\SlowConsumerException;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\Protocol\ServerInfo;
 use IDCT\NATS\Services\Service;
@@ -60,7 +63,14 @@ final class NatsClient
      *
      * Locally queued, undelivered messages are discarded without being delivered - nats.go
      * Close() parity (#134). Use {@see drain()} for the lossless path: it delivers the buffered
-     * backlog before closing.
+     * backlog before closing. What a JetStream pull consumer run's pulls hold is discarded the same
+     * way, wherever the run is (#207): a run this ends hands its handler none of it, and a run handing
+     * a pull over, in its handler for one of the pull's messages say, stops before the next message,
+     * the rest left unacked for the server to deliver again after the ack wait (lost on a consumer
+     * without acks). The run's handle() then fails, with "Connection is not open" or the error of the
+     * read or write that met the close, except where the client's drain() had already asked the run
+     * for its hand-over, or where a finite run has no pull left to issue: it then resolves with its
+     * count.
      *
      * @return Future<void>
      */
@@ -71,6 +81,34 @@ final class NatsClient
 
     /**
      * Gracefully drains all subscriptions, flushes pending messages, and closes.
+     *
+     * While a reconnect is in flight it first waits for it within its budget
+     * ({@see NatsOptions::$waitForReconnect}), so the publishes buffered during the outage are flushed;
+     * if the budget runs out first it still closes. When it cannot wait it closes the connection and
+     * throws. Every drain ends with one {@see \IDCT\NATS\Connection\Enum\ConnectionEvent::Closed}
+     * event, and connect() is refused until it is over.
+     *
+     * A JetStream pull consumer run's pulls are drained too (#207): once the drain's flush is done, each
+     * run hands its handler what its pulls hold, in order, while the connection is Draining, so that the
+     * acks the handler publishes (ack(), nak(), term(), inProgress()) still go out, and the drain waits
+     * for that, the handler included, within the same budget. The handler's requests work too (#213): the
+     * drain keeps the shared reply inbox subscribed while it delivers, sets it up for the client's first
+     * request, and releases it once its delivery phase is over, so an ackSync() is confirmed and a
+     * JetStream publish or a Key/Value read or write gets its reply. A request still waiting when that phase
+     * ends - everything delivered, or the budget run out - fails with "Connection is not open"; another
+     * fiber's request is taken as well, but does not extend the phase. Subscriptions, and the operations that
+     * need one of their own (fetchBatch(), batched Direct Get, Key/Value keys() and history()), stay refused.
+     * From the deadline on no handler gets another message. The run then ends, and its handle() resolves
+     * with its count, as after the iterator's
+     * {@see \IDCT\NATS\JetStream\Consumers\PullConsumerIterator::drain()}. When the budget runs out
+     * first, the drain closes the connection, and what the run still holds is discarded from the "drain
+     * deadline exceeded" report on, which counts it, as a disconnect() discards it. A drain without a
+     * connection to drain (its budget ran out before the reconnect it waited for was done, or that
+     * reconnect gave up) asks no run: the run's read fails, and what it holds is discarded. Do not await
+     * it from code the run calls (its handler, its onError, the error listener while the run reports to
+     * it): the drain waits for the very run that waits for it, to the end of its budget, as it does from
+     * a subscription's handler that awaits it. Stop or drain the iterator there and drain the client
+     * once handle() has resolved, or call this from another fiber, or without awaiting it.
      *
      * @return Future<void>
      */
@@ -87,6 +125,55 @@ final class NatsClient
     public function publish(string $subject, string $payload, ?string $replyTo = null): Future
     {
         return $this->connection->publish($subject, $payload, $replyTo);
+    }
+
+    /**
+     * Publishes as {@see publish()} does, with $beforeWrite called before each attempt to send the frame, a retry after
+     * a failed write's recovery included; what it throws fails the publish, nothing written. For the pull consumer
+     * engine, whose pull must not go out on a reply inbox the server rejected (#206). See
+     * {@see NatsConnection::publishGuarded()}.
+     *
+     * @internal Low-level mechanism for the JetStream pull inbox; not part of the supported API.
+     *
+     * @param \Closure():void $beforeWrite Must not suspend.
+     * @return Future<void>
+     */
+    public function publishGuarded(string $subject, string $payload, string $replyTo, \Closure $beforeWrite): Future
+    {
+        return $this->connection->publishGuarded($subject, $payload, $replyTo, $beforeWrite);
+    }
+
+    /**
+     * @internal Budgeted batch publication; callbacks must not suspend.
+     * @param \Closure():?string $payload
+     * @param \Closure():void $beforeWrite
+     * @return Future<void>
+     */
+    public function publishWithin(string $subject, \Closure $payload, string $replyTo, int $replySid, Cancellation $budget, \Closure $beforeWrite): Future
+    {
+        return $this->connection->publishWithin($subject, $payload, $replyTo, $replySid, $budget, $beforeWrite);
+    }
+
+    /**
+     * @internal Releases a temporary inbox without allowing its cleanup to overrun the operation.
+     * @return Future<void>
+     */
+    public function releaseSubscriptionWithin(int $sid, Cancellation $budget): Future
+    {
+        return $this->connection->releaseSubscriptionWithin($sid, $budget);
+    }
+
+    /**
+     * Closes a pull consumer run's inbox to new deliveries, routing what the server sent it before its UNSUB to the run
+     * first, within one request-timeout budget (#212). See {@see NatsConnection::retirePullInbox()}.
+     *
+     * @internal Low-level mechanism for the JetStream pull inbox; not part of the supported API.
+     *
+     * @return Future<InboxRetirement>
+     */
+    public function retirePullInbox(int $sid, Cancellation $stop, ?Cancellation $drainReady = null): Future
+    {
+        return $this->connection->retirePullInbox($sid, $stop, $drainReady);
     }
 
     /**
@@ -123,6 +210,9 @@ final class NatsClient
     /**
      * Registers a subscription handler and returns its SID.
      *
+     * While a reconnect is in flight it first waits for it within the request timeout
+     * ({@see NatsOptions::$waitForReconnect}).
+     *
      * @param callable(NatsMessage):void $handler
      * @return Future<int>
      */
@@ -132,10 +222,33 @@ final class NatsClient
     }
 
     /**
+     * Subscribes a reply inbox whose rejection by the connection's subscription limit must reach the operation
+     * waiting on it, whichever fiber's read meets the -ERR (#175): the JetStream pull fetch, pull pipeline and
+     * batched Direct Get inboxes. A PING is written behind the SUB and the inbox counts as held by the server once
+     * that PING's PONG, or a delivery on the inbox, arrives; a 'maximum subscriptions exceeded' -ERR read before
+     * that drops the subscription, writes its UNSUB and calls $onRejected with the -ERR text, as does a permissions
+     * violation naming the subject (which leaves the subscription for the caller to unsubscribe). Several inboxes
+     * unconfirmed at once are all treated as rejected by such an -ERR. A SUB whose write failed is replayed by the
+     * reconnect; when the new server rejects the replay, the subscribe itself fails with a ConnectionException
+     * naming the subject and the limit, $onRejected called first. See {@see NatsConnection::subscribeGuarded()}.
+     * An optional operation budget covers reconnect and SUB write backpressure instead of the global timeout.
+     *
+     * @internal Low-level mechanism for the JetStream reply inboxes; not part of the supported API.
+     *
+     * @param callable(NatsMessage):void $handler
+     * @param \Closure(string): void $onRejected Must not suspend: it runs inside the dispatch of the -ERR.
+     * @return Future<int>
+     */
+    public function subscribeGuarded(string $subject, callable $handler, \Closure $onRejected, ?Cancellation $budget = null): Future
+    {
+        return $this->connection->subscribeGuarded($subject, $handler, $onRejected, $budget);
+    }
+
+    /**
      * Exempts a subscription from the slow-consumer pending-queue bound (its replies are never
      * dropped). For the muxed request inbox (#118) and the pipelined pull inbox (#120), where a
      * dropped reply silently breaks a request/pull. Synchronous so it applies in the same tick the
-     * sid was returned by {@see subscribe()}.
+     * sid was returned by {@see subscribe()}. A sid no longer registered is left alone.
      *
      * @internal Low-level mechanism for the JetStream request/pull inboxes; not general API.
      */
@@ -154,6 +267,19 @@ final class NatsClient
     public function onSubscriptionRejected(int $sid, \Closure $handler): void
     {
         $this->connection->markSubscriptionRejectionHandler($sid, $handler);
+    }
+
+    /**
+     * Whether a server -ERR text is the one rejecting a SUB beyond the connection's subscription limit
+     * ('maximum subscriptions exceeded'), which names no subject, as the connection classifies it
+     * ({@see NatsConnection::isSubscriptionLimitError()}): for the rejection handler of {@see subscribeGuarded()},
+     * which is also called with a permissions violation naming the subject.
+     *
+     * @internal Low-level mechanism for the JetStream reply inboxes; not part of the supported API.
+     */
+    public function isSubscriptionLimitError(string $serverError): bool
+    {
+        return $this->connection->isSubscriptionLimitError($serverError);
     }
 
     /**
@@ -191,9 +317,16 @@ final class NatsClient
                 $this->options->slowConsumerPolicy,
             );
 
-            // Replay through enqueue() so the cap and slow-consumer policy apply as usual.
+            // Replay through enqueue() so the cap and slow-consumer policy apply as usual. A message that does
+            // not fit (SlowConsumerPolicy::Error) is counted and reported: the caller does not have the queue
+            // yet, so there is nobody to throw it to, and failing here would leave the subscription feeding a
+            // queue nobody holds.
             while (!$early->isEmpty()) {
-                $subscriptionQueue->enqueue($early->dequeue());
+                try {
+                    $subscriptionQueue->enqueue($early->dequeue());
+                } catch (SlowConsumerException $overflow) {
+                    $this->connection->emitError($overflow);
+                }
             }
 
             return $subscriptionQueue;
@@ -210,6 +343,68 @@ final class NatsClient
     public function isSubscriptionActive(int $sid): bool
     {
         return $this->connection->isSubscriptionActive($sid);
+    }
+
+    /**
+     * Whether the application has closed the connection, or is closing it: disconnect() or drain() was called since the
+     * last connect() ({@see NatsConnection::isCloseRequested()}). The pull consumer engine asks it whether an infinite
+     * run goes on past a frame that ended the connection (#210); whether what a run holds is discarded is
+     * {@see isDiscardingUndelivered()}'s to say (#207).
+     *
+     * @internal For the pull consumer engine (#197, #210); not part of the supported API.
+     */
+    public function isCloseRequested(): bool
+    {
+        return $this->connection->isCloseRequested();
+    }
+
+    /**
+     * Whether what the connection has received and not handed to a handler is a close's to discard: a disconnect()
+     * under way or done, or a drain() whose budget has run out (from its deadline report on) or that has none to
+     * drain, but not a drain() within its budget, which delivers it
+     * ({@see NatsConnection::isDiscardingUndelivered()}). The pull consumer engine asks it before each message it
+     * hands to the handler, wherever the run is (#207).
+     *
+     * @internal For the pull consumer engine (#207); not part of the supported API.
+     */
+    public function isDiscardingUndelivered(): bool
+    {
+        return $this->connection->isDiscardingUndelivered();
+    }
+
+    /**
+     * Registers what a drain() of this client waits for besides the connection's own backlog, and returns the id
+     * {@see removeDrainParticipant()} takes ({@see NatsConnection::addDrainParticipant()}): a pull consumer run, whose
+     * pulls a drain() asks it to hand over once its flush is done (#207).
+     *
+     * @internal For the pull consumer engine (#207); not part of the supported API.
+     */
+    public function addDrainParticipant(DrainParticipant $participant): int
+    {
+        return $this->connection->addDrainParticipant($participant);
+    }
+
+    /**
+     * Removes a participant {@see addDrainParticipant()} registered ({@see NatsConnection::removeDrainParticipant()}).
+     *
+     * @internal For the pull consumer engine (#207); not part of the supported API.
+     */
+    public function removeDrainParticipant(int $id): void
+    {
+        $this->connection->removeDrainParticipant($id);
+    }
+
+    /**
+     * Whether a failure that a read of this client threw came from a frame that ended the connection: a fatal -ERR,
+     * or a PONG the socket would not take, as the connection classifies it ({@see NatsConnection::endedTheConnection()}).
+     * The read recovered the connection before it threw (#171), so the failure says why the old connection ended, not
+     * that the connection is gone.
+     *
+     * @internal For the pull consumer engine (#210) and fetchBatch() (#196); not part of the supported API.
+     */
+    public function endedTheConnection(\Throwable $failure): bool
+    {
+        return $this->connection->endedTheConnection($failure);
     }
 
     /**
@@ -235,6 +430,11 @@ final class NatsClient
      * Drains a single subscription: stops new deliveries (UNSUB), flushes so in-flight messages are
      * dispatched to the handler, then removes the subscription. Mirrors per-subscription Drain().
      *
+     * One budget (~requestTimeoutMs) covers it all. While reconnecting it waits for the reconnect, like
+     * flush(), and then drains on the new connection; a reconnect never re-subscribes a subscription being
+     * drained. During a drain() the drain takes the subscription over. Failures, and messages it cannot
+     * deliver, are reported through the error listener.
+     *
      * @return Future<void>
      */
     public function drainSubscription(int $sid): Future
@@ -243,7 +443,16 @@ final class NatsClient
     }
 
     /**
-     * Processes a single incoming transport chunk and dispatches parsed frames.
+     * Processes a single incoming transport chunk and dispatches parsed frames. While a reconnect is in
+     * flight it first waits for it, bounded by the cancellation ({@see NatsOptions::$waitForReconnect}).
+     * When another fiber is reading the socket (a request waiting for its reply, the heartbeat), it waits
+     * for that read to finish, bounded by the cancellation, and returns 0: that read delivered what it read.
+     * Before it reads, or waits for another fiber's read, it continues the subscriptions whose delivery an
+     * earlier read stopped at a handler that threw, and throws the next such failure without reading (#186);
+     * the count is still of the frames it read. The cancellation bounds the read's waits, not that delivery: a
+     * read whose cancellation has already fired still makes it, then throws ({@see NatsConnection::readIncoming()}).
+     * A read already waiting when another fiber's read stops a subscription that way wakes and returns 0, so that
+     * your next read continues it (#199): keep reading after both an exception and a zero-frame result.
      *
      * @param Cancellation|null $cancellation Optional token that cancels the underlying socket read.
      * @return Future<int>
@@ -258,7 +467,9 @@ final class NatsClient
      * frame count and whether the read consumed bytes off the wire. A wait loop uses the latter to
      * skip its 1 ms idle sleep on partial-frame progress (a large payload arriving in socket-sized
      * chunks) and yield only on a genuinely idle read (#119). {@see processIncoming()} is the
-     * frame-count-only view of the same cycle.
+     * frame-count-only view of the same cycle, and waits for another fiber's read, and continues the
+     * subscriptions an earlier read stopped at a handler that threw, the same way, waking with no frames and no
+     * bytes consumed when another fiber's read stops one while it waits (#199).
      *
      * @param Cancellation|null $cancellation Optional token that cancels the underlying socket read.
      * @return Future<IncomingChunkResult>
@@ -266,6 +477,39 @@ final class NatsClient
     public function readIncoming(?Cancellation $cancellation = null): Future
     {
         return $this->connection->readIncoming($cancellation);
+    }
+
+    /**
+     * {@see readIncoming()} for an operation that reads while it waits for a result of its own: under
+     * SlowConsumerPolicy::Error, another subscription's overflow is reported instead of failing it
+     * ({@see NatsOptions::$slowConsumerErrorsFailOperations}), and so is a handler of another subscription
+     * that throws ({@see NatsOptions::$handlerErrorsFailOperations}).
+     *
+     * @internal For the library's own operations (JetStream, Key/Value, polling queues, services); not
+     *           part of the supported API.
+     *
+     * @param int|null $ownSid The operation's own subscription, whose overflow or failing handler still fails
+     *        the operation, and whose next delivery, by whichever fiber's read, ends the read without reading
+     *        ({@see NatsConnection::readIncomingForOperation()}): call this right after looking for the result.
+     *        What an earlier read has already queued for it, behind a delivery held up in a lower sid's handler
+     *        that awaits, the handler the operation itself runs in included, is delivered first, and the read
+     *        returns without reading (#179); the other subscriptions' queued messages stay in order for that
+     *        delivery.
+     * @param bool $alwaysReport Report every overflow and every handler that throws while the read delivers,
+     *        whatever the options say, the messages behind it still delivered, and an -ERR the server keeps the
+     *        connection open for: for a read whose caller would only swallow them, such as a serving loop. Such
+     *        a read also delivers what an earlier or a concurrent read has queued and not reached - the later sids
+     *        of a delivery held up in another fiber's handler, the rest of a subscription whose handler threw in
+     *        the application's read - unless a disconnect() is closing the connection, which discards it. A read
+     *        that receives anything during the close still delivers it with what it received, as any read does. A
+     *        failure that ends the connection is still thrown, once the connection has recovered.
+     * @param bool $reportServerErrors Report only nonfatal server -ERR failures, preserving handler/overflow
+     *        policies and the operation's delivery/recovery rules: for a pull consumer pump.
+     * @return Future<IncomingChunkResult>
+     */
+    public function readIncomingForOperation(?Cancellation $cancellation = null, ?int $ownSid = null, bool $alwaysReport = false, bool $reportServerErrors = false): Future
+    {
+        return $this->connection->readIncomingForOperation($cancellation, $ownSid, $alwaysReport, $reportServerErrors);
     }
 
     /**
@@ -282,13 +526,28 @@ final class NatsClient
     /**
      * Flushes outbound writes and waits for the server's PONG, confirming the server has processed
      * everything sent so far (e.g. a SUBSCRIBE before a dependent request). Bounded by the request
-     * timeout.
+     * timeout, one budget for the whole flush. While a reconnect is in flight it first waits for it
+     * within that budget ({@see NatsOptions::$waitForReconnect}).
      *
      * @return Future<void>
      */
     public function flush(): Future
     {
         return $this->connection->flush();
+    }
+
+    /**
+     * {@see flush()} that reports what its reads meet - a full subscription queue, a handler that throws, an
+     * -ERR the server keeps the connection open for - through the error listener and reads on to its PONG,
+     * instead of failing with it.
+     *
+     * @internal For the service framework's drain(); not part of the supported API.
+     *
+     * @return Future<void>
+     */
+    public function flushReportingFailures(): Future
+    {
+        return $this->connection->flushReportingFailures();
     }
 
     /**
@@ -300,7 +559,9 @@ final class NatsClient
     }
 
     /**
-     * Sends a request and resolves with the first reply message.
+     * Sends a request and resolves with the first reply message. One timeout bounds the whole request.
+     * While a reconnect is in flight it first waits for it within its timeout
+     * ({@see NatsOptions::$waitForReconnect}).
      *
      * @param Cancellation|null $cancellation Optional external cancellation token.
      * @return Future<NatsMessage>
@@ -315,7 +576,9 @@ final class NatsClient
     }
 
     /**
-     * Sends a request with headers and resolves with the first reply message.
+     * Sends a request with headers and resolves with the first reply message. One timeout bounds the
+     * whole request. While a reconnect is in flight it first waits for it within that timeout
+     * ({@see NatsOptions::$waitForReconnect}).
      *
      * @param array<string,string> $headers
      * @param Cancellation|null $cancellation Optional external cancellation token.
@@ -334,7 +597,9 @@ final class NatsClient
     /**
      * Sends one request and collects multiple replies (scatter-gather), terminating on the first of:
      * {@see $maxResponses} replies, a no-responders sentinel, the per-message {@see $stallMs} gap, or
-     * the total timeout. Mirrors nats.go `RequestMany` / nats.java `Connection.requestMany`.
+     * the total timeout. Mirrors nats.go `RequestMany` / nats.java `Connection.requestMany`. While a
+     * reconnect is in flight it first waits for it within the total timeout
+     * ({@see NatsOptions::$waitForReconnect}).
      *
      * @param array<string,string>|null $headers Optional request headers (null = plain request).
      * @param int|null $maxResponses Stop after this many replies (null = time-bounded only).
@@ -405,7 +670,9 @@ final class NatsClient
     }
 
     /**
-     * Measures the round-trip time to the server (PING/PONG), in seconds.
+     * Measures the round-trip time to the server (PING/PONG), in seconds. While a reconnect is in flight
+     * it first waits for it within the request timeout ({@see NatsOptions::$waitForReconnect}); the wait
+     * is not part of the measured time.
      *
      * @return Future<float>
      */
